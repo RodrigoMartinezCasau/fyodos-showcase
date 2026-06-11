@@ -1,0 +1,13 @@
+{
+  "name": "@fyodos/auto-manifest",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Auto-detection engine: static analysis (AST) + explicit LLM calls + pattern knowledge base → draft AppManifest with per-item provenance.",
+  "type": "commonjs",
+  "bin": {
+    "fyodos-auto-manifest": "src/index.js"
+  },
+  "scripts": {
+    "analyze": "node src/index.js"
+  }
+}

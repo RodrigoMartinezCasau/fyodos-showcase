@@ -1,0 +1,1051 @@
+/**
+ * useAgent — the agent orchestrator (hold-to-talk → STT → backend → action →
+ * TTS), ported from a production app and fully decoupled from it.
+ *
+ * Phase machine: idle / listening / thinking / speaking / confirming.
+ *
+ * Production hardening preserved verbatim:
+ * - THINKING WATCHDOG: 'thinking' can never outlive the watchdog. Root cause:
+ *   stopping the recording sets phase='thinking' BEFORE the transcript
+ *   exists; if the native STT emits neither 'end' nor 'error' (seen on iOS
+ *   after several recognition+TTS sessions), no path resets the phase and the
+ *   orb ignores taps forever. The watchdog guarantees recovery.
+ * - 'confirming' is a SEPARATE phase from 'thinking' on purpose: the watchdog
+ *   must not kill the voice-confirmation window, and the normal turn cycle
+ *   does not apply to it.
+ * - Double validation: the confirmation source of truth is the MANIFEST,
+ *   never the LLM's requireConfirmation flag.
+ * - Precheck (context + idempotency) BEFORE showing the confirmation modal.
+ * - The structured screen snapshot is captured AT INVOCATION: execute actions
+ *   operate on what the user was viewing when they spoke.
+ * - If an execute action turns out idempotent or fails, the LLM's reply
+ *   ("Done!") would be false → the handler's real message is spoken instead
+ *   with device TTS.
+ * - Negation wins ties in voice confirmation; ambiguous re-asks ONCE.
+ * - Tap decision (modal) always wins over the voice window.
+ */
+import { useCallback, useEffect, useRef, useState } from 'react';
+import {
+  classifyConfirmationReply,
+  combineContexts,
+  type AgentAction,
+  type AgentScreenContext,
+} from '@fyodos/core';
+import { isAgentApiError } from '../api/errors';
+import { buildManifestPayload } from '../api/backendClient';
+import type { AgentPhase } from '../config/types';
+import { useFyodosRuntime } from '../provider/FyodosProvider';
+import { useSpeechSession } from '../voice/useSpeechSession';
+
+declare const __DEV__: boolean;
+
+type PendingConfirmation = {
+  action: AgentAction;
+  context: AgentScreenContext;
+  userMessage: string;
+  routeAtInvocation: string | null;
+  latencyMs: number;
+  latencySttMs: number | null;
+  wasTruncated: boolean;
+  contextChars: number;
+  redactions: string[];
+  /** 2 for actions declaring doubleConfirmation; 1 otherwise. */
+  remainingConfirmations: number;
+};
+
+export interface UseAgentOptions {
+  enabled?: boolean;
+}
+
+/**
+ * How the pending consent flow was entered. When the user accepts consent the
+ * agent resumes the SAME flow: voice re-opens the microphone, text re-submits
+ * the typed message.
+ */
+type ConsentEntry = { mode: 'voice' } | { mode: 'text'; text: string };
+
+export interface UseAgentResult {
+  phase: AgentPhase;
+  isListening: boolean;
+  showWaveform: boolean;
+  showThinking: boolean;
+  isBusy: boolean;
+  volumeLevel: number;
+  toggleListening: () => Promise<void>;
+  /**
+   * Text entry point: runs a full agent turn from typed text instead of a
+   * voice transcription. From the moment there is a text to send, the flow is
+   * IDENTICAL to a voice turn (same consent, gate, context capture, backend
+   * call, action pipeline and confirmations). The reply is currently spoken;
+   * reply-output modes (text-only) arrive with the interaction-mode roadmap.
+   */
+  submitTextTurn: (text: string) => Promise<void>;
+  cancelAll: () => void;
+  consentModalVisible: boolean;
+  acceptConsent: () => Promise<void>;
+  declineConsent: () => void;
+  confirmationModalVisible: boolean;
+  confirmationMessage: string;
+  confirmPendingAction: () => Promise<void>;
+  cancelPendingAction: () => void;
+}
+
+function devLog(invocationId: number, step: string, extra?: string): void {
+  if (typeof __DEV__ === 'undefined' || !__DEV__) return;
+  // eslint-disable-next-line no-console
+  console.log(
+    `[fyodos][#${invocationId}][${new Date().toISOString().slice(11, 23)}] ${step}${extra ? ` — ${extra}` : ''}`,
+  );
+}
+
+export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResult {
+  const runtime = useFyodosRuntime();
+  const {
+    config,
+    messages,
+    ui,
+    lexicon,
+    sanitizer,
+    telemetry,
+    consent,
+    executor,
+    timings,
+    screenStore,
+    notifyError,
+    getTtsVoice,
+  } = runtime;
+  const { voice, backend, navigation, manifest } = {
+    voice: config.voice,
+    backend: config.backend,
+    navigation: config.navigation,
+    manifest: config.manifest,
+  };
+  const ttsLocale = config.ttsLocale ?? config.sttLocale;
+
+  const [phase, setPhase] = useState<AgentPhase>('idle');
+  const [consentModalVisible, setConsentModalVisible] = useState(false);
+  /**
+   * Sensitive 'execute' action awaiting modal confirmation. Resolved OUTSIDE
+   * the turn: the turn ends by speaking the confirmation question (so the
+   * thinking watchdog never kills it) and execution happens later, from the
+   * modal buttons or the voice window.
+   */
+  const [pendingConfirmationMessage, setPendingConfirmationMessage] = useState<string | null>(
+    null,
+  );
+  const pendingConfirmationRef = useRef<PendingConfirmation | null>(null);
+  /** Voice confirmation window active: transcripts answer it, never start turns. */
+  const confirmationVoiceActiveRef = useRef(false);
+  /** Already re-asked once after an ambiguous reply (max one retry). */
+  const confirmationReaskedRef = useRef(false);
+  const confirmationTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  /** Cross-refs breaking the handleTranscript ↔ confirmation-helpers cycle. */
+  const beginConfirmationWindowRef = useRef<(() => void) | null>(null);
+  const confirmPendingActionRef = useRef<(() => Promise<void>) | null>(null);
+  const cancelPendingActionRef = useRef<(() => void) | null>(null);
+  const pendingConfirmationMessageRef = useRef<string | null>(null);
+  useEffect(() => {
+    pendingConfirmationMessageRef.current = pendingConfirmationMessage;
+  }, [pendingConfirmationMessage]);
+
+  const phaseRef = useRef<AgentPhase>('idle');
+  const abortRef = useRef<AbortController | null>(null);
+  const awaitingTranscriptRef = useRef(false);
+  const pendingEndRef = useRef(false);
+  /** When the user stopped talking — to measure STT latency. */
+  const sttStopAtRef = useRef<number | null>(null);
+  const invocationIdRef = useRef(0);
+  /** Which flow (voice or typed text) the consent modal interrupted. */
+  const consentEntryRef = useRef<ConsentEntry | null>(null);
+
+  const onPhaseChangeRef = useRef(config.onPhaseChange);
+  onPhaseChangeRef.current = config.onPhaseChange;
+
+  const setPhaseSafe = useCallback((next: AgentPhase) => {
+    const previous = phaseRef.current;
+    if (previous === next) return;
+    phaseRef.current = next;
+    setPhase(next);
+    // App lifecycle hook (e.g. pause the app's own audio while the agent is
+    // active so it neither bleeds into the mic nor mixes with the TTS).
+    try {
+      onPhaseChangeRef.current?.(next, previous);
+    } catch {
+      /* app hook must never break the agent */
+    }
+  }, []);
+
+  const stopSpeech = useCallback(() => {
+    voice.stopPlayback();
+  }, [voice]);
+
+  const speakReply = useCallback(
+    async (reply: string, audioBase64?: string | null) => {
+      if (!reply.trim()) {
+        setPhaseSafe('idle');
+        return;
+      }
+      setPhaseSafe('speaking');
+      stopSpeech();
+
+      if (audioBase64?.length) {
+        try {
+          await voice.playAudioBase64Mp3(audioBase64);
+          if (phaseRef.current === 'speaking') setPhaseSafe('idle');
+          return;
+        } catch {
+          // Server TTS playback failed → degrade to device TTS below.
+        }
+      }
+      if (phaseRef.current !== 'speaking') return;
+      await voice.speakWithDeviceTts(reply, { locale: ttsLocale });
+      if (phaseRef.current === 'speaking') setPhaseSafe('idle');
+    },
+    [setPhaseSafe, stopSpeech, ttsLocale, voice],
+  );
+
+  const notifyApiError = useCallback(
+    (e: unknown): void => {
+      if (!isAgentApiError(e)) {
+        notifyError(ui.genericError);
+        return;
+      }
+      switch (e.code) {
+        case 'unauthorized':
+          notifyError(ui.sessionExpired);
+          return;
+        case 'quota_exceeded':
+          if (config.onQuotaExceeded) config.onQuotaExceeded();
+          else notifyError(ui.quotaExceeded);
+          return;
+        case 'rate_limited':
+          notifyError(ui.rateLimited);
+          return;
+        case 'network':
+          notifyError(ui.noConnection);
+          return;
+        case 'not_found':
+        case 'server_error':
+          notifyError(ui.serverUnavailable);
+          return;
+        default:
+          notifyError(ui.genericError);
+      }
+    },
+    [config, notifyError, ui],
+  );
+
+  const handleTranscript = useCallback(
+    async (text: string) => {
+      const turnId = invocationIdRef.current;
+      awaitingTranscriptRef.current = false;
+      const sttLatencyMs = sttStopAtRef.current != null ? Date.now() - sttStopAtRef.current : null;
+      sttStopAtRef.current = null;
+      const msg = text.trim();
+      devLog(turnId, 'transcript', `${msg.length} chars, stt=${sttLatencyMs ?? '?'}ms`);
+      if (!enabled) {
+        setPhaseSafe('idle');
+        return;
+      }
+      if (msg.length < timings.minTranscriptChars) {
+        setPhaseSafe('idle');
+        telemetry.logEvent({
+          eventType: 'agent_stt_empty',
+          userMessage: msg || undefined,
+          currentRoute: navigation.getCurrentRoute(),
+          latencySttMs: sttLatencyMs,
+        });
+        notifyError(ui.sttTooShort);
+        return;
+      }
+
+      setPhaseSafe('thinking');
+      abortRef.current?.abort();
+      const controller = new AbortController();
+      abortRef.current = controller;
+
+      const startedAt = Date.now();
+      const routeAtInvocation = navigation.getCurrentRoute();
+      devLog(turnId, 'request start', `route=${routeAtInvocation ?? '?'}`);
+      telemetry.logEvent({
+        eventType: 'agent_invoked',
+        userMessage: msg,
+        currentRoute: routeAtInvocation,
+      });
+
+      try {
+        // Structured snapshot at invocation time: 'execute' actions operate
+        // on what the user was viewing WHEN THEY SPOKE, even if they scroll
+        // while the backend responds.
+        const screenSnapshotAtInvocation = screenStore.getSnapshot();
+        // User context first (stable); screen context absorbs the cut.
+        // Sanitization applies ONLY to app-provided context — the user's own
+        // transcription is never redacted.
+        const rawContext = combineContexts(
+          config.getUserContextText?.() ?? null,
+          screenStore.getText(),
+          {
+            truncationSuffix: messages.contextTruncationSuffix,
+            maxChars: config.contextMaxChars,
+          },
+        );
+        const { sanitized, redactions } = rawContext
+          ? sanitizer(rawContext)
+          : { sanitized: null, redactions: [] as string[] };
+        const contextChars = sanitized?.length ?? 0;
+        if (redactions.length) devLog(turnId, 'context redacted', redactions.join(','));
+
+        const result = await backend.sendTurn(
+          {
+            message: msg,
+            language: config.locale,
+            voice: getTtsVoice(),
+            screenContext: sanitized ?? undefined,
+            currentRoute: routeAtInvocation ?? undefined,
+            ...buildManifestPayload(manifest),
+          },
+          { signal: controller.signal },
+        );
+        const { reply, audioBase64, action, wasTruncated } = result;
+        devLog(
+          turnId,
+          'response',
+          `${Date.now() - startedAt}ms, action=${action?.intent ?? action?.type ?? 'none'}, truncated=${wasTruncated}`,
+        );
+        if (controller.signal.aborted) return;
+        if (!reply.trim()) {
+          notifyError(ui.emptyReply);
+          setPhaseSafe('idle');
+          return;
+        }
+        config.onTurnCompleted?.();
+
+        const latencyMs = Date.now() - startedAt;
+        // What gets spoken at the end: by default the LLM reply with its TTS.
+        // If an execute action is idempotent or fails, the LLM reply would be
+        // false → speak the handler's real message with device TTS instead.
+        let spokenReply = reply;
+        let spokenAudio: string | null | undefined = audioBase64;
+
+        if (action && action.type === 'navigate') {
+          const actionStartedAt = Date.now();
+          const navResult = await executor.execute(action);
+          telemetry.logEvent({
+            eventType: navResult.success ? 'navigation_executed' : 'navigation_failed',
+            userMessage: msg,
+            intentDetected: action.intent ?? null,
+            actionExecuted: { type: action.type, intent: action.intent ?? null },
+            currentRoute: routeAtInvocation,
+            latencyMs,
+            latencySttMs: sttLatencyMs,
+            latencyActionMs: Date.now() - actionStartedAt,
+            wasTruncated,
+            contextChars,
+            redactionsApplied: redactions,
+          });
+        } else if (action && action.type === 'execute') {
+          const executeContext: AgentScreenContext =
+            screenSnapshotAtInvocation?.context ?? {};
+          // Confirmation source of truth: the MANIFEST, never the LLM
+          // (double validation — the backend instructs, the client enforces).
+          const manifestAction = manifest.actions.find((a) => a.intent === action.intent);
+          const needsConfirmation = manifestAction?.requireConfirmation === true;
+
+          if (needsConfirmation) {
+            // Precheck (context + idempotency) BEFORE bothering with the
+            // modal: asking to apply an already-applied state answers
+            // directly.
+            const pre = await executor.precheck(action, executeContext);
+            if (pre.kind === 'done') {
+              const preResult = pre.result;
+              telemetry.logEvent({
+                eventType: preResult.idempotent
+                  ? 'action_idempotent'
+                  : preResult.success
+                    ? 'action_executed'
+                    : 'action_failed',
+                userMessage: msg,
+                intentDetected: action.intent ?? null,
+                actionExecuted: {
+                  type: action.type,
+                  intent: action.intent ?? null,
+                  ...(preResult.error ? { error: preResult.error } : {}),
+                },
+                currentRoute: routeAtInvocation,
+                latencyMs,
+                latencySttMs: sttLatencyMs,
+                wasTruncated,
+                contextChars,
+                redactionsApplied: redactions,
+              });
+              if (preResult.message) {
+                spokenReply = preResult.message;
+                spokenAudio = null;
+              }
+            } else {
+              // Canonical question from the manifest; LLM's only as fallback.
+              const confirmationMessage =
+                manifestAction?.confirmationMessageTemplate ??
+                action.confirmationMessage ??
+                messages.confirmationFallbackQuestion;
+              pendingConfirmationRef.current = {
+                action,
+                context: executeContext,
+                userMessage: msg,
+                routeAtInvocation,
+                latencyMs,
+                latencySttMs: sttLatencyMs,
+                wasTruncated,
+                contextChars,
+                redactions,
+                remainingConfirmations: manifestAction?.doubleConfirmation === true ? 2 : 1,
+              };
+              confirmationReaskedRef.current = false;
+              setPendingConfirmationMessage(confirmationMessage);
+              devLog(turnId, 'confirmation modal shown', action.intent);
+              // The question is spoken (the prompt instructs the LLM that its
+              // reply BE the question; if it strayed, the modal still shows
+              // the canonical text).
+              spokenReply = reply;
+            }
+          } else {
+            const actionStartedAt = Date.now();
+            const execResult = await executor.execute(action, executeContext);
+            telemetry.logEvent({
+              eventType: execResult.idempotent
+                ? 'action_idempotent'
+                : execResult.success
+                  ? 'action_executed'
+                  : 'action_failed',
+              userMessage: msg,
+              intentDetected: action.intent ?? null,
+              actionExecuted: {
+                type: action.type,
+                intent: action.intent ?? null,
+                ...(execResult.error ? { error: execResult.error } : {}),
+              },
+              currentRoute: routeAtInvocation,
+              latencyMs,
+              latencySttMs: sttLatencyMs,
+              latencyActionMs: Date.now() - actionStartedAt,
+              wasTruncated,
+              contextChars,
+              redactionsApplied: redactions,
+            });
+            if ((execResult.idempotent || !execResult.success) && execResult.message) {
+              spokenReply = execResult.message;
+              spokenAudio = null;
+            } else if (
+              execResult.success &&
+              execResult.message &&
+              typeof execResult.data?.ttsVoiceOverride === 'string'
+            ) {
+              // Voice-change pattern: the feedback must sound WITH the new
+              // voice (the LLM audio carries the old one). Short synthesis;
+              // if it fails, speakReply degrades to device TTS.
+              spokenReply = execResult.message;
+              spokenAudio = await backend.previewTts(
+                execResult.data.ttsVoiceOverride,
+                execResult.message,
+              );
+            }
+          }
+        } else {
+          telemetry.logEvent({
+            eventType: 'question_only',
+            userMessage: msg,
+            currentRoute: routeAtInvocation,
+            latencyMs,
+            latencySttMs: sttLatencyMs,
+            wasTruncated,
+            contextChars,
+            redactionsApplied: redactions,
+          });
+        }
+
+        await speakReply(spokenReply, spokenAudio);
+        // Voice confirmation: after speaking the question, listen for the
+        // reply for a few seconds. The modal stays visible as the tactile
+        // fallback and its decision always wins.
+        if (pendingConfirmationRef.current) {
+          beginConfirmationWindowRef.current?.();
+        }
+      } catch (e) {
+        if (controller.signal.aborted) return;
+        devLog(turnId, 'ERROR', e instanceof Error ? e.message : String(e));
+        if (isAgentApiError(e) && e.code === 'timeout') {
+          telemetry.logEvent({
+            eventType: 'agent_timeout',
+            userMessage: msg,
+            currentRoute: routeAtInvocation,
+            latencyMs: Date.now() - startedAt,
+          });
+          notifyError(ui.turnFailed);
+          setPhaseSafe('idle');
+          return;
+        }
+        notifyApiError(e);
+        setPhaseSafe('idle');
+      }
+    },
+    [
+      backend,
+      config,
+      enabled,
+      executor,
+      getTtsVoice,
+      manifest,
+      messages,
+      navigation,
+      notifyApiError,
+      notifyError,
+      sanitizer,
+      screenStore,
+      setPhaseSafe,
+      speakReply,
+      telemetry,
+      timings.minTranscriptChars,
+      ui,
+    ],
+  );
+
+  const handleTranscriptRef = useRef(handleTranscript);
+  useEffect(() => {
+    handleTranscriptRef.current = handleTranscript;
+  }, [handleTranscript]);
+
+  const handleConfirmationTranscriptRef = useRef<((text: string) => Promise<void>) | null>(null);
+
+  const onTranscriptReady = useCallback((text: string) => {
+    // While a confirmation is pending (active window or late transcript with
+    // the modal still visible), the transcript answers the question — it
+    // never starts a new turn against the backend.
+    if (confirmationVoiceActiveRef.current || pendingConfirmationRef.current) {
+      void handleConfirmationTranscriptRef.current?.(text);
+      return;
+    }
+    void handleTranscriptRef.current(text);
+  }, []);
+
+  const onSpeechError = useCallback(
+    (error: unknown) => {
+      awaitingTranscriptRef.current = false;
+      const code = error instanceof Error ? error.message : '';
+      if (phaseRef.current === 'listening' || phaseRef.current === 'thinking') {
+        setPhaseSafe('idle');
+      }
+      if (code === 'permission_denied') {
+        notifyError(ui.micPermissionDenied);
+      } else if (code === 'recognition_unavailable') {
+        telemetry.logEvent({
+          eventType: 'agent_stt_failed',
+          currentRoute: navigation.getCurrentRoute(),
+        });
+        notifyError(ui.sttUnavailable);
+      }
+      // Other native errors: state already reset; the watchdog and the
+      // no-transcript timers surface the user-facing message if needed.
+    },
+    [navigation, notifyError, setPhaseSafe, telemetry, ui],
+  );
+
+  const speech = useSpeechSession({
+    adapter: voice,
+    locale: config.sttLocale,
+    maxSeconds: timings.maxListeningSeconds,
+    onTranscript: onTranscriptReady,
+    onError: onSpeechError,
+  });
+  const voiceState = speech.state;
+  const voiceStateRef = useRef(voiceState);
+  useEffect(() => {
+    voiceStateRef.current = voiceState;
+  }, [voiceState]);
+
+  const requestStopRecording = useCallback(() => {
+    awaitingTranscriptRef.current = true;
+    sttStopAtRef.current = Date.now();
+    setPhaseSafe('thinking');
+    speech.stop();
+  }, [setPhaseSafe, speech]);
+
+  // ── Voice confirmation window ───────────────────────────────────────────────
+  // 'confirming' phase lives OUTSIDE the turn cycle: it does not trigger the
+  // thinking watchdog and transcripts route to the pending question.
+
+  const clearConfirmationTimers = useCallback(() => {
+    for (const t of confirmationTimersRef.current) clearTimeout(t);
+    confirmationTimersRef.current = [];
+  }, []);
+
+  /**
+   * Closes the listening window WITHOUT resolving the confirmation: the modal
+   * stays visible so the user can decide with the buttons (timeout, STT
+   * error…).
+   */
+  const endConfirmationVoiceWindow = useCallback(
+    (reason: string) => {
+      if (!confirmationVoiceActiveRef.current) return;
+      confirmationVoiceActiveRef.current = false;
+      clearConfirmationTimers();
+      speech.cancel();
+      devLog(invocationIdRef.current, 'confirmation window end', reason);
+      if (phaseRef.current === 'confirming') setPhaseSafe('idle');
+    },
+    [clearConfirmationTimers, setPhaseSafe, speech],
+  );
+
+  /** Opens the listening window for the pending confirmation. */
+  const beginConfirmationVoiceWindow = useCallback(() => {
+    if (!pendingConfirmationRef.current) return;
+    if (confirmationVoiceActiveRef.current) return;
+    // No real STT (simulator/managed environments): tactile modal only.
+    if (!voice.isRecognitionAvailable()) return;
+    confirmationVoiceActiveRef.current = true;
+    setPhaseSafe('confirming');
+    devLog(invocationIdRef.current, 'confirmation window start');
+    void speech.start();
+    const stopTimer = setTimeout(() => {
+      // Window over: close the recording; if the user said something, the
+      // transcript arrives within the grace period. Otherwise keep the modal.
+      speech.stop();
+      const graceTimer = setTimeout(
+        () => endConfirmationVoiceWindow('timeout without transcript'),
+        timings.confirmationTranscriptGraceMs,
+      );
+      confirmationTimersRef.current.push(graceTimer);
+    }, timings.confirmationVoiceWindowMs);
+    confirmationTimersRef.current.push(stopTimer);
+  }, [
+    endConfirmationVoiceWindow,
+    setPhaseSafe,
+    speech,
+    timings.confirmationTranscriptGraceMs,
+    timings.confirmationVoiceWindowMs,
+    voice,
+  ]);
+
+  useEffect(() => {
+    beginConfirmationWindowRef.current = beginConfirmationVoiceWindow;
+  }, [beginConfirmationVoiceWindow]);
+
+  /** Resolves the transcript of the confirmation window. */
+  const handleConfirmationTranscript = useCallback(
+    async (text: string) => {
+      confirmationVoiceActiveRef.current = false;
+      clearConfirmationTimers();
+      const trimmed = text.trim();
+      if (phaseRef.current === 'confirming') setPhaseSafe('idle');
+      // The user may have decided via modal while the transcript arrived.
+      if (!pendingConfirmationRef.current) return;
+
+      if (trimmed.length < 2) {
+        // Noise/empty → like a timeout: the modal remains available.
+        return;
+      }
+      const reply = classifyConfirmationReply(trimmed, lexicon);
+      devLog(invocationIdRef.current, 'confirmation reply', `${reply}: "${trimmed}"`);
+      if (reply === 'affirmative') {
+        await confirmPendingActionRef.current?.();
+        return;
+      }
+      if (reply === 'negative') {
+        cancelPendingActionRef.current?.();
+        return;
+      }
+      // Ambiguous: re-ask ONCE and listen again; after that, modal only.
+      if (!confirmationReaskedRef.current) {
+        confirmationReaskedRef.current = true;
+        const question = pendingConfirmationMessageRef.current ?? ui.confirmationSayYesNo;
+        await speakReply(`${messages.confirmationNotUnderstood} ${question}`, null);
+        if (pendingConfirmationRef.current) beginConfirmationVoiceWindow();
+      }
+    },
+    [
+      beginConfirmationVoiceWindow,
+      clearConfirmationTimers,
+      lexicon,
+      messages.confirmationNotUnderstood,
+      setPhaseSafe,
+      speakReply,
+      ui.confirmationSayYesNo,
+    ],
+  );
+
+  useEffect(() => {
+    handleConfirmationTranscriptRef.current = handleConfirmationTranscript;
+  }, [handleConfirmationTranscript]);
+
+  // Latency shortcut: if the interim text is already a clear yes/no, close
+  // the recording immediately (the final transcript arrives on 'end').
+  useEffect(() => {
+    if (!confirmationVoiceActiveRef.current) return;
+    const t = speech.interimText.trim();
+    if (t.length < 2) return;
+    if (classifyConfirmationReply(t, lexicon) === 'ambiguous') return;
+    speech.stop();
+  }, [speech, lexicon]);
+
+  const beginListening = useCallback(async () => {
+    if (!enabled) return;
+    // Explicit consent (Apple 5.1.2(i) + GDPR): nothing leaves the device
+    // until the user accepts. The modal continues the flow.
+    if (!(await consent.hasConsented())) {
+      consentEntryRef.current = { mode: 'voice' };
+      setConsentModalVisible(true);
+      return;
+    }
+    // App-level per-turn gate (quota, plan limits) — injected, optional.
+    if (config.gateTurn) {
+      const verdict = config.gateTurn();
+      if (!verdict.ok) {
+        if (verdict.message) notifyError(verdict.message);
+        return;
+      }
+    }
+    if (!voice.isRecognitionAvailable()) {
+      telemetry.logEvent({
+        eventType: 'agent_stt_failed',
+        currentRoute: navigation.getCurrentRoute(),
+      });
+      notifyError(ui.sttUnavailable);
+      return;
+    }
+    if (phaseRef.current === 'thinking') return;
+    if (phaseRef.current === 'speaking') {
+      stopSpeech();
+      setPhaseSafe('idle');
+    }
+    invocationIdRef.current += 1;
+    devLog(invocationIdRef.current, 'beginListening');
+    pendingEndRef.current = false;
+    awaitingTranscriptRef.current = false;
+    abortRef.current?.abort();
+    setPhaseSafe('listening');
+    await speech.start();
+    // If STT never started (permission denied, module down), the session
+    // state never leaves 'idle' and no effect fires → the phase would stay
+    // 'listening' forever. Deferred check releases it.
+    setTimeout(() => {
+      if (phaseRef.current === 'listening' && voiceStateRef.current === 'idle') {
+        devLog(invocationIdRef.current, 'reset idle', 'STT did not start');
+        setPhaseSafe('idle');
+      }
+    }, 1000);
+  }, [config, consent, enabled, navigation, notifyError, setPhaseSafe, speech, stopSpeech, telemetry, ui, voice]);
+
+  const endListening = useCallback(() => {
+    if (phaseRef.current !== 'listening') return;
+    if (voiceStateRef.current === 'recording' || voiceStateRef.current === 'transcribing') {
+      requestStopRecording();
+      return;
+    }
+    pendingEndRef.current = true;
+  }, [requestStopRecording]);
+
+  /**
+   * TEXT ENTRY POINT (interaction-modes roadmap): starts a turn from typed
+   * text. Same gates as a voice turn (consent first, then the app's per-turn
+   * gate) and the same downstream pipeline — from here on, a typed message
+   * and a voice transcription are indistinguishable.
+   *
+   * No STT is involved: a turn or confirmation already in progress keeps
+   * priority and the call is ignored (mirrors toggleListening's guards).
+   */
+  const submitTextTurn = useCallback(
+    async (text: string) => {
+      if (!enabled) return;
+      const msg = text.trim();
+      if (!msg) return;
+      if (!(await consent.hasConsented())) {
+        consentEntryRef.current = { mode: 'text', text: msg };
+        setConsentModalVisible(true);
+        return;
+      }
+      if (config.gateTurn) {
+        const verdict = config.gateTurn();
+        if (!verdict.ok) {
+          if (verdict.message) notifyError(verdict.message);
+          return;
+        }
+      }
+      if (
+        phaseRef.current === 'thinking' ||
+        phaseRef.current === 'confirming' ||
+        phaseRef.current === 'listening'
+      ) {
+        return;
+      }
+      if (phaseRef.current === 'speaking') {
+        stopSpeech();
+        setPhaseSafe('idle');
+      }
+      invocationIdRef.current += 1;
+      devLog(invocationIdRef.current, 'submitTextTurn', `${msg.length} chars`);
+      pendingEndRef.current = false;
+      awaitingTranscriptRef.current = false;
+      sttStopAtRef.current = null;
+      abortRef.current?.abort();
+      await handleTranscriptRef.current(msg);
+    },
+    [config, consent, enabled, notifyError, setPhaseSafe, stopSpeech],
+  );
+
+  useEffect(() => {
+    if (!pendingEndRef.current) return;
+    if (voiceStateRef.current === 'recording' || voiceStateRef.current === 'transcribing') {
+      pendingEndRef.current = false;
+      requestStopRecording();
+    }
+  }, [voiceState, requestStopRecording]);
+
+  useEffect(() => {
+    if (awaitingTranscriptRef.current) return;
+    if (phaseRef.current !== 'listening') return;
+    if (voiceState !== 'idle') return;
+    setPhaseSafe('idle');
+  }, [voiceState, setPhaseSafe]);
+
+  useEffect(() => {
+    if (!awaitingTranscriptRef.current) return;
+    if (voiceState !== 'idle') return;
+    const t = setTimeout(() => {
+      if (!awaitingTranscriptRef.current) return;
+      awaitingTranscriptRef.current = false;
+      if (phaseRef.current === 'thinking') {
+        telemetry.logEvent({
+          eventType: 'agent_stt_empty',
+          currentRoute: navigation.getCurrentRoute(),
+        });
+        notifyError(ui.sttNoTranscript);
+        setPhaseSafe('idle');
+      }
+    }, 1200);
+    return () => clearTimeout(t);
+  }, [voiceState, navigation, notifyError, setPhaseSafe, telemetry, ui]);
+
+  // WATCHDOG: 'thinking' may never outlive the limit. Covers native STT hangs
+  // (neither 'end' nor 'error' → nobody resets the phase) and any unhandled
+  // error path. Without it the orb locks up because toggleListening ignores
+  // taps while thinking.
+  useEffect(() => {
+    if (phase !== 'thinking') return;
+    const t = setTimeout(() => {
+      if (phaseRef.current !== 'thinking') return;
+      devLog(invocationIdRef.current, 'WATCHDOG reset', `thinking > ${timings.thinkingWatchdogMs}ms`);
+      awaitingTranscriptRef.current = false;
+      pendingEndRef.current = false;
+      abortRef.current?.abort();
+      speech.cancel();
+      telemetry.logEvent({
+        eventType: 'agent_watchdog_reset',
+        currentRoute: navigation.getCurrentRoute(),
+        latencyMs: timings.thinkingWatchdogMs,
+      });
+      notifyError(ui.turnFailed);
+      setPhaseSafe('idle');
+    }, timings.thinkingWatchdogMs);
+    return () => clearTimeout(t);
+  }, [phase, navigation, notifyError, setPhaseSafe, speech, telemetry, timings.thinkingWatchdogMs, ui]);
+
+  const cancelAll = useCallback(() => {
+    pendingEndRef.current = false;
+    awaitingTranscriptRef.current = false;
+    // Close the confirmation listening window if open; the pending modal
+    // stays visible so the user can decide with the buttons.
+    endConfirmationVoiceWindow('cancelAll');
+    abortRef.current?.abort();
+    speech.cancel();
+    stopSpeech();
+    setPhaseSafe('idle');
+  }, [endConfirmationVoiceWindow, setPhaseSafe, speech, stopSpeech]);
+
+  useEffect(
+    () => () => {
+      pendingEndRef.current = false;
+      awaitingTranscriptRef.current = false;
+      confirmationVoiceActiveRef.current = false;
+      for (const t of confirmationTimersRef.current) clearTimeout(t);
+      confirmationTimersRef.current = [];
+      abortRef.current?.abort();
+      voice.cancelListening();
+      voice.stopPlayback();
+    },
+    [voice],
+  );
+
+  const isListening =
+    phase === 'listening' && (voiceState === 'recording' || voiceState === 'transcribing');
+  // The waveform also shows during the voice confirmation window.
+  const showWaveform =
+    (phase === 'listening' || phase === 'confirming') && voiceState === 'recording';
+  const showThinking = phase === 'thinking' || (phase === 'listening' && voiceState === 'transcribing');
+
+  const toggleListening = useCallback(async () => {
+    if (!enabled || showThinking) return;
+    // During confirmation, the decision belongs to the modal or the voice —
+    // the orb never starts new turns (the modal backdrop blocks taps anyway).
+    if (phaseRef.current === 'confirming') return;
+    if (phaseRef.current === 'listening') {
+      endListening();
+      return;
+    }
+    if (phaseRef.current === 'speaking') {
+      stopSpeech();
+    }
+    await beginListening();
+  }, [beginListening, enabled, endListening, showThinking, stopSpeech]);
+
+  /** The user accepted consent: persist and resume the interrupted flow. */
+  const acceptConsent = useCallback(async () => {
+    setConsentModalVisible(false);
+    try {
+      await consent.grant();
+    } catch {
+      /* flow continues; the modal returns if persistence failed */
+    }
+    telemetry.logEvent({
+      eventType: 'agent_consent_granted',
+      currentRoute: navigation.getCurrentRoute(),
+    });
+    const entry = consentEntryRef.current;
+    consentEntryRef.current = null;
+    if (entry?.mode === 'text') {
+      await submitTextTurn(entry.text);
+    } else {
+      await beginListening();
+    }
+  }, [beginListening, consent, navigation, submitTextTurn, telemetry]);
+
+  /** The user declined consent: STT never starts. */
+  const declineConsent = useCallback(() => {
+    setConsentModalVisible(false);
+    consentEntryRef.current = null;
+    telemetry.logEvent({
+      eventType: 'agent_consent_declined',
+      currentRoute: navigation.getCurrentRoute(),
+    });
+  }, [navigation, telemetry]);
+
+  /**
+   * Speaks the result of a confirmed action (outside the turn): tries server
+   * TTS with the active voice and degrades to device TTS.
+   */
+  const speakActionFeedback = useCallback(
+    async (text: string) => {
+      const voiceId = getTtsVoice();
+      const audio = voiceId ? await backend.previewTts(voiceId, text) : null;
+      await speakReply(text, audio);
+    },
+    [backend, getTtsVoice, speakReply],
+  );
+
+  /**
+   * The user confirmed (modal button OR affirmative voice reply). Actions
+   * declaring doubleConfirmation require a second confirmation before
+   * actually executing.
+   */
+  const confirmPendingAction = useCallback(async () => {
+    endConfirmationVoiceWindow('confirmation resolved');
+    const pending = pendingConfirmationRef.current;
+    if (!pending) {
+      setPendingConfirmationMessage(null);
+      return;
+    }
+
+    if (pending.remainingConfirmations > 1) {
+      pending.remainingConfirmations -= 1;
+      confirmationReaskedRef.current = false;
+      const secondQuestion = messages.doubleConfirmationQuestion;
+      setPendingConfirmationMessage(secondQuestion);
+      devLog(invocationIdRef.current, 'double confirmation requested', pending.action.intent);
+      // The second question is spoken and the voice window reopens; the modal
+      // stays visible with the new text as the tactile fallback.
+      await speakReply(secondQuestion, null);
+      if (pendingConfirmationRef.current) beginConfirmationVoiceWindow();
+      return;
+    }
+
+    pendingConfirmationRef.current = null;
+    setPendingConfirmationMessage(null);
+
+    const { action, context } = pending;
+    const actionStartedAt = Date.now();
+    const result = await executor.execute(action, context);
+    telemetry.logEvent({
+      eventType: result.idempotent
+        ? 'action_idempotent'
+        : result.success
+          ? 'action_executed'
+          : 'action_failed',
+      userMessage: pending.userMessage,
+      intentDetected: action.intent ?? null,
+      actionExecuted: {
+        type: action.type,
+        intent: action.intent ?? null,
+        confirmed: true,
+        ...(result.error ? { error: result.error } : {}),
+      },
+      currentRoute: pending.routeAtInvocation,
+      latencyMs: pending.latencyMs,
+      latencySttMs: pending.latencySttMs,
+      latencyActionMs: Date.now() - actionStartedAt,
+      wasTruncated: pending.wasTruncated,
+      contextChars: pending.contextChars,
+      redactionsApplied: pending.redactions,
+    });
+    if (result.message) await speakActionFeedback(result.message);
+  }, [
+    beginConfirmationVoiceWindow,
+    endConfirmationVoiceWindow,
+    executor,
+    messages.doubleConfirmationQuestion,
+    speakActionFeedback,
+    speakReply,
+    telemetry,
+  ]);
+
+  /** The user cancelled (button, tap outside, back, or "no"): nothing runs. */
+  const cancelPendingAction = useCallback(() => {
+    endConfirmationVoiceWindow('confirmation cancelled');
+    const pending = pendingConfirmationRef.current;
+    pendingConfirmationRef.current = null;
+    setPendingConfirmationMessage(null);
+    if (!pending) return;
+    telemetry.logEvent({
+      eventType: 'action_cancelled',
+      userMessage: pending.userMessage,
+      intentDetected: pending.action.intent ?? null,
+      actionExecuted: { type: pending.action.type, intent: pending.action.intent ?? null },
+      currentRoute: pending.routeAtInvocation,
+    });
+    // Immediate, cheap feedback: device TTS (one-word phrase).
+    void speakReply(messages.cancelled, null);
+  }, [endConfirmationVoiceWindow, messages.cancelled, speakReply, telemetry]);
+
+  // Cross-refs: the voice window resolves with the SAME functions as the
+  // modal buttons (the tactile decision always wins).
+  useEffect(() => {
+    confirmPendingActionRef.current = confirmPendingAction;
+    cancelPendingActionRef.current = cancelPendingAction;
+  }, [confirmPendingAction, cancelPendingAction]);
+
+  return {
+    phase,
+    isListening,
+    showWaveform,
+    showThinking,
+    isBusy: showThinking || phase === 'speaking',
+    volumeLevel: speech.volumeLevel,
+    toggleListening,
+    submitTextTurn,
+    cancelAll,
+    consentModalVisible,
+    acceptConsent,
+    declineConsent,
+    confirmationModalVisible: pendingConfirmationMessage !== null,
+    confirmationMessage: pendingConfirmationMessage ?? '',
+    confirmPendingAction,
+    cancelPendingAction,
+  };
+}
