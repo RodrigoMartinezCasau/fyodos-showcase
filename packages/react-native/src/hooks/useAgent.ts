@@ -27,7 +27,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   classifyConfirmationReply,
+  classifyStrictConfirmationReply,
   combineContexts,
+  formatMessage,
   type AgentAction,
   type AgentScreenContext,
 } from '@fyodos/core';
@@ -51,7 +53,22 @@ type PendingConfirmation = {
   redactions: string[];
   /** 2 for actions declaring doubleConfirmation; 1 otherwise. */
   remainingConfirmations: number;
+  /**
+   * Voice resolution mode from the MANIFEST (dashboard-governed):
+   * 'standard' yes/no, 'strict' exact phrase, 'disabled' tap-only.
+   */
+  voiceMode: 'standard' | 'strict' | 'disabled';
+  /** Strict mode: the exact phrase that confirms (null otherwise). */
+  strictPhrase: string | null;
+  /** Turn started from typed text in silent mode: no TTS, no voice window. */
+  silent: boolean;
 };
+
+/** The current exchange, for the text bubble UI (no persistent history). */
+export interface AgentExchange {
+  userText: string;
+  replyText: string;
+}
 
 export interface UseAgentOptions {
   enabled?: boolean;
@@ -62,7 +79,7 @@ export interface UseAgentOptions {
  * agent resumes the SAME flow: voice re-opens the microphone, text re-submits
  * the typed message.
  */
-type ConsentEntry = { mode: 'voice' } | { mode: 'text'; text: string };
+type ConsentEntry = { mode: 'voice' } | { mode: 'text'; text: string; speak?: boolean };
 
 export interface UseAgentResult {
   phase: AgentPhase;
@@ -76,10 +93,13 @@ export interface UseAgentResult {
    * Text entry point: runs a full agent turn from typed text instead of a
    * voice transcription. From the moment there is a text to send, the flow is
    * IDENTICAL to a voice turn (same consent, gate, context capture, backend
-   * call, action pipeline and confirmations). The reply is currently spoken;
-   * reply-output modes (text-only) arrive with the interaction-mode roadmap.
+   * call, action pipeline and confirmations). By default the reply is NOT
+   * spoken (silent text mode — the bubble shows it); pass { speak: true } to
+   * also play TTS. Confirmations in silent mode are tap-only (modal).
    */
-  submitTextTurn: (text: string) => Promise<void>;
+  submitTextTurn: (text: string, options?: { speak?: boolean }) => Promise<void>;
+  /** Current exchange (user message + agent reply) for the text bubble UI. */
+  lastExchange: AgentExchange | null;
   cancelAll: () => void;
   consentModalVisible: boolean;
   acceptConsent: () => Promise<void>;
@@ -139,8 +159,12 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
   /** Already re-asked once after an ambiguous reply (max one retry). */
   const confirmationReaskedRef = useRef(false);
   const confirmationTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
+  /** Current exchange shown by the text bubble (current turn only — light). */
+  const [lastExchange, setLastExchange] = useState<AgentExchange | null>(null);
+  /** Current turn started from typed text in silent mode (no TTS). */
+  const silentTurnRef = useRef(false);
   /** Cross-refs breaking the handleTranscript ↔ confirmation-helpers cycle. */
-  const beginConfirmationWindowRef = useRef<(() => void) | null>(null);
+  const beginConfirmationWindowRef = useRef<(() => Promise<void>) | null>(null);
   const confirmPendingActionRef = useRef<(() => Promise<void>) | null>(null);
   const cancelPendingActionRef = useRef<(() => void) | null>(null);
   const pendingConfirmationMessageRef = useRef<string | null>(null);
@@ -182,6 +206,11 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
   const speakReply = useCallback(
     async (reply: string, audioBase64?: string | null) => {
       if (!reply.trim()) {
+        setPhaseSafe('idle');
+        return;
+      }
+      // Silent text mode: the bubble shows the reply, nothing is spoken.
+      if (silentTurnRef.current) {
         setPhaseSafe('idle');
         return;
       }
@@ -388,6 +417,16 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
                 manifestAction?.confirmationMessageTemplate ??
                 action.confirmationMessage ??
                 messages.confirmationFallbackQuestion;
+              // Voice resolution mode is dashboard/manifest-governed:
+              // 'disabled' actions can ONLY be confirmed by tapping.
+              const voiceMode = manifestAction?.voiceConfirmation ?? 'standard';
+              const strictPhrase =
+                voiceMode === 'strict'
+                  ? (manifestAction?.confirmationPhrase ??
+                    formatMessage(messages.strictConfirmationPhraseTemplate, {
+                      label: (manifestAction?.label ?? action.intent ?? '').toLowerCase(),
+                    }))
+                  : null;
               pendingConfirmationRef.current = {
                 action,
                 context: executeContext,
@@ -399,10 +438,13 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
                 contextChars,
                 redactions,
                 remainingConfirmations: manifestAction?.doubleConfirmation === true ? 2 : 1,
+                voiceMode,
+                strictPhrase,
+                silent: silentTurnRef.current,
               };
               confirmationReaskedRef.current = false;
               setPendingConfirmationMessage(confirmationMessage);
-              devLog(turnId, 'confirmation modal shown', action.intent);
+              devLog(turnId, 'confirmation modal shown', `${action.intent} (voice=${voiceMode})`);
               // The question is spoken (the prompt instructs the LLM that its
               // reply BE the question; if it strayed, the modal still shows
               // the canonical text).
@@ -463,12 +505,15 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
           });
         }
 
+        // The bubble shows the exchange in text (voice and text turns alike).
+        setLastExchange({ userText: msg, replyText: spokenReply });
         await speakReply(spokenReply, spokenAudio);
         // Voice confirmation: after speaking the question, listen for the
         // reply for a few seconds. The modal stays visible as the tactile
-        // fallback and its decision always wins.
+        // fallback and its decision always wins. Respects the action's
+        // voice mode ('disabled' → tap only) and silent text mode.
         if (pendingConfirmationRef.current) {
-          beginConfirmationWindowRef.current?.();
+          await beginConfirmationWindowRef.current?.();
         }
       } catch (e) {
         if (controller.signal.aborted) return;
@@ -625,9 +670,32 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     voice,
   ]);
 
+  /**
+   * Voice-confirmation entry point. Enforces the per-action policy BEFORE any
+   * microphone is opened:
+   * - silent text turns → tap-only (the user chose a no-audio channel);
+   * - voiceMode 'disabled' (dashboard) → tap-only, no exceptions;
+   * - voiceMode 'strict' → speak the exact-phrase instruction first, then
+   *   open the window (a loose "yes" will not confirm — see the classifier).
+   */
+  const startConfirmationVoiceFlow = useCallback(async () => {
+    const pending = pendingConfirmationRef.current;
+    if (!pending) return;
+    if (pending.silent || pending.voiceMode === 'disabled') return;
+    if (pending.voiceMode === 'strict' && pending.strictPhrase) {
+      await speakReply(
+        formatMessage(messages.strictConfirmationInstruction, { phrase: pending.strictPhrase }),
+        null,
+      );
+      // The user may have decided via modal while the instruction played.
+      if (!pendingConfirmationRef.current) return;
+    }
+    beginConfirmationVoiceWindow();
+  }, [beginConfirmationVoiceWindow, messages.strictConfirmationInstruction, speakReply]);
+
   useEffect(() => {
-    beginConfirmationWindowRef.current = beginConfirmationVoiceWindow;
-  }, [beginConfirmationVoiceWindow]);
+    beginConfirmationWindowRef.current = startConfirmationVoiceFlow;
+  }, [startConfirmationVoiceFlow]);
 
   /** Resolves the transcript of the confirmation window. */
   const handleConfirmationTranscript = useCallback(
@@ -637,14 +705,25 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
       const trimmed = text.trim();
       if (phaseRef.current === 'confirming') setPhaseSafe('idle');
       // The user may have decided via modal while the transcript arrived.
-      if (!pendingConfirmationRef.current) return;
+      const pending = pendingConfirmationRef.current;
+      if (!pending) return;
+      // Safety net: a stray transcript can NEVER resolve a tap-only
+      // confirmation (voice disabled in the dashboard, or silent text mode).
+      if (pending.voiceMode === 'disabled' || pending.silent) return;
 
       if (trimmed.length < 2) {
         // Noise/empty → like a timeout: the modal remains available.
         return;
       }
-      const reply = classifyConfirmationReply(trimmed, lexicon);
-      devLog(invocationIdRef.current, 'confirmation reply', `${reply}: "${trimmed}"`);
+      const strict = pending.voiceMode === 'strict' && pending.strictPhrase != null;
+      const reply = strict
+        ? classifyStrictConfirmationReply(trimmed, pending.strictPhrase as string, lexicon)
+        : classifyConfirmationReply(trimmed, lexicon);
+      devLog(
+        invocationIdRef.current,
+        'confirmation reply',
+        `${reply}${strict ? ' (strict)' : ''}: "${trimmed}"`,
+      );
       if (reply === 'affirmative') {
         await confirmPendingActionRef.current?.();
         return;
@@ -654,10 +733,21 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
         return;
       }
       // Ambiguous: re-ask ONCE and listen again; after that, modal only.
+      // When in doubt, never execute.
       if (!confirmationReaskedRef.current) {
         confirmationReaskedRef.current = true;
-        const question = pendingConfirmationMessageRef.current ?? ui.confirmationSayYesNo;
-        await speakReply(`${messages.confirmationNotUnderstood} ${question}`, null);
+        if (strict) {
+          await speakReply(
+            `${messages.strictConfirmationNotMatched} ${formatMessage(
+              messages.strictConfirmationInstruction,
+              { phrase: pending.strictPhrase as string },
+            )}`,
+            null,
+          );
+        } else {
+          const question = pendingConfirmationMessageRef.current ?? ui.confirmationSayYesNo;
+          await speakReply(`${messages.confirmationNotUnderstood} ${question}`, null);
+        }
         if (pendingConfirmationRef.current) beginConfirmationVoiceWindow();
       }
     },
@@ -666,6 +756,8 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
       clearConfirmationTimers,
       lexicon,
       messages.confirmationNotUnderstood,
+      messages.strictConfirmationInstruction,
+      messages.strictConfirmationNotMatched,
       setPhaseSafe,
       speakReply,
       ui.confirmationSayYesNo,
@@ -676,13 +768,20 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     handleConfirmationTranscriptRef.current = handleConfirmationTranscript;
   }, [handleConfirmationTranscript]);
 
-  // Latency shortcut: if the interim text is already a clear yes/no, close
-  // the recording immediately (the final transcript arrives on 'end').
+  // Latency shortcut: if the interim text is already a clear resolution
+  // (yes/no — or the exact phrase in strict mode), close the recording
+  // immediately (the final transcript arrives on 'end').
   useEffect(() => {
     if (!confirmationVoiceActiveRef.current) return;
+    const pending = pendingConfirmationRef.current;
+    if (!pending) return;
     const t = speech.interimText.trim();
     if (t.length < 2) return;
-    if (classifyConfirmationReply(t, lexicon) === 'ambiguous') return;
+    const verdict =
+      pending.voiceMode === 'strict' && pending.strictPhrase != null
+        ? classifyStrictConfirmationReply(t, pending.strictPhrase, lexicon)
+        : classifyConfirmationReply(t, lexicon);
+    if (verdict === 'ambiguous') return;
     speech.stop();
   }, [speech, lexicon]);
 
@@ -720,6 +819,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     devLog(invocationIdRef.current, 'beginListening');
     pendingEndRef.current = false;
     awaitingTranscriptRef.current = false;
+    silentTurnRef.current = false; // voice turn → spoken replies
     abortRef.current?.abort();
     setPhaseSafe('listening');
     await speech.start();
@@ -753,12 +853,12 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
    * priority and the call is ignored (mirrors toggleListening's guards).
    */
   const submitTextTurn = useCallback(
-    async (text: string) => {
+    async (text: string, options?: { speak?: boolean }) => {
       if (!enabled) return;
       const msg = text.trim();
       if (!msg) return;
       if (!(await consent.hasConsented())) {
-        consentEntryRef.current = { mode: 'text', text: msg };
+        consentEntryRef.current = { mode: 'text', text: msg, speak: options?.speak };
         setConsentModalVisible(true);
         return;
       }
@@ -785,6 +885,8 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
       pendingEndRef.current = false;
       awaitingTranscriptRef.current = false;
       sttStopAtRef.current = null;
+      // Text turns are silent by default: the bubble shows the reply.
+      silentTurnRef.current = options?.speak !== true;
       abortRef.current?.abort();
       await handleTranscriptRef.current(msg);
     },
@@ -911,7 +1013,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     const entry = consentEntryRef.current;
     consentEntryRef.current = null;
     if (entry?.mode === 'text') {
-      await submitTextTurn(entry.text);
+      await submitTextTurn(entry.text, { speak: entry.speak });
     } else {
       await beginListening();
     }
@@ -933,6 +1035,9 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
    */
   const speakActionFeedback = useCallback(
     async (text: string) => {
+      // Silent text mode: the bubble shows the feedback; skip the TTS
+      // synthesis round-trip entirely.
+      if (silentTurnRef.current) return;
       const voiceId = getTtsVoice();
       const audio = voiceId ? await backend.previewTts(voiceId, text) : null;
       await speakReply(text, audio);
@@ -958,11 +1063,15 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
       confirmationReaskedRef.current = false;
       const secondQuestion = messages.doubleConfirmationQuestion;
       setPendingConfirmationMessage(secondQuestion);
+      setLastExchange((prev) =>
+        prev ? { ...prev, replyText: secondQuestion } : prev,
+      );
       devLog(invocationIdRef.current, 'double confirmation requested', pending.action.intent);
-      // The second question is spoken and the voice window reopens; the modal
-      // stays visible with the new text as the tactile fallback.
+      // The second question is spoken and the voice flow reopens (same
+      // policy: strict instruction, disabled → tap only); the modal stays
+      // visible with the new text as the tactile fallback.
       await speakReply(secondQuestion, null);
-      if (pendingConfirmationRef.current) beginConfirmationVoiceWindow();
+      if (pendingConfirmationRef.current) await startConfirmationVoiceFlow();
       return;
     }
 
@@ -994,14 +1103,17 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
       contextChars: pending.contextChars,
       redactionsApplied: pending.redactions,
     });
-    if (result.message) await speakActionFeedback(result.message);
+    if (result.message) {
+      setLastExchange((prev) => (prev ? { ...prev, replyText: result.message! } : prev));
+      await speakActionFeedback(result.message);
+    }
   }, [
-    beginConfirmationVoiceWindow,
     endConfirmationVoiceWindow,
     executor,
     messages.doubleConfirmationQuestion,
     speakActionFeedback,
     speakReply,
+    startConfirmationVoiceFlow,
     telemetry,
   ]);
 
@@ -1019,7 +1131,9 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
       actionExecuted: { type: pending.action.type, intent: pending.action.intent ?? null },
       currentRoute: pending.routeAtInvocation,
     });
-    // Immediate, cheap feedback: device TTS (one-word phrase).
+    // Immediate, cheap feedback: device TTS (one-word phrase). In silent
+    // text mode speakReply is a no-op and the bubble shows it instead.
+    setLastExchange((prev) => (prev ? { ...prev, replyText: messages.cancelled } : prev));
     void speakReply(messages.cancelled, null);
   }, [endConfirmationVoiceWindow, messages.cancelled, speakReply, telemetry]);
 
@@ -1039,6 +1153,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     volumeLevel: speech.volumeLevel,
     toggleListening,
     submitTextTurn,
+    lastExchange,
     cancelAll,
     consentModalVisible,
     acceptConsent,

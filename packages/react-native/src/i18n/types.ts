@@ -51,4 +51,9 @@ export interface AgentUiMessages {
   orbAccessibilityLabel: string;
   orbHintIdle: string;
   orbHintListening: string;
+  /** Text bubble (typed input + text reply). */
+  textInputPlaceholder: string;
+  textSendLabel: string;
+  textPanelCloseLabel: string;
+  keyboardChipLabel: string;
 }

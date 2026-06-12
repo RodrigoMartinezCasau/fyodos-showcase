@@ -31,6 +31,10 @@ export const uiEn: AgentUiMessages = {
   orbAccessibilityLabel: 'Voice assistant',
   orbHintIdle: 'Tap to talk to the assistant',
   orbHintListening: 'Tap to stop listening',
+  textInputPlaceholder: 'Type your question…',
+  textSendLabel: 'Send',
+  textPanelCloseLabel: 'Close text input',
+  keyboardChipLabel: 'Type instead of talking',
 };
 
 export const uiEs: AgentUiMessages = {
@@ -64,4 +68,8 @@ export const uiEs: AgentUiMessages = {
   orbAccessibilityLabel: 'Asistente de voz',
   orbHintIdle: 'Pulsa para hablar con el asistente',
   orbHintListening: 'Pulsa para dejar de escuchar',
+  textInputPlaceholder: 'Escribe tu consulta…',
+  textSendLabel: 'Enviar',
+  textPanelCloseLabel: 'Cerrar entrada de texto',
+  keyboardChipLabel: 'Escribir en lugar de hablar',
 };

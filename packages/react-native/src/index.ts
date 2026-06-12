@@ -20,7 +20,7 @@ export { DEFAULT_AGENT_TIMINGS } from './config/types';
 export { FyodosProvider, useFyodosRuntime } from './provider/FyodosProvider';
 export type { FyodosRuntime } from './provider/FyodosProvider';
 export { useAgent } from './hooks/useAgent';
-export type { UseAgentOptions, UseAgentResult } from './hooks/useAgent';
+export type { AgentExchange, UseAgentOptions, UseAgentResult } from './hooks/useAgent';
 
 // Screen context
 export type { AgentScreenSnapshot, ScreenContextStore } from './context/screenContextStore';
@@ -71,6 +71,8 @@ export { ActionConfirmationModal } from './components/ActionConfirmationModal';
 export type { ActionConfirmationModalProps } from './components/ActionConfirmationModal';
 export { ConsentModal } from './components/ConsentModal';
 export type { ConsentModalProps } from './components/ConsentModal';
+export { AgentTextBubble } from './components/AgentTextBubble';
+export type { AgentTextBubbleProps } from './components/AgentTextBubble';
 export {
   DEFAULT_MODAL_THEME,
   DEFAULT_ORB_THEME,

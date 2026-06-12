@@ -37,6 +37,12 @@ export function AgentLayer({
 }: AgentLayerProps) {
   const { config } = useFyodosRuntime();
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+  /**
+   * The orb's own text bubble opens the system keyboard: in that case the
+   * keyboard heuristic must NOT hide the layer (it would unmount the orb and
+   * the bubble with it). The heuristic only applies to the APP's inputs.
+   */
+  const [textPanelOpen, setTextPanelOpen] = useState(false);
 
   useEffect(() => {
     if (!hideWhenKeyboardOpen) return;
@@ -50,7 +56,8 @@ export function AgentLayer({
     };
   }, [hideWhenKeyboardOpen]);
 
-  const effectiveVisible = visible && (!hideWhenKeyboardOpen || !keyboardOpen);
+  const effectiveVisible =
+    visible && (!hideWhenKeyboardOpen || !keyboardOpen || textPanelOpen);
 
   useEffect(() => {
     if (!effectiveVisible || !warmUpOnVisible) return;
@@ -61,7 +68,12 @@ export function AgentLayer({
 
   return (
     <View pointerEvents="box-none" style={[styles.layer, { bottom, right }]}>
-      <AgentOrb enabled={effectiveVisible} {...orbProps} />
+      <AgentOrb
+        enabled={effectiveVisible}
+        textPanelOffset={{ bottom: bottom + 64, right }}
+        onTextPanelStateChange={setTextPanelOpen}
+        {...orbProps}
+      />
     </View>
   );
 }
