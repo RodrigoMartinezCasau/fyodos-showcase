@@ -29,7 +29,12 @@ import {
   classifyConfirmationReply,
   classifyStrictConfirmationReply,
   combineContexts,
+  createConversationSession,
   formatMessage,
+  prepareConversationForTurn,
+  recordConversationExchange,
+  stripWakePhrase,
+  defaultWakePhrasesForLocale,
   type AgentAction,
   type AgentScreenContext,
 } from '@fyodos/core';
@@ -38,6 +43,7 @@ import { buildManifestPayload } from '../api/backendClient';
 import type { AgentPhase } from '../config/types';
 import { useFyodosRuntime } from '../provider/FyodosProvider';
 import { useSpeechSession } from '../voice/useSpeechSession';
+import { useWakeWordActivation } from '../voice/useWakeWordActivation';
 
 declare const __DEV__: boolean;
 
@@ -108,6 +114,8 @@ export interface UseAgentResult {
   confirmationMessage: string;
   confirmPendingAction: () => Promise<void>;
   cancelPendingAction: () => void;
+  /** Passive wake-word listening is active (discrete privacy indicator). */
+  wakeWordListening: boolean;
 }
 
 function devLog(invocationId: number, step: string, extra?: string): void {
@@ -181,6 +189,8 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
   const invocationIdRef = useRef(0);
   /** Which flow (voice or typed text) the consent modal interrupted. */
   const consentEntryRef = useRef<ConsentEntry | null>(null);
+  /** In-memory session conversation (bounded window + summary for token cost). */
+  const conversationRef = useRef(createConversationSession());
 
   const onPhaseChangeRef = useRef(config.onPhaseChange);
   onPhaseChangeRef.current = config.onPhaseChange;
@@ -324,6 +334,8 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
         const contextChars = sanitized?.length ?? 0;
         if (redactions.length) devLog(turnId, 'context redacted', redactions.join(','));
 
+        const conversation = prepareConversationForTurn(conversationRef.current);
+
         const result = await backend.sendTurn(
           {
             message: msg,
@@ -331,6 +343,8 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
             voice: getTtsVoice(),
             screenContext: sanitized ?? undefined,
             currentRoute: routeAtInvocation ?? undefined,
+            conversationHistory: conversation.history,
+            conversationSummary: conversation.summary ?? undefined,
             ...buildManifestPayload(manifest),
           },
           { signal: controller.signal },
@@ -507,6 +521,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
 
         // The bubble shows the exchange in text (voice and text turns alike).
         setLastExchange({ userText: msg, replyText: spokenReply });
+        recordConversationExchange(conversationRef.current, msg, spokenReply);
         await speakReply(spokenReply, spokenAudio);
         // Voice confirmation: after speaking the question, listen for the
         // reply for a few seconds. The modal stays visible as the tactile
@@ -834,6 +849,43 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     }, 1000);
   }, [config, consent, enabled, navigation, notifyError, setPhaseSafe, speech, stopSpeech, telemetry, ui, voice]);
 
+  const wakePhrases =
+    config.voiceActivation?.phrases?.length
+      ? config.voiceActivation.phrases
+      : defaultWakePhrasesForLocale(config.locale);
+
+  const handleWakeDetected = useCallback(
+    async (trailingCommand: string) => {
+      voice.stopWakeWordDetection?.();
+      const command = stripWakePhrase(trailingCommand, wakePhrases) || trailingCommand.trim();
+      if (command.length >= timings.minTranscriptChars) {
+        invocationIdRef.current += 1;
+        devLog(invocationIdRef.current, 'wakeWordDetected', `command=${command.length} chars`);
+        silentTurnRef.current = false;
+        await handleTranscriptRef.current(command);
+        return;
+      }
+      devLog(invocationIdRef.current + 1, 'wakeWordDetected', 'opening mic');
+      await beginListening();
+    },
+    [beginListening, timings.minTranscriptChars, voice, wakePhrases],
+  );
+
+  const { wakeWordListening } = useWakeWordActivation({
+    enabled,
+    voice,
+    sttLocale: config.sttLocale,
+    agentLocale: config.locale,
+    voiceActivation: config.voiceActivation,
+    phase,
+    consent,
+    telemetry,
+    navigation,
+    onWakeDetected: (cmd) => {
+      void handleWakeDetected(cmd);
+    },
+  });
+
   const endListening = useCallback(() => {
     if (phaseRef.current !== 'listening') return;
     if (voiceStateRef.current === 'recording' || voiceStateRef.current === 'transcribing') {
@@ -953,6 +1005,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
   const cancelAll = useCallback(() => {
     pendingEndRef.current = false;
     awaitingTranscriptRef.current = false;
+    voice.stopWakeWordDetection?.();
     // Close the confirmation listening window if open; the pending modal
     // stays visible so the user can decide with the buttons.
     endConfirmationVoiceWindow('cancelAll');
@@ -971,6 +1024,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
       confirmationTimersRef.current = [];
       abortRef.current?.abort();
       voice.cancelListening();
+      voice.stopWakeWordDetection?.();
       voice.stopPlayback();
     },
     [voice],
@@ -1162,5 +1216,6 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     confirmationMessage: pendingConfirmationMessage ?? '',
     confirmPendingAction,
     cancelPendingAction,
+    wakeWordListening,
   };
 }

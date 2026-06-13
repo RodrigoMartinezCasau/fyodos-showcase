@@ -153,5 +153,26 @@ test('optional fields are omitted from the body when absent', async () => {
   assert.ok(!('voice' in sent));
   assert.ok(!('screen_context' in sent));
   assert.ok(!('current_route' in sent));
+  assert.ok(!('conversation_history' in sent));
+  assert.ok(!('conversation_summary' in sent));
   assert.ok(!('x-user-id' in calls[0]!.init.headers));
+});
+
+test('sendTurn includes conversation memory when provided', async () => {
+  const calls = mockFetch(() => ({ status: 200, body: { reply: 'ok' } }));
+  const client = createFyodosBackendClient({ baseUrl: 'https://x.test' });
+  await client.sendTurn({
+    ...turnRequest,
+    conversationHistory: [
+      { role: 'user', content: 'quiero pizza' },
+      { role: 'assistant', content: '¿De qué tipo?' },
+    ],
+    conversationSummary: 'Earlier: user greeted the assistant.',
+  });
+  const sent = JSON.parse(calls[0]!.init.body) as {
+    conversation_history?: Array<{ role: string; content: string }>;
+    conversation_summary?: string;
+  };
+  assert.equal(sent.conversation_history?.length, 2);
+  assert.equal(sent.conversation_summary, 'Earlier: user greeted the assistant.');
 });

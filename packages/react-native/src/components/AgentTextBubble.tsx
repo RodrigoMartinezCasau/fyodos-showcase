@@ -96,6 +96,7 @@ export function AgentTextBubble({
             {
               backgroundColor: t.cardBackgroundColor,
               borderColor: t.cardBorderColor,
+              borderRadius: t.borderRadius ?? 18,
               marginBottom: bottom,
               marginRight: right,
             },
@@ -141,6 +142,7 @@ export function AgentTextBubble({
                 styles.sendBtn,
                 {
                   backgroundColor: accentColor,
+                  borderRadius: t.sendButtonRadius ?? 16,
                   opacity: busy || !draft.trim() ? 0.35 : pressed ? 0.8 : 1,
                 },
               ]}
@@ -168,7 +170,6 @@ const styles = StyleSheet.create({
     width: 300,
     maxWidth: '88%',
     maxHeight: 340,
-    borderRadius: 18,
     borderWidth: StyleSheet.hairlineWidth,
     overflow: 'hidden',
     shadowColor: '#000',
@@ -217,7 +218,6 @@ const styles = StyleSheet.create({
   sendBtn: {
     width: 32,
     height: 32,
-    borderRadius: 16,
     alignItems: 'center',
     justifyContent: 'center',
   },

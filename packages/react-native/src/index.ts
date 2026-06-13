@@ -59,6 +59,17 @@ export type {
   SpeechSessionOptions,
   SpeechSessionState,
 } from './voice/useSpeechSession';
+export {
+  loadVoiceActivationOptIn,
+  saveVoiceActivationOptIn,
+  clearVoiceActivationOptIn,
+  voiceActivationPrefsKey,
+} from './voice/voiceActivationPrefs';
+export { useWakeWordActivation } from './voice/useWakeWordActivation';
+export type {
+  VoiceActivationRuntimeConfig,
+  UseWakeWordActivationOptions,
+} from './voice/useWakeWordActivation';
 
 // UI
 export { AgentOrb } from './components/AgentOrb';
@@ -73,6 +84,7 @@ export { ConsentModal } from './components/ConsentModal';
 export type { ConsentModalProps } from './components/ConsentModal';
 export { AgentTextBubble } from './components/AgentTextBubble';
 export type { AgentTextBubbleProps } from './components/AgentTextBubble';
+export { resolveImageDataUrlForDisplay, isDisplayableImageUri } from './utils/imageUri';
 export {
   DEFAULT_MODAL_THEME,
   DEFAULT_ORB_THEME,

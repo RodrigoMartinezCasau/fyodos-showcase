@@ -17,6 +17,8 @@ import {
   type AgentTurnRequest,
   type AgentTurnResult,
   type AppManifest,
+  type ClientConfigResponse,
+  type ConversationTurn,
 } from '@fyodos/core';
 import { AgentApiError } from './errors';
 
@@ -127,6 +129,18 @@ export function createFyodosBackendClient(options: FyodosBackendClientOptions): 
       if (request.voice) body.voice = request.voice;
       if (request.screenContext?.trim()) body.screen_context = request.screenContext.trim();
       if (request.currentRoute?.trim()) body.current_route = request.currentRoute.trim();
+      if (request.conversationHistory?.length) {
+        body.conversation_history = request.conversationHistory.map((t: ConversationTurn) => ({
+          role: t.role,
+          content: t.content.trim(),
+        }));
+      }
+      if (request.conversationSummary?.trim()) {
+        body.conversation_summary = request.conversationSummary.trim();
+      }
+      if (request.llmModel?.trim()) {
+        body.llm_model = request.llmModel.trim();
+      }
 
       const res = await fetchWithTimeout(
         `${baseUrl}/assistant/chat`,
@@ -184,6 +198,16 @@ export function createFyodosBackendClient(options: FyodosBackendClientOptions): 
       } catch {
         /* best-effort cold-start warm-up */
       }
+    },
+
+    async fetchPublishedConfig(): Promise<ClientConfigResponse> {
+      const res = await fetchWithTimeout(
+        `${baseUrl}/v1/client/config`,
+        { method: 'GET', headers: buildHeaders(), body: undefined as unknown as string },
+        8_000,
+      );
+      if (!res.ok) throw await errorFromResponse(res);
+      return (await res.json()) as ClientConfigResponse;
     },
   };
 }

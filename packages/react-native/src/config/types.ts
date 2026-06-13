@@ -132,4 +132,18 @@ export interface FyodosAgentConfig {
   consentVersion?: number;
   /** Timing overrides. */
   timings?: Partial<AgentTimings>;
+
+  /**
+   * Wake-word voice activation ("Oye, Fiodos" / "Hello, Fiodos").
+   * Requires developer opt-in AND separate user opt-in in app settings.
+   * Disabled by default at every layer.
+   */
+  voiceActivation?: {
+    /** Developer enables this capability for their app. Default: false. */
+    developerEnabled: boolean;
+    /** User opt-in — must resolve true for passive listening. Default: false. */
+    isUserOptedIn?: () => boolean | Promise<boolean>;
+    /** Override wake phrases; defaults from agent locale. */
+    phrases?: string[];
+  };
 }

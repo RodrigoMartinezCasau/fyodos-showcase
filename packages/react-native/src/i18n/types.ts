@@ -45,6 +45,8 @@ export interface AgentUiMessages {
   consentTitle: string;
   consentBody: string;
   consentBodySecondary: string;
+  /** Shown when the developer offers wake-word activation. */
+  consentBodyWakeWord: string;
   consentAccept: string;
   consentDecline: string;
   /** Orb accessibility. */
@@ -56,4 +58,12 @@ export interface AgentUiMessages {
   textSendLabel: string;
   textPanelCloseLabel: string;
   keyboardChipLabel: string;
+  /** Discreet indicator when wake-word listening is active. */
+  wakeWordListeningLabel: string;
+  /** Settings: voice activation section title. */
+  voiceActivationSettingsTitle: string;
+  voiceActivationSettingsBody: string;
+  voiceActivationSettingsEnable: string;
+  voiceActivationSettingsDisable: string;
+  voiceActivationSettingsHint: string;
 }

@@ -13,7 +13,10 @@ import type {
   SpeechRecognitionEvents,
   StartListeningOptions,
   VoiceAdapter,
+  WakeWordDetectionEvents,
+  WakeWordDetectionOptions,
 } from '@fyodos/core';
+import { detectWakePhrase } from '@fyodos/core';
 
 // ── Structural types for the lazily-required Expo modules ────────────────────
 
@@ -93,6 +96,8 @@ export interface ExpoVoiceAdapterOptions {
   deviceTtsPitch?: number;
   /** Cache file prefix for per-turn MP3s. */
   cacheFilePrefix?: string;
+  /** Wake-word session auto-restart interval (seconds). Default 25. */
+  wakeWordSessionRestartSeconds?: number;
 }
 
 async function waitForPlayerLoaded(player: AudioPlayerLike, timeoutMs = 12_000): Promise<void> {
@@ -146,12 +151,23 @@ async function ensureSpeakAudioMode(): Promise<void> {
 
 export function createExpoVoiceAdapter(options: ExpoVoiceAdapterOptions = {}): VoiceAdapter {
   const prefix = options.cacheFilePrefix ?? 'fyodos-tts';
+  const wakeRestartSec = options.wakeWordSessionRestartSeconds ?? 25;
 
   // ── STT session state ───────────────────────────────────────────────────────
   let listeners: Array<{ remove(): void }> = [];
   let cancelled = false;
   let finalTranscript = '';
   let maxDurationTimer: ReturnType<typeof setTimeout> | null = null;
+  type SessionMode = 'idle' | 'push_to_talk' | 'wake_word';
+  let sessionMode: SessionMode = 'idle';
+
+  // ── Wake-word state ───────────────────────────────────────────────────────────
+  let wakePhrases: string[] = [];
+  let wakeEvents: WakeWordDetectionEvents | null = null;
+  let wakeLocale = '';
+  let wakeRestartTimer: ReturnType<typeof setTimeout> | null = null;
+  let wakeStopping = false;
+  let wakeDetected = false;
 
   // ── Playback state ──────────────────────────────────────────────────────────
   let activePlayer: AudioPlayerLike | null = null;
@@ -168,6 +184,123 @@ export function createExpoVoiceAdapter(options: ExpoVoiceAdapterOptions = {}): V
       clearTimeout(maxDurationTimer);
       maxDurationTimer = null;
     }
+  }
+
+  function clearWakeRestartTimer(): void {
+    if (wakeRestartTimer) {
+      clearTimeout(wakeRestartTimer);
+      wakeRestartTimer = null;
+    }
+  }
+
+  function clearWakeState(): void {
+    clearWakeRestartTimer();
+    wakeEvents = null;
+    wakePhrases = [];
+    wakeLocale = '';
+    wakeStopping = false;
+    wakeDetected = false;
+    if (sessionMode === 'wake_word') sessionMode = 'idle';
+  }
+
+  function abortNativeRecognition(): void {
+    clearMaxDurationTimer();
+    removeListeners();
+    finalTranscript = '';
+    try {
+      speechModule?.abort();
+    } catch {
+      /* native module may already be idle */
+    }
+  }
+
+  async function ensureMicPermission(): Promise<boolean> {
+    if (!speechModule) return false;
+    const { granted } = await speechModule
+      .requestPermissionsAsync()
+      .catch(() => ({ granted: false }));
+    return granted;
+  }
+
+  async function startWakeWordSession(): Promise<void> {
+    if (!available || !speechModule || !wakeEvents || wakePhrases.length === 0) return;
+    if (sessionMode !== 'wake_word') return;
+
+    const granted = await ensureMicPermission();
+    if (!granted) {
+      wakeEvents.onError?.(new Error('permission_denied'));
+      return;
+    }
+
+    cancelled = false;
+    finalTranscript = '';
+    wakeDetected = false;
+    removeListeners();
+
+    listeners.push(
+      speechModule.addListener('result', (e: unknown) => {
+        if (sessionMode !== 'wake_word' || wakeDetected) return;
+        const ev = e as { results?: Array<{ transcript?: string; isFinal?: boolean }> };
+        const r = ev.results?.[0];
+        if (!r?.transcript) return;
+        const text = r.transcript;
+        const match = detectWakePhrase(text, wakePhrases);
+        if (!match.matched) return;
+        wakeDetected = true;
+        wakeStopping = true;
+        clearWakeRestartTimer();
+        speechModule?.stop();
+        wakeEvents?.onDetected(match.command);
+      }),
+    );
+
+    listeners.push(
+      speechModule.addListener('end', () => {
+        clearMaxDurationTimer();
+        removeListeners();
+        finalTranscript = '';
+        if (sessionMode !== 'wake_word') return;
+        if (wakeStopping && wakeDetected) {
+          clearWakeState();
+          return;
+        }
+        if (wakeStopping) {
+          clearWakeState();
+          return;
+        }
+        // Platform ended the session (silence) — restart while still in wake mode.
+        void startWakeWordSession();
+      }),
+    );
+
+    listeners.push(
+      speechModule.addListener('error', (e: unknown) => {
+        clearMaxDurationTimer();
+        removeListeners();
+        if (sessionMode !== 'wake_word' || wakeStopping) return;
+        wakeEvents?.onError?.(e);
+        wakeRestartTimer = setTimeout(() => {
+          wakeRestartTimer = null;
+          if (sessionMode === 'wake_word') void startWakeWordSession();
+        }, 1200);
+      }),
+    );
+
+    wakeRestartTimer = setTimeout(() => {
+      wakeRestartTimer = null;
+      if (sessionMode !== 'wake_word' || wakeStopping) return;
+      try {
+        speechModule?.stop();
+      } catch {
+        void startWakeWordSession();
+      }
+    }, wakeRestartSec * 1000);
+
+    speechModule.start({
+      lang: wakeLocale,
+      interimResults: true,
+      continuous: true,
+    });
   }
 
   function disposePlayer(): void {
@@ -195,14 +328,19 @@ export function createExpoVoiceAdapter(options: ExpoVoiceAdapterOptions = {}): V
         return;
       }
 
-      const { granted } = await speechModule
-        .requestPermissionsAsync()
-        .catch(() => ({ granted: false }));
+      if (sessionMode === 'wake_word') {
+        wakeStopping = true;
+        abortNativeRecognition();
+        clearWakeState();
+      }
+
+      const granted = await ensureMicPermission();
       if (!granted) {
         events.onError?.(new Error('permission_denied'));
         return;
       }
 
+      sessionMode = 'push_to_talk';
       cancelled = false;
       finalTranscript = '';
 
@@ -229,6 +367,7 @@ export function createExpoVoiceAdapter(options: ExpoVoiceAdapterOptions = {}): V
           removeListeners();
           const transcript = finalTranscript;
           finalTranscript = '';
+          if (sessionMode === 'push_to_talk') sessionMode = 'idle';
           if (cancelled) {
             events.onEnd?.();
             return;
@@ -243,6 +382,7 @@ export function createExpoVoiceAdapter(options: ExpoVoiceAdapterOptions = {}): V
           clearMaxDurationTimer();
           removeListeners();
           finalTranscript = '';
+          if (sessionMode === 'push_to_talk') sessionMode = 'idle';
           events.onError?.(e);
         }),
       );
@@ -269,7 +409,46 @@ export function createExpoVoiceAdapter(options: ExpoVoiceAdapterOptions = {}): V
     cancelListening() {
       cancelled = true;
       clearMaxDurationTimer();
+      if (sessionMode === 'push_to_talk') sessionMode = 'idle';
       speechModule?.abort();
+    },
+
+    supportsWakeWordDetection() {
+      return available;
+    },
+
+    isWakeWordListening() {
+      return sessionMode === 'wake_word';
+    },
+
+    async startWakeWordDetection(
+      opts: WakeWordDetectionOptions,
+      events: WakeWordDetectionEvents,
+    ) {
+      if (!available || !speechModule) {
+        events.onError?.(new Error('recognition_unavailable'));
+        return;
+      }
+      if (sessionMode === 'push_to_talk') {
+        events.onError?.(new Error('session_busy'));
+        return;
+      }
+
+      wakeStopping = false;
+      wakeDetected = false;
+      wakePhrases = opts.phrases;
+      wakeLocale = opts.locale;
+      wakeEvents = events;
+      sessionMode = 'wake_word';
+      await startWakeWordSession();
+    },
+
+    stopWakeWordDetection() {
+      if (sessionMode !== 'wake_word') return;
+      wakeStopping = true;
+      clearWakeRestartTimer();
+      abortNativeRecognition();
+      clearWakeState();
     },
 
     async playAudioBase64Mp3(base64: string) {
