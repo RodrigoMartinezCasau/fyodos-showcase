@@ -18,17 +18,16 @@ import type { OrbLogoTransform } from '@fyodos/core';
 import {
   chipBorderRadius,
   chipIconBaseSizePx,
-  computeOutwardBorderLayout,
   normalizeChipIconScale,
   normalizeKeyboardChipIcon,
   normalizeOrbGlowIntensity,
   resolveChipIconColor,
-  resolveInnerBorderColor,
+  resolveInnerBorderStrokeColor,
   resolveOrbBackgroundColor,
 } from '@fyodos/core';
 import { ChipIconNative } from './ChipIconNative';
 import { ChipIconScaled } from './ChipIconScaled';
-import { OutwardDoubleBorder } from './OutwardDoubleBorder';
+import { OutwardDoubleBorder, resolveRnOutwardBorderLayout } from './OutwardDoubleBorder';
 import { useAgent } from '../hooks/useAgent';
 import { useFyodosRuntime } from '../provider/FyodosProvider';
 import { resolveImageDataUrlForDisplay, isDisplayableImageUri } from '../utils/imageUri';
@@ -150,17 +149,17 @@ export function AgentOrb({
   const chipIconPreset = normalizeKeyboardChipIcon(chip.icon);
   const chipIconScale = normalizeChipIconScale(chip.iconScale ?? 1);
   const chipIconBase = chipIconBaseSizePx(chipSize);
-  const chipLayout = computeOutwardBorderLayout(
+  const chipLayout = resolveRnOutwardBorderLayout(
     chipSize,
-    normalizeOrbGlowIntensity(chip.borderWidth ?? 100),
+    chip.borderWidth ?? 100,
     chip.innerBorderWidth,
   );
-  const orbLayout = computeOutwardBorderLayout(
+  const orbLayout = resolveRnOutwardBorderLayout(
     t.size,
-    normalizeOrbGlowIntensity(t.glowIntensity),
+    t.glowIntensity,
     t.innerBorderWidth,
   );
-  const chipInteriorColor = resolveInnerBorderColor(chip.innerBorderColor);
+  const chipInteriorColor = resolveInnerBorderStrokeColor(chip.innerBorderColor);
   const rawChipIcon = chip.iconImageDataUrl?.trim() || null;
   const [chipIconUri, setChipIconUri] = useState<string | null>(null);
   const [chipIconFailed, setChipIconFailed] = useState(false);

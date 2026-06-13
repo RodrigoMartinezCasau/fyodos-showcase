@@ -5,13 +5,12 @@ import React, { useEffect, useRef } from 'react';
 import { Animated, Image, StyleSheet, View } from 'react-native';
 import type { OrbLogoTransform } from '@fyodos/core';
 import {
-  computeOutwardBorderLayout,
-  normalizeOrbLogoTransform,
   normalizeOrbGlowIntensity,
-  resolveInnerBorderColor,
+  normalizeOrbLogoTransform,
+  resolveInnerBorderStrokeColor,
   resolveOrbBackgroundColor,
 } from '@fyodos/core';
-import { OutwardDoubleBorder } from './OutwardDoubleBorder';
+import { OutwardDoubleBorder, resolveRnOutwardBorderLayout } from './OutwardDoubleBorder';
 import type { AgentOrbTheme } from './theme';
 
 const LOGO_COVER = 0.54;
@@ -42,10 +41,10 @@ export function OrbVisual({
     backgroundColor: theme.backgroundColor,
   });
   const exteriorColor = theme.glowColor?.startsWith('#') ? theme.glowColor : theme.accentColor;
-  const interiorColor = resolveInnerBorderColor(theme.innerBorderColor);
-  const { totalPx } = computeOutwardBorderLayout(
+  const interiorColor = resolveInnerBorderStrokeColor(theme.innerBorderColor);
+  const { totalPx } = resolveRnOutwardBorderLayout(
     size,
-    normalizeOrbGlowIntensity(theme.glowIntensity),
+    theme.glowIntensity,
     theme.innerBorderWidth,
   );
   const t = normalizeOrbLogoTransform(logoTransform);

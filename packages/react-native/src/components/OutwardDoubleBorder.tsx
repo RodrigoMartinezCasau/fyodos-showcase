@@ -1,9 +1,9 @@
 /**
- * Double border that grows outward from a fixed fill — mirrors dashboard ChromeDoubleBorder.
- * RN borderWidth is border-box; we paint rings with nested discs instead.
+ * Double border outward from fixed fill.
+ * Exterior: solid ring (reads bold on device). Interior: native border stroke.
  */
 import React from 'react';
-import { StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
+import { PixelRatio, StyleSheet, View, type StyleProp, type ViewStyle } from 'react-native';
 import {
   computeOutwardBorderLayout,
   normalizeOrbGlowIntensity,
@@ -11,6 +11,30 @@ import {
 
 function layerRadius(layerPx: number, cornerRadius: number | 'circle'): number {
   return cornerRadius === 'circle' ? layerPx / 2 : cornerRadius;
+}
+
+/** RN drops subpixel strokes; at least one physical pixel when slider > 0. */
+export function resolveInteriorBorderStroke(computedPx: number): number {
+  if (computedPx <= 0) return 0;
+  const minStroke = Math.max(StyleSheet.hairlineWidth, 1 / PixelRatio.get());
+  return Math.max(computedPx, minStroke);
+}
+
+/** Layout totals after RN inner-stroke floor (for orb/chip positioning). */
+export function resolveRnOutwardBorderLayout(
+  fillDiameter: number,
+  exteriorWidthSlider?: number | null,
+  interiorWidthSlider?: number | null,
+) {
+  const layout = computeOutwardBorderLayout(
+    fillDiameter,
+    normalizeOrbGlowIntensity(exteriorWidthSlider),
+    interiorWidthSlider,
+  );
+  const interiorStroke = resolveInteriorBorderStroke(layout.interiorPx);
+  const midPx = layout.fillPx + 2 * interiorStroke;
+  const totalPx = midPx + 2 * layout.exteriorPx;
+  return { ...layout, interiorStroke, midPx, totalPx };
 }
 
 function parseGlowShadow(
@@ -57,17 +81,21 @@ export function OutwardDoubleBorder({
   style?: StyleProp<ViewStyle>;
   children?: React.ReactNode;
 }) {
-  const { fillPx, interiorPx, exteriorPx, totalPx, fillRadius, midPx } = computeOutwardBorderLayout(
+  const layout = computeOutwardBorderLayout(
     fillDiameter,
     normalizeOrbGlowIntensity(exteriorWidthSlider),
     interiorWidthSlider,
   );
+  const { fillPx, exteriorPx, fillRadius } = layout;
+  const interiorStroke = resolveInteriorBorderStroke(layout.interiorPx);
+  const midPx = fillPx + 2 * interiorStroke;
+  const totalPx = midPx + 2 * exteriorPx;
 
   const fillRadiusStyle = cornerRadius === 'circle' ? fillRadius : cornerRadius;
   const midRadiusStyle = layerRadius(midPx, cornerRadius);
   const totalRadiusStyle = layerRadius(totalPx, cornerRadius);
 
-  let content = (
+  const fill = (
     <View
       style={{
         width: fillPx,
@@ -83,22 +111,25 @@ export function OutwardDoubleBorder({
     </View>
   );
 
-  if (interiorPx > 0) {
-    content = (
+  let content =
+    interiorStroke > 0 ? (
       <View
         style={{
           width: midPx,
           height: midPx,
           borderRadius: midRadiusStyle,
-          backgroundColor: interiorColor,
+          borderWidth: interiorStroke,
+          borderColor: interiorColor,
+          backgroundColor: 'transparent',
           alignItems: 'center',
           justifyContent: 'center',
         }}
       >
-        {content}
+        {fill}
       </View>
+    ) : (
+      fill
     );
-  }
 
   if (exteriorPx > 0) {
     content = (
