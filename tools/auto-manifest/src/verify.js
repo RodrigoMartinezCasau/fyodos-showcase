@@ -45,11 +45,22 @@ function normalizeHref(href) {
  * @param evidence  { routes: {intent: {file, symbol}}, actions: {intent: {file, symbol, whatItDoes}} }
  * @param sentFiles array of { rel, content } that were in the prompt
  * @param staticRoutes array of { routePath, urlPath, relFile } from scanRoutes
+ * @param opts.verifyRoutes  when false, AI-proposed routes are kept WITHOUT
+ *        filesystem verification (web apps have no expo-router ground truth).
+ *        Actions are always verified against real code regardless.
+ *        Defaults to true when there is a static route ground truth.
  * @returns { manifest, provenance }
  */
-function verifyManifest(manifest, evidence, sentFiles, staticRoutes) {
+function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) {
   const byRel = new Map(sentFiles.map((f) => [f.rel.replace(/\\/g, '/'), f.content]));
-  const provenance = { engine: 'auto-manifest-v3-ai-first', routes: [], actions: [], notes: [] };
+  const verifyRoutes = opts.verifyRoutes ?? staticRoutes.length > 0;
+  const provenance = {
+    engine: 'auto-manifest-v3-ai-first',
+    routeVerification: verifyRoutes ? 'filesystem' : 'ai-proposed (no static ground truth)',
+    routes: [],
+    actions: [],
+    notes: [],
+  };
 
   const validHrefs = new Set();
   for (const r of staticRoutes) {
@@ -62,6 +73,18 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes) {
     if (route.route === 'BACK') {
       routes.push(route);
       provenance.routes.push({ intent: route.intent, included: true, verification: 'static (SDK convention)' });
+      continue;
+    }
+    // Web mode: no filesystem route ground truth, so we cannot statically
+    // confirm routes. Keep what the AI proposed, but flag it as unverified —
+    // honesty over false precision.
+    if (!verifyRoutes) {
+      routes.push(route);
+      provenance.routes.push({
+        intent: route.intent, included: true,
+        verification: 'ai-proposed (route NOT statically verified — web app)',
+        evidence: evidence.routes?.[route.intent] || null,
+      });
       continue;
     }
     const ok = validHrefs.has(normalizeHref(route.route));

@@ -141,6 +141,9 @@ export function createFyodosBackendClient(options: FyodosBackendClientOptions): 
       if (request.llmModel?.trim()) {
         body.llm_model = request.llmModel.trim();
       }
+      if (request.sessionId?.trim()) {
+        body.session_id = request.sessionId.trim();
+      }
 
       const res = await fetchWithTimeout(
         `${baseUrl}/assistant/chat`,

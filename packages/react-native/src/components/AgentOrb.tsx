@@ -38,12 +38,13 @@ import { OrbThinkingSpinner } from './OrbThinkingSpinner';
 import { VoiceWaveform } from './VoiceWaveform';
 import { OrbVisual } from './OrbVisual';
 import { DEFAULT_ORB_THEME, type AgentModalTheme, type AgentOrbTheme } from './theme';
+import { FyodosOrbMark } from './FyodosOrbMark';
 
 export interface AgentOrbProps {
   enabled?: boolean;
   theme?: Partial<AgentOrbTheme>;
   modalTheme?: Partial<AgentModalTheme>;
-  /** Idle icon when no logoDataUrl. Default: a small accent dot. */
+  /** Idle icon when no logoDataUrl. Default: the neutral Fyodos brand mark. */
   icon?: React.ReactNode;
   /** Published logo — rendered inside OrbVisual above fill (transparent PNG safe). */
   logoDataUrl?: string | null;
@@ -309,16 +310,7 @@ export function AgentOrb({
                 height={t.waveformHeight}
               />
             ) : logoDataUrl ? null : (
-              icon ?? (
-                <View
-                  style={{
-                    width: t.size * 0.22,
-                    height: t.size * 0.22,
-                    borderRadius: t.size * 0.11,
-                    backgroundColor: t.accentColor,
-                  }}
-                />
-              )
+              icon ?? <FyodosOrbMark orbSize={t.size} />
             )}
           </OrbVisual>
         </Pressable>

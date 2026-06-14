@@ -32,7 +32,7 @@ AppManifest (all fields required unless noted):
   "appId": string, "appName": string, "appDescription": string, "version": string,
   "routes": [{
     "intent": string (snake_case, UNIQUE across routes AND actions),
-    "label": string, "route": string (expo-router href, or "BACK"),
+    "label": string, "route": string (opaque route string for the app's navigation adapter — an expo-router href, a URL path, or "BACK"),
     "examples": string[] (3-4 natural voice phrases, REQUIRED non-empty)
   }],
   "actions": [{
@@ -51,9 +51,18 @@ Validation rules: no duplicate intents anywhere; every route/action needs non-em
 actions need non-empty handler; requireConfirmation implies confirmationMessageTemplate.`;
 }
 
-const SYSTEM_PROMPT = `You analyze the FULL source code of a mobile app (Expo / React Native) and produce the manifest of an in-app voice agent (Fyodos AppManifest).
+function buildSystemPrompt(platform) {
+  const isWeb = platform === 'web';
+  const appKindLabel = isWeb
+    ? 'a web app (React, Next.js, Vite, react-router, or similar)'
+    : 'a mobile app (Expo / React Native)';
+  const screenWord = isWeb ? 'page/view/route' : 'screen';
+  const routeHintLine = isWeb
+    ? 'No reliable static route list is available for web apps, so infer routes/views from the router setup, page/route components, and navigation calls (react-router <Route>, Next.js pages, navigate()/<Link>). Routes you propose are NOT statically verified, so only include ones you can actually see in the code.'
+    : 'A statically-scanned route list is provided — prefer those hrefs verbatim.';
+  return `You analyze the FULL source code of ${appKindLabel} and produce the manifest of an in-app voice agent (Fyodos AppManifest).
 
-ROUTES: every screen the user can navigate to. A statically-scanned route list is provided — prefer those hrefs verbatim. Skip auth screens (sign-in/sign-up) and dynamic [param] routes. Always include a BACK route ("route": "BACK").
+ROUTES: every ${screenWord} the user can navigate to. ${routeHintLine} Skip auth screens (sign-in/sign-up) and dynamic [param] routes. Always include a BACK route ("route": "BACK").
 
 ACTIONS: things a user could trigger by voice. CRITICAL RULES:
 - Every action MUST be backed by a REAL function you can see in the provided code (a handler inside a component, a store/context action, a service function wired to UI). Set "handler" to that real function's name exactly as written in the code.
@@ -77,11 +86,12 @@ Answer ONLY JSON:
   },
   "uncertain": ["<anything you were not sure about, honestly>"]
 }`;
+}
 
 /**
  * @returns {{ parsed: object, usage: object, costUSD: number, elapsedMs: number, model: string }}
  */
-async function analyzeWithAI({ appMeta, files, omitted, staticRoutes, model = DEFAULT_MODEL }) {
+async function analyzeWithAI({ appMeta, files, omitted, staticRoutes, model = DEFAULT_MODEL, platform = 'mobile' }) {
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) throw new Error('OPENAI_API_KEY is required (auto-loaded from backend/.env or your shell)');
 
@@ -92,11 +102,14 @@ async function analyzeWithAI({ appMeta, files, omitted, staticRoutes, model = DE
   const omittedNote = omitted.length
     ? `\nFILES OMITTED FOR SIZE (declare blind spots in "uncertain"):\n${omitted.map((o) => o.rel).join('\n')}\n`
     : '';
+  const routeBlock = staticRoutes.length
+    ? `Statically-scanned routes (existence is verified — use these hrefs):\n${routeHint}\n`
+    : `No static route list (web app): infer routes/views from the router and navigation calls in the code below.\n`;
 
   const user =
     `App: ${appMeta.name}\nDescription: ${appMeta.description || '(none)'}\n` +
-    `Bundle id: ${appMeta.bundleId || '(none)'}\nDependencies: ${(appMeta.dependencies || []).join(', ')}\n\n` +
-    `Statically-scanned expo-router routes (existence is verified — use these hrefs):\n${routeHint}\n` +
+    `App id / bundle id (if any): ${appMeta.bundleId || '(none)'}\nDependencies: ${(appMeta.dependencies || []).join(', ')}\n\n` +
+    routeBlock +
     omittedNote +
     `\nManifest schema:\n${manifestSchemaDoc()}\n\n` +
     `FULL SOURCE CODE (${files.length} files):\n\n${codeBlob}`;
@@ -108,7 +121,7 @@ async function analyzeWithAI({ appMeta, files, omitted, staticRoutes, model = DE
     body: JSON.stringify({
       model,
       messages: [
-        { role: 'system', content: SYSTEM_PROMPT },
+        { role: 'system', content: buildSystemPrompt(platform) },
         { role: 'user', content: user },
       ],
       ...(model.startsWith('gpt-5')

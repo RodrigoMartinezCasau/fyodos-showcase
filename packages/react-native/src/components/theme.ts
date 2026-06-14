@@ -3,6 +3,7 @@
  * app-branded in the source app (accent color, icon, sizes) is a prop here —
  * exactly the surface a customization dashboard will drive.
  */
+import { FYODOS_DEFAULT_ORB_THEME, FYODOS_DEFAULT_KEYBOARD_CHIP } from '@fyodos/core';
 
 export interface AgentModalTheme {
   backdropColor: string;
@@ -73,10 +74,22 @@ export interface AgentOrbTheme {
   keyboardChip?: Partial<KeyboardChipTheme>;
 }
 
+// Derived from the SINGLE SOURCE OF TRUTH in @fyodos/core so the app's default
+// orb is identical to the dashboard preview's default orb (brand blue, neutral
+// mark, same keyboard chip). Do not hardcode brand values here.
 export const DEFAULT_ORB_THEME: AgentOrbTheme = {
-  size: 52,
-  borderWidth: 1.5,
-  accentColor: '#9aa4ff',
-  backgroundColor: 'rgba(0,0,0,0.72)',
-  waveformHeight: 26,
+  size: FYODOS_DEFAULT_ORB_THEME.size,
+  borderWidth: FYODOS_DEFAULT_ORB_THEME.borderWidth,
+  accentColor: FYODOS_DEFAULT_ORB_THEME.accentColor,
+  glowColor: FYODOS_DEFAULT_ORB_THEME.glowColor,
+  backgroundColor: FYODOS_DEFAULT_ORB_THEME.backgroundColor,
+  colorKey: FYODOS_DEFAULT_ORB_THEME.colorKey,
+  glowKey: FYODOS_DEFAULT_ORB_THEME.glowKey,
+  speed: FYODOS_DEFAULT_ORB_THEME.speed,
+  glowIntensity: FYODOS_DEFAULT_ORB_THEME.glowIntensity,
+  innerBorderColor: FYODOS_DEFAULT_ORB_THEME.innerBorderColor,
+  innerBorderWidth: FYODOS_DEFAULT_ORB_THEME.innerBorderWidth,
+  waveformColor: FYODOS_DEFAULT_ORB_THEME.waveformColor,
+  waveformHeight: FYODOS_DEFAULT_ORB_THEME.waveformHeight,
+  keyboardChip: { ...FYODOS_DEFAULT_KEYBOARD_CHIP },
 };

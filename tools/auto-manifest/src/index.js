@@ -71,9 +71,18 @@ async function main() {
   fs.mkdirSync(outDir, { recursive: true });
 
   // ── 1. Static route scan (cheap facts; also the route verifier's ground truth)
-  const { routes } = scanRoutes(appRoot);
+  // Platform: auto-detected from the presence of an expo-router app/ dir, or
+  // forced with --platform web|mobile. Web apps have no static route ground
+  // truth, so the AI proposes routes and we keep them unverified (honest flag).
+  const { appDir, routes } = scanRoutes(appRoot);
+  const platformArg = (arg('--platform', '') || '').toLowerCase();
+  const platform = platformArg === 'web' || platformArg === 'mobile'
+    ? platformArg
+    : (appDir ? 'mobile' : 'web');
+  const verifyRoutes = platform === 'mobile' && routes.length > 0;
   const appMeta = readAppMeta(appRoot);
-  console.log(`[static] routes=${routes.length}`);
+  console.log(`[static] platform=${platform} routes=${routes.length}` +
+    (platform === 'web' ? ' (web: routes inferred by AI, not statically verified)' : ''));
 
   // ── 2. Collect source files (rule-based, budget-aware) ────────────────────
   const { included, omitted, estimatedTokens } = collectFiles(appRoot, { maxInputTokens });
@@ -97,7 +106,7 @@ async function main() {
   } else {
     // ── 3. AI reads the code ────────────────────────────────────────────────
     const { parsed, usage, costUSD, elapsedMs, promptChars } = await analyzeWithAI({
-      appMeta, files: included, omitted, staticRoutes: routes, model,
+      appMeta, files: included, omitted, staticRoutes: routes, model, platform,
     });
     const proposed = parsed.manifest || {};
     const evidence = parsed.evidence || {};
@@ -106,7 +115,10 @@ async function main() {
     console.log(`[ai] tokens in=${usage.prompt_tokens} out=${usage.completion_tokens} cost=$${costUSD.toFixed(4)}`);
 
     // ── 4. Mechanical verification of the AI's claims ───────────────────────
-    ({ manifest, provenance } = verifyManifest(proposed, evidence, included, routes));
+    // Actions are always verified against real code. Routes are verified only
+    // when there is filesystem ground truth (mobile); for web they are kept as
+    // AI-proposed and flagged unverified in provenance.
+    ({ manifest, provenance } = verifyManifest(proposed, evidence, included, routes, { verifyRoutes }));
     ensureBackRoute(manifest, provenance);
     const droppedActions = provenance.actions.filter((a) => !a.included).length;
     const droppedRoutes = provenance.routes.filter((r) => !r.included).length;
@@ -125,6 +137,8 @@ async function main() {
     analysisMeta = {
       engine: 'auto-manifest-v3-ai-first',
       model,
+      platform,
+      routeVerification: verifyRoutes ? 'filesystem' : 'ai-proposed',
       appKind: parsed.appKind || 'unknown',
       costUSD: Number(costUSD.toFixed(4)),
       droppedActions,

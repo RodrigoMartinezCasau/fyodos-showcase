@@ -41,6 +41,8 @@ export type { UiRegistry } from './bridge/createUiRegistry';
 // Backend HTTP client
 export { createFyodosBackendClient, buildManifestPayload } from './api/backendClient';
 export type { FyodosBackendClientOptions } from './api/backendClient';
+export { createFyodosTelemetry } from './api/backendTelemetry';
+export type { FyodosTelemetryOptions } from './api/backendTelemetry';
 export { AgentApiError, isAgentApiError } from './api/errors';
 export type { AgentApiErrorCode } from './api/errors';
 

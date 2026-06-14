@@ -9,13 +9,15 @@
 const fs = require('fs');
 const path = require('path');
 
-/** Locates the expo-router app dir ('app' or 'src/app'). */
+/** Locates the expo-router app dir ('app' or 'src/app').
+ *  Returns null when none exists (e.g. a web app) instead of throwing, so the
+ *  AI-first pipeline can still run with no static route ground truth. */
 function findAppDir(appRoot) {
   for (const candidate of ['app', 'src/app']) {
     const full = path.join(appRoot, candidate);
     if (fs.existsSync(full) && fs.statSync(full).isDirectory()) return full;
   }
-  throw new Error(`No expo-router app/ directory found under ${appRoot}`);
+  return null;
 }
 
 const SCREEN_EXT = /\.(tsx|jsx|ts|js)$/;
@@ -30,6 +32,12 @@ const IGNORED = new Set(['_layout', '+not-found', '+html']);
 function scanRoutes(appRoot) {
   const appDir = findAppDir(appRoot);
   const routes = [];
+
+  // No expo-router app/ dir (typical for web apps). Return empty ground truth;
+  // the caller degrades to "routes proposed by the AI, not statically verified".
+  if (!appDir) {
+    return { appDir: null, routes };
+  }
 
   function walk(dir, urlSegments) {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {

@@ -191,6 +191,15 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
   const consentEntryRef = useRef<ConsentEntry | null>(null);
   /** In-memory session conversation (bounded window + summary for token cost). */
   const conversationRef = useRef(createConversationSession());
+  /**
+   * Opaque conversation/session id for analytics correlation (NEVER content).
+   * Stable for this hook instance — lets the backend count distinct sessions.
+   */
+  const sessionIdRef = useRef(
+    `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`,
+  );
+  /** The session-start analytics event is emitted lazily, on the first turn. */
+  const sessionStartedRef = useRef(false);
 
   const onPhaseChangeRef = useRef(config.onPhaseChange);
   onPhaseChangeRef.current = config.onPhaseChange;
@@ -306,9 +315,19 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
       const startedAt = Date.now();
       const routeAtInvocation = navigation.getCurrentRoute();
       devLog(turnId, 'request start', `route=${routeAtInvocation ?? '?'}`);
+      // First real turn of this session → one countable "conversation".
+      if (!sessionStartedRef.current) {
+        sessionStartedRef.current = true;
+        telemetry.logEvent({
+          eventType: 'agent_session_started',
+          sessionId: sessionIdRef.current,
+          currentRoute: routeAtInvocation,
+        });
+      }
       telemetry.logEvent({
         eventType: 'agent_invoked',
         userMessage: msg,
+        sessionId: sessionIdRef.current,
         currentRoute: routeAtInvocation,
       });
 
@@ -345,6 +364,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
             currentRoute: routeAtInvocation ?? undefined,
             conversationHistory: conversation.history,
             conversationSummary: conversation.summary ?? undefined,
+            sessionId: sessionIdRef.current,
             ...buildManifestPayload(manifest),
           },
           { signal: controller.signal },
@@ -458,6 +478,14 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
               };
               confirmationReaskedRef.current = false;
               setPendingConfirmationMessage(confirmationMessage);
+              // Countable, content-free analytics: a sensitive confirmation was
+              // requested (completion is tracked when the action runs).
+              telemetry.logEvent({
+                eventType: 'action_confirmation_requested',
+                intentDetected: action.intent ?? null,
+                sessionId: sessionIdRef.current,
+                currentRoute: routeAtInvocation,
+              });
               devLog(turnId, 'confirmation modal shown', `${action.intent} (voice=${voiceMode})`);
               // The question is spoken (the prompt instructs the LLM that its
               // reply BE the question; if it strayed, the modal still shows

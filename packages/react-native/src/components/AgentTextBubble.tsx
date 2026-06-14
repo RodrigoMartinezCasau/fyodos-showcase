@@ -62,6 +62,9 @@ export function AgentTextBubble({
   closeLabel,
 }: AgentTextBubbleProps) {
   const t = { ...DEFAULT_MODAL_THEME, ...theme };
+  // Send button follows the conversation accent (dashboard), falling back to
+  // the orb accent so older configs keep working.
+  const sendButtonColor = theme?.primaryButtonColor ?? accentColor;
   const [draft, setDraft] = useState('');
   const inputRef = useRef<TextInput>(null);
 
@@ -115,7 +118,7 @@ export function AgentTextBubble({
           ) : null}
           {busy ? (
             <View style={styles.busyRow}>
-              <ActivityIndicator size="small" color={accentColor} />
+              <ActivityIndicator size="small" color={sendButtonColor} />
             </View>
           ) : null}
 
@@ -141,7 +144,7 @@ export function AgentTextBubble({
               style={({ pressed }) => [
                 styles.sendBtn,
                 {
-                  backgroundColor: accentColor,
+                  backgroundColor: sendButtonColor,
                   borderRadius: t.sendButtonRadius ?? 16,
                   opacity: busy || !draft.trim() ? 0.35 : pressed ? 0.8 : 1,
                 },
