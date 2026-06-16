@@ -102,6 +102,7 @@ export function AgentOrb({
     declineConsent,
     confirmationModalVisible,
     confirmationMessage,
+    confirmationVoiceHint,
     confirmPendingAction,
     cancelPendingAction,
     wakeWordListening,
@@ -202,6 +203,7 @@ export function AgentOrb({
       <ActionConfirmationModal
         visible={confirmationModalVisible}
         message={confirmationMessage}
+        voiceHint={confirmationVoiceHint}
         onConfirm={() => void confirmPendingAction()}
         onCancel={cancelPendingAction}
         title={ui.confirmTitle}

@@ -112,6 +112,8 @@ export interface UseAgentResult {
   declineConsent: () => void;
   confirmationModalVisible: boolean;
   confirmationMessage: string;
+  /** Strict-action only: the exact phrase to say by voice (display hint). */
+  confirmationVoiceHint: string | null;
   confirmPendingAction: () => Promise<void>;
   cancelPendingAction: () => void;
   /** Passive wake-word listening is active (discrete privacy indicator). */
@@ -159,6 +161,14 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
    * modal buttons or the voice window.
    */
   const [pendingConfirmationMessage, setPendingConfirmationMessage] = useState<string | null>(
+    null,
+  );
+  /**
+   * Visible voice hint for STRICT confirmations: tells the user the EXACT
+   * phrase to say (the tap button always works too). Null for non-strict
+   * actions. Discoverability only — never relaxes the strict requirement.
+   */
+  const [pendingConfirmationVoiceHint, setPendingConfirmationVoiceHint] = useState<string | null>(
     null,
   );
   const pendingConfirmationRef = useRef<PendingConfirmation | null>(null);
@@ -236,9 +246,22 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
       setPhaseSafe('speaking');
       stopSpeech();
 
-      if (audioBase64?.length) {
+      // ONE consistent voice across the whole conversation. The main turn
+      // reply arrives with server audio (the configured/cloud voice). For any
+      // text the CLIENT generates (action feedback, confirmation questions,
+      // cancellations, re-asks) there is no server audio, so we synthesize it
+      // with the SAME server voice via previewTts — otherwise it would fall to
+      // the device (OS) voice and the agent would switch voices mid-dialogue.
+      // An empty voice id lets the backend apply its own default, matching the
+      // voice used for the main reply. Device TTS stays as the last resort.
+      let audio = audioBase64 ?? null;
+      if (!audio?.length) {
+        audio = await backend.previewTts(getTtsVoice() ?? '', reply);
+      }
+
+      if (audio?.length) {
         try {
-          await voice.playAudioBase64Mp3(audioBase64);
+          await voice.playAudioBase64Mp3(audio);
           if (phaseRef.current === 'speaking') setPhaseSafe('idle');
           return;
         } catch {
@@ -249,7 +272,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
       await voice.speakWithDeviceTts(reply, { locale: ttsLocale });
       if (phaseRef.current === 'speaking') setPhaseSafe('idle');
     },
-    [setPhaseSafe, stopSpeech, ttsLocale, voice],
+    [backend, getTtsVoice, setPhaseSafe, stopSpeech, ttsLocale, voice],
   );
 
   const notifyApiError = useCallback(
@@ -422,11 +445,13 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
             if (pre.kind === 'done') {
               const preResult = pre.result;
               telemetry.logEvent({
-                eventType: preResult.idempotent
-                  ? 'action_idempotent'
-                  : preResult.success
-                    ? 'action_executed'
-                    : 'action_failed',
+                eventType: preResult.recoverable
+                  ? 'action_needs_context'
+                  : preResult.idempotent
+                    ? 'action_idempotent'
+                    : preResult.success
+                      ? 'action_executed'
+                      : 'action_failed',
                 userMessage: msg,
                 intentDetected: action.intent ?? null,
                 actionExecuted: {
@@ -441,7 +466,10 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
                 contextChars,
                 redactionsApplied: redactions,
               });
-              if (preResult.message) {
+              // Recoverable (screen/context) gap: keep the assistant's guiding
+              // reply ("which item?" / it will navigate), never override it
+              // with a refusal. Only terminal results speak the engine message.
+              if (preResult.message && !preResult.recoverable) {
                 spokenReply = preResult.message;
                 spokenAudio = null;
               }
@@ -478,6 +506,14 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
               };
               confirmationReaskedRef.current = false;
               setPendingConfirmationMessage(confirmationMessage);
+              // Strict actions: surface the exact phrase in the modal too, so
+              // the user can DISCOVER it (until now it was only spoken). This
+              // is display-only and never weakens the strict requirement.
+              setPendingConfirmationVoiceHint(
+                voiceMode === 'strict' && strictPhrase && !silentTurnRef.current
+                  ? formatMessage(messages.strictConfirmationModalHint, { phrase: strictPhrase })
+                  : null,
+              );
               // Countable, content-free analytics: a sensitive confirmation was
               // requested (completion is tracked when the action runs).
               telemetry.logEvent({
@@ -496,11 +532,13 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
             const actionStartedAt = Date.now();
             const execResult = await executor.execute(action, executeContext);
             telemetry.logEvent({
-              eventType: execResult.idempotent
-                ? 'action_idempotent'
-                : execResult.success
-                  ? 'action_executed'
-                  : 'action_failed',
+              eventType: execResult.recoverable
+                ? 'action_needs_context'
+                : execResult.idempotent
+                  ? 'action_idempotent'
+                  : execResult.success
+                    ? 'action_executed'
+                    : 'action_failed',
               userMessage: msg,
               intentDetected: action.intent ?? null,
               actionExecuted: {
@@ -516,9 +554,9 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
               contextChars,
               redactionsApplied: redactions,
             });
-            if ((execResult.idempotent || !execResult.success) && execResult.message) {
-              spokenReply = execResult.message;
-              spokenAudio = null;
+            if (execResult.recoverable) {
+              // Screen/context gap that the agent can resolve by guiding or
+              // navigating: keep the assistant's reply, never speak a refusal.
             } else if (
               execResult.success &&
               execResult.message &&
@@ -532,6 +570,14 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
                 execResult.data.ttsVoiceOverride,
                 execResult.message,
               );
+            } else if (execResult.message) {
+              // FEEDBACK GUARANTEE: when the handler reports a real outcome
+              // (success, idempotent or failure), speak ITS message instead of
+              // the LLM's optimistic "Done" — the handler is the ground truth
+              // that the action actually completed. Force device TTS (the LLM
+              // audio no longer matches the spoken text).
+              spokenReply = execResult.message;
+              spokenAudio = null;
             }
           }
         } else {
@@ -1120,11 +1166,11 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
       // Silent text mode: the bubble shows the feedback; skip the TTS
       // synthesis round-trip entirely.
       if (silentTurnRef.current) return;
-      const voiceId = getTtsVoice();
-      const audio = voiceId ? await backend.previewTts(voiceId, text) : null;
-      await speakReply(text, audio);
+      // speakReply now synthesizes client-generated text with the server voice
+      // itself (single-voice guarantee), so feedback goes through the same path.
+      await speakReply(text, null);
     },
-    [backend, getTtsVoice, speakReply],
+    [speakReply],
   );
 
   /**
@@ -1137,6 +1183,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     const pending = pendingConfirmationRef.current;
     if (!pending) {
       setPendingConfirmationMessage(null);
+      setPendingConfirmationVoiceHint(null);
       return;
     }
 
@@ -1159,6 +1206,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
 
     pendingConfirmationRef.current = null;
     setPendingConfirmationMessage(null);
+    setPendingConfirmationVoiceHint(null);
 
     const { action, context } = pending;
     const actionStartedAt = Date.now();
@@ -1205,6 +1253,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     const pending = pendingConfirmationRef.current;
     pendingConfirmationRef.current = null;
     setPendingConfirmationMessage(null);
+    setPendingConfirmationVoiceHint(null);
     if (!pending) return;
     telemetry.logEvent({
       eventType: 'action_cancelled',
@@ -1242,6 +1291,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     declineConsent,
     confirmationModalVisible: pendingConfirmationMessage !== null,
     confirmationMessage: pendingConfirmationMessage ?? '',
+    confirmationVoiceHint: pendingConfirmationVoiceHint,
     confirmPendingAction,
     cancelPendingAction,
     wakeWordListening,

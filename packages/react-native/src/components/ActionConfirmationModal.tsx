@@ -16,6 +16,11 @@ export interface ActionConfirmationModalProps {
   confirmLabel: string;
   cancelLabel: string;
   theme?: Partial<AgentModalTheme>;
+  /**
+   * Strict-action only: the exact phrase the user must say to confirm BY VOICE.
+   * Shown as a discreet hint under the message (the tap button always works).
+   */
+  voiceHint?: string | null;
 }
 
 export function ActionConfirmationModal({
@@ -27,6 +32,7 @@ export function ActionConfirmationModal({
   confirmLabel,
   cancelLabel,
   theme,
+  voiceHint,
 }: ActionConfirmationModalProps) {
   const t = { ...DEFAULT_MODAL_THEME, ...theme };
   return (
@@ -45,6 +51,9 @@ export function ActionConfirmationModal({
         >
           <Text style={[styles.title, { color: t.titleColor }]}>{title}</Text>
           <Text style={[styles.body, { color: t.bodyColor }]}>{message}</Text>
+          {voiceHint ? (
+            <Text style={[styles.voiceHint, { color: t.bodyColor }]}>{voiceHint}</Text>
+          ) : null}
           <Pressable
             accessibilityRole="button"
             style={({ pressed }) => [
@@ -100,6 +109,13 @@ const styles = StyleSheet.create({
   body: {
     fontSize: 14,
     lineHeight: 20,
+    marginBottom: 12,
+  },
+  voiceHint: {
+    fontSize: 13,
+    lineHeight: 18,
+    fontStyle: 'italic',
+    opacity: 0.8,
     marginBottom: 12,
   },
   primaryButton: {

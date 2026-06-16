@@ -16,7 +16,7 @@ salida confirma que cada claim existe de verdad en el código antes de aceptarlo
 cd tools/auto-manifest
 node src/index.js /ruta/a/la/app --out output/mi-app
 
-# Elegir modelo (por defecto gpt-5; la calidad de evidencia importa más que el céntimo):
+# Elegir modelo (por defecto Claude Opus; override con --model gpt-5, sonnet, …):
 node src/index.js /ruta/a/la/app --out output/mi-app --model gpt-5-mini
 
 # Pasada solo estática (gratis, sin enviar código a la IA — solo rutas, sin acciones):
@@ -41,7 +41,8 @@ Dos fronteras distintas, sé transparente con ambas:
    payloads grandes. No existe ningún endpoint capaz de recibir código.
 2. **Proveedor de IA: el código SÍ se envía durante el análisis.** Para que la
    IA lea el código, los archivos fuente recopilados se mandan a la API de
-   OpenAI **con la key del propio desarrollador** (`OPENAI_API_KEY`), una vez
+   OpenAI o Anthropic **con la key del propio desarrollador** (`ANTHROPIC_API_KEY`
+   por defecto, o `OPENAI_API_KEY` si usas `--model gpt-…`), una vez
    por análisis. Es el mismo modelo que cualquier herramienta de IA sobre
    código, pero debe figurar en la política de privacidad y mencionarse a
    clientes sensibles (banca, salud…). Para esos casos: `--no-llm` da una

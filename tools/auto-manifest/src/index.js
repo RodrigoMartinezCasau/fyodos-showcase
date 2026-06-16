@@ -17,12 +17,27 @@
  *
  * Usage:
  *   node src/index.js <target-app-root> --out <output-dir> \
- *       [--model gpt-5] [--max-input-tokens 150000] [--no-llm] \
- *       [--publish [--api-key <fyodos-project-api-key>] [--api-url <backend-url>]]
+ *       [--model claude-opus-4-8] [--max-input-tokens 150000] [--no-llm] \
+ *       [--publish [--api-key <fyodos-project-api-key>] [--api-url <backend-url>]] \
+ *       [--no-wire | --yes]
+ *       [--verbose]
+ *
+ * Output verbosity:
+ *   By default the CLI shows only developer-facing progress (no token counts,
+ *   cost, model id, API key prefix, or internal file paths). Pass --verbose
+ *   for the full diagnostic log (for Fiodos operators debugging locally).
+ *
+ * Web orb wiring (web targets only):
+ *   After analysis, a web target is OFFERED automatic wiring of <FyodosAgent/>
+ *   into the app's root layout. It asks before editing your code; on "no" (or a
+ *   non-interactive shell) it prints the ready-to-paste snippet instead.
+ *     --yes      accept the wiring without the prompt (CI / express installer)
+ *     --no-wire  skip wiring entirely (analysis/publish unaffected)
  *
  * Env (auto-loaded from tools/auto-manifest/.env and fyodos/backend/.env;
  * shell exports take precedence):
- *   OPENAI_API_KEY      — AI analysis (your key, your cost)
+ *   ANTHROPIC_API_KEY   — AI analysis default (Claude Opus; your key, your cost)
+ *   OPENAI_API_KEY      — only if you pass --model gpt-5 / gpt-4o / …
  *   FYODOS_API_KEY      — project key for --publish (or the analyzed app's
  *                         EXPO_PUBLIC_FYODOS_API_KEY, which wins)
  *
@@ -31,8 +46,8 @@
  *     manifest.json + small metadata are POSTed to the Fyodos backend.
  *     Source files NEVER reach the Fyodos backend.
  *   - The AI step sends the collected source files to the AI provider
- *     (OpenAI API) using the developer's own key. Use --no-llm for a
- *     static-only pass (routes, no actions) if that is not acceptable.
+ *     (Anthropic Claude Opus by default) using the developer's own key.
+ *     Use --no-llm for a static-only pass (routes, no actions) if that is not acceptable.
  *
  * Output:
  *   manifest.json     — AppManifest (schema of @fyodos/core), verified
@@ -50,22 +65,77 @@ loadEnv();
 
 const { scanRoutes } = require('./routes');
 const { collectFiles } = require('./collect');
-const { analyzeWithAI, DEFAULT_MODEL } = require('./aiAnalyze');
+const { analyzeWithAI, DEFAULT_MODEL, resolveModel } = require('./aiAnalyze');
 const { verifyManifest } = require('./verify');
+const { wireWebOrb, reportWireResult } = require('./wireWeb');
 
 function arg(flag, fallback) {
   const i = process.argv.indexOf(flag);
   return i > -1 ? process.argv[i + 1] : fallback;
 }
 
+function fyodosTermColors() {
+  const on = Boolean(process.stderr.isTTY);
+  return {
+    blue: on ? '\x1b[38;5;75m' : '',
+    cyan: on ? '\x1b[38;5;117m' : '',
+    dim: on ? '\x1b[2m' : '',
+    reset: on ? '\x1b[0m' : '',
+  };
+}
+
+/** Internal diagnostics (tokens, cost, paths…) — only with --verbose. */
+function isVerbose() {
+  return process.argv.includes('--verbose') || process.argv.includes('-v');
+}
+
+function logDev(...args) {
+  if (isVerbose()) console.log(...args);
+}
+
+/** Branded one-liner for the developer running the CLI (not internal ops). */
+function logUser(line) {
+  const { blue, cyan, reset } = fyodosTermColors();
+  console.log(`${cyan}◉${reset} ${blue}Fiodos${reset} · ${line}`);
+}
+
+/** Branded terminal spinner (Fyodos orb + colors when stderr is a TTY). */
+async function withSpinner(label, work) {
+  const orbFrames = ['◴', '◷', '◶', '◵'];
+  const brailleFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  const { blue, cyan, dim, reset } = fyodosTermColors();
+  let frame = 0;
+  const start = Date.now();
+  const tick = () => {
+    const sec = Math.floor((Date.now() - start) / 1000);
+    const orb = orbFrames[frame % orbFrames.length];
+    const tail = brailleFrames[frame % brailleFrames.length];
+    const line =
+      `${cyan}${orb}${reset} ${blue}Fiodos${reset} ${dim}${tail}${reset}  ${label}… ${dim}${sec}s${reset}`;
+    process.stderr.write(`\r\x1b[K${line}`);
+    frame += 1;
+  };
+  tick();
+  const id = setInterval(tick, 140);
+  try {
+    return await work();
+  } finally {
+    clearInterval(id);
+    process.stderr.write('\r\x1b[K');
+  }
+}
+
 async function main() {
   const appRoot = process.argv[2];
   if (!appRoot) {
-    console.error('Usage: node src/index.js <target-app-root> --out <dir> [--model gpt-5] [--no-llm] [--publish]');
+    console.error('Usage: node src/index.js <target-app-root> --out <dir> [--model claude-opus-4-8] [--no-llm] [--publish]');
     process.exit(1);
   }
   const outDir = arg('--out', path.join(__dirname, '../output', path.basename(appRoot)));
-  const model = arg('--model', DEFAULT_MODEL);
+  // Model precedence: explicit --model (operator override) > backend plan model
+  // (resolved below from the analysis-quota pre-check) > DEFAULT_MODEL fallback.
+  const explicitModel = arg('--model', '');
+  let model = resolveModel(explicitModel || DEFAULT_MODEL);
   const maxInputTokens = Number(arg('--max-input-tokens', '150000'));
   const useLLM = !process.argv.includes('--no-llm');
   fs.mkdirSync(outDir, { recursive: true });
@@ -74,14 +144,19 @@ async function main() {
   // Platform: auto-detected from the presence of an expo-router app/ dir, or
   // forced with --platform web|mobile. Web apps have no static route ground
   // truth, so the AI proposes routes and we keep them unverified (honest flag).
-  const { appDir, routes } = scanRoutes(appRoot);
+  const { appDir, routes: scannedRoutes } = scanRoutes(appRoot);
   const platformArg = (arg('--platform', '') || '').toLowerCase();
   const platform = platformArg === 'web' || platformArg === 'mobile'
     ? platformArg
-    : (appDir ? 'mobile' : 'web');
+    : detectPlatform(appRoot, appDir);
+  // The expo-router filesystem scan ONLY describes a mobile app. A Next.js App
+  // Router web app also has an app/ dir, so the scan would otherwise produce
+  // bogus "routes" and misclassify the project; for web we ignore it and let
+  // the AI propose routes (the documented web contract).
+  const routes = platform === 'mobile' ? scannedRoutes : [];
   const verifyRoutes = platform === 'mobile' && routes.length > 0;
   const appMeta = readAppMeta(appRoot);
-  console.log(`[static] platform=${platform} routes=${routes.length}` +
+  logDev(`[static] platform=${platform} routes=${routes.length}` +
     (platform === 'web' ? ' (web: routes inferred by AI, not statically verified)' : ''));
 
   // ── 2. Collect source files (rule-based, budget-aware) ────────────────────
@@ -90,7 +165,7 @@ async function main() {
     included: included.map((f) => f.rel),
     omitted,
   }, null, 2));
-  console.log(`[collect] files=${included.length} (~${estimatedTokens} tokens)` +
+  logDev(`[collect] files=${included.length} (~${estimatedTokens} tokens)` +
     (omitted.length ? ` omitted=${omitted.length} (over budget)` : ''));
 
   let manifest;
@@ -102,17 +177,42 @@ async function main() {
     // Useful as a free smoke pass or when sending code to an AI provider
     // is not acceptable for this app.
     ({ manifest, provenance } = routesOnlyManifest(appMeta, routes));
-    console.log('[no-llm] static-only manifest (routes only, no actions)');
+    logDev('[no-llm] static-only manifest (routes only, no actions)');
+    logUser(`Static analysis complete — ${manifest.routes.length} routes`);
   } else {
+    // ── 2b. Plan quota pre-check (before spending any AI tokens) ─────────────
+    // When publishing, ask the backend whether this project's plan still allows
+    // an analysis. The Free plan includes exactly one (the initial onboarding
+    // analysis); paid plans allow several. The publish step re-checks server-
+    // side, so this is only a courtesy to avoid wasting AI tokens.
+    if (process.argv.includes('--publish')) {
+      loadAppEnv(path.resolve(appRoot));
+      const quota = await fetchAnalysisQuota(resolveApiTarget());
+      if (quota && quota.allowed === false) {
+        printQuotaBlocked(quota);
+        return;
+      }
+      // Tier-based model: the backend tells us which model this plan is
+      // entitled to. The user never sees or sets it. An explicit --model
+      // (operator override) always wins.
+      if (!explicitModel && quota && quota.model) {
+        model = resolveModel(quota.model);
+      }
+    }
+
     // ── 3. AI reads the code ────────────────────────────────────────────────
-    const { parsed, usage, costUSD, elapsedMs, promptChars } = await analyzeWithAI({
-      appMeta, files: included, omitted, staticRoutes: routes, model, platform,
-    });
+    logUser('Analyzing your project — may take 1–2 min');
+    const { parsed, usage, costUSD, elapsedMs, promptChars } = await withSpinner(
+      'Analyzing your project with AI',
+      () => analyzeWithAI({
+        appMeta, files: included, omitted, staticRoutes: routes, model, platform,
+      }),
+    );
     const proposed = parsed.manifest || {};
     const evidence = parsed.evidence || {};
-    console.log(`[ai] model=${model} proposed routes=${(proposed.routes || []).length} ` +
+    logDev(`[ai] model=${model} proposed routes=${(proposed.routes || []).length} ` +
       `actions=${(proposed.actions || []).length} in ${(elapsedMs / 1000).toFixed(1)}s`);
-    console.log(`[ai] tokens in=${usage.prompt_tokens} out=${usage.completion_tokens} cost=$${costUSD.toFixed(4)}`);
+    logDev(`[ai] tokens in=${usage.prompt_tokens} out=${usage.completion_tokens} cost=$${costUSD.toFixed(4)}`);
 
     // ── 4. Mechanical verification of the AI's claims ───────────────────────
     // Actions are always verified against real code. Routes are verified only
@@ -122,8 +222,9 @@ async function main() {
     ensureBackRoute(manifest, provenance);
     const droppedActions = provenance.actions.filter((a) => !a.included).length;
     const droppedRoutes = provenance.routes.filter((r) => !r.included).length;
-    console.log(`[verify] kept routes=${manifest.routes.length} actions=${manifest.actions.length}` +
+    logDev(`[verify] kept routes=${manifest.routes.length} actions=${manifest.actions.length}` +
       ` | dropped: ${droppedRoutes} routes, ${droppedActions} actions (unproven evidence)`);
+    logUser(`Analysis complete — ${manifest.routes.length} routes, ${manifest.actions.length} actions`);
 
     fs.writeFileSync(path.join(outDir, 'evidence.json'), JSON.stringify({
       evidence, uncertain: parsed.uncertain || [],
@@ -146,12 +247,19 @@ async function main() {
     };
   }
 
+  // ── 4b. Agent-to-agent: suggest which actions to restrict for EXTERNAL agents.
+  // Advisory only (the developer decides in the dashboard; nothing is gated by
+  // this). Sensitive/irreversible actions — those requiring confirmation, or
+  // whose label/intent reads as destructive/financial — are flagged 'restrict';
+  // the rest 'allow'. Closed-by-default still applies regardless of this hint.
+  annotateExternalAgentRecommendations(manifest);
+
   // ── 5. Final gate: the real @fyodos/core validator ─────────────────────────
   try {
     const { validateManifest } = require(path.join(__dirname, '../../../packages/core/dist/manifest/validate.js'));
     const validation = validateManifest(manifest);
     provenance.coreValidation = validation;
-    console.log(`[validate] @fyodos/core validateManifest → valid=${validation.valid}` +
+    logDev(`[validate] @fyodos/core validateManifest → valid=${validation.valid}` +
       (validation.errors?.length ? ` errors=${JSON.stringify(validation.errors)}` : ''));
   } catch {
     provenance.coreValidation = { skipped: 'core dist not built' };
@@ -159,8 +267,8 @@ async function main() {
 
   fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
   fs.writeFileSync(path.join(outDir, 'provenance.json'), JSON.stringify(provenance, null, 2));
-  console.log(`\n[done] manifest: ${manifest.routes.length} routes, ${manifest.actions.length} actions`);
-  console.log(`[done] output → ${outDir}`);
+  logDev(`[done] manifest: ${manifest.routes.length} routes, ${manifest.actions.length} actions`);
+  logDev(`[done] output → ${outDir}`);
 
   if (process.argv.includes('--publish')) {
     loadAppEnv(path.resolve(appRoot));
@@ -171,6 +279,40 @@ async function main() {
       actionsIncluded: manifest.actions.length,
     });
   }
+
+  // ── 6. Web: offer to wire the orb into the app (consent-based) ─────────────
+  // The same command the developer already runs also drops <FyodosAgent/> into
+  // their app, so the onboarding never needs a separate manual step. Mobile is
+  // wired by its own installer and is intentionally left untouched here.
+  if (platform === 'web') {
+    const { apiUrl } = resolveApiTarget();
+    const result = await wireWebOrb(path.resolve(appRoot), {
+      apiUrl,
+      colors: fyodosTermColors(),
+      assumeYes: process.argv.includes('--yes') || process.argv.includes('--wire-yes'),
+      noWire: process.argv.includes('--no-wire'),
+    });
+    reportWireResult(result, fyodosTermColors());
+  }
+}
+
+/**
+ * Resolve the target platform from package.json dependencies — the only signal
+ * that reliably tells a Next.js App Router web app (which has an app/ dir) apart
+ * from an expo-router mobile app (which also has an app/ dir). Falls back to the
+ * old app/-dir heuristic only when no framework dependency is recognizable.
+ */
+function detectPlatform(appRoot, appDir) {
+  let deps = {};
+  try {
+    const pkg = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
+    deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+  } catch {
+    /* no package.json → fall through to the directory heuristic */
+  }
+  if (deps.expo || deps['expo-router'] || deps['react-native']) return 'mobile';
+  if (deps.next || deps.vite || deps['@vitejs/plugin-react'] || deps['react-scripts']) return 'web';
+  return appDir ? 'mobile' : 'web';
 }
 
 function readAppMeta(appRoot) {
@@ -240,35 +382,112 @@ function ensureBackRoute(manifest, provenance) {
   }
 }
 
+// Words that, in an action label/intent, signal a sensitive or irreversible
+// operation worth keeping human-only by default (agent-to-agent).
+const RESTRICT_HINTS = [
+  'delete', 'remove', 'cancel', 'pay', 'payment', 'purchase', 'buy', 'order',
+  'checkout', 'transfer', 'withdraw', 'refund', 'logout', 'sign out', 'deactivate',
+  'close account', 'address', 'password', 'subscribe', 'unsubscribe', 'send money',
+  'borrar', 'eliminar', 'cancelar', 'pagar', 'pago', 'comprar', 'pedido',
+  'transferir', 'retirar', 'reembolso', 'cerrar sesión', 'dirección', 'contraseña',
+];
+
+/**
+ * Annotate each action with `externalAgentRecommendation` ('restrict' | 'allow').
+ * Advisory only: the dashboard surfaces it as a suggestion and the developer
+ * decides. An action that requires confirmation, or whose label/intent matches a
+ * sensitive keyword, is recommended for restriction.
+ */
+function annotateExternalAgentRecommendations(manifest) {
+  for (const action of manifest.actions || []) {
+    const haystack = `${action.intent || ''} ${action.label || ''}`.toLowerCase();
+    const looksSensitive =
+      action.requireConfirmation === true ||
+      RESTRICT_HINTS.some((w) => haystack.includes(w));
+    action.externalAgentRecommendation = looksSensitive ? 'restrict' : 'allow';
+  }
+}
+
 /**
  * POST the resulting manifest (and only the manifest + small metadata) to the
  * developer's Fyodos project. Authenticated with the project API key shown in
  * the dashboard. Never sends source files, evidence or usage logs.
  */
-async function publishManifest(manifest, meta) {
+/** Resolve the Fiodos backend target (project API key + URL) from flags/env. */
+function resolveApiTarget() {
   const apiKey = arg('--api-key', process.env.FYODOS_API_KEY || '');
   const apiUrl = (arg('--api-url', process.env.FYODOS_API_URL || 'http://localhost:8000') || '').replace(/\/$/, '');
+  return { apiKey, apiUrl };
+}
+
+/**
+ * Ask the backend, BEFORE calling the AI, for this project's analysis quota and
+ * the model its plan is entitled to. Returns the full quota object, or null on
+ * missing key / unreachable backend (the publish step is the real gate, so we
+ * never hard-fail the analysis on a transient pre-check error). The caller reads
+ * `allowed` (to stop early when the quota is exhausted) and `model` (tier-based
+ * cost control: free→Haiku, pro→Sonnet, advanced/enterprise→Opus).
+ */
+async function fetchAnalysisQuota({ apiKey, apiUrl }) {
+  if (!apiKey) return null;
+  try {
+    const res = await fetch(`${apiUrl}/v1/developer/analysis/quota`, {
+      headers: { 'x-api-key': apiKey },
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/** Branded message shown when the plan's analysis quota is exhausted. */
+function printQuotaBlocked(quota) {
+  const { blue, cyan, dim, reset } = fyodosTermColors();
+  const limit = quota.limit == null ? '∞' : quota.limit;
+  console.error(`\n${cyan}◉${reset} ${blue}Fiodos${reset} · analysis unavailable`);
+  console.error(
+    `${dim}Your plan (${quota.planId}) includes ${limit} analysis run(s) and you have already used them ` +
+    `(${quota.used}/${limit}).${reset}`,
+  );
+  console.error(
+    `${dim}Upgrade your plan in the Fiodos dashboard to analyze again. ` +
+    `No AI analysis was consumed.${reset}\n`,
+  );
+}
+
+async function publishManifest(manifest, meta) {
+  const { apiKey, apiUrl } = resolveApiTarget();
   if (!apiKey) {
     console.error(
       '[publish] missing project API key — add FYODOS_API_KEY or FYODOS_CLIENT_KEYS to backend/.env, or pass --api-key',
     );
     process.exit(1);
   }
-  console.log(`[publish] POST ${apiUrl}/v1/developer/manifest (manifest + metadata only — no source code)`);
-  console.log(`[publish] project API key: ${apiKey.slice(0, 12)}…`);
+  logDev(`[publish] POST ${apiUrl}/v1/developer/manifest (manifest + metadata only — no source code)`);
+  logDev(`[publish] project API key: ${apiKey.slice(0, 12)}…`);
   const res = await fetch(`${apiUrl}/v1/developer/manifest`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
     body: JSON.stringify({ manifest, meta }),
   });
   if (!res.ok) {
+    if (res.status === 429) {
+      const detail = await res.json().catch(() => null);
+      const q = detail && detail.detail ? detail.detail : detail;
+      if (q && q.planId) {
+        printQuotaBlocked({ planId: q.planId, used: q.used, limit: q.limit });
+        process.exit(1);
+      }
+    }
     const text = await res.text().catch(() => '');
     console.error(`[publish] FAILED ${res.status}: ${text || res.statusText}`);
     process.exit(1);
   }
   const body = await res.json();
-  console.log(`[publish] OK — ${body.routes} routes, ${body.actions} actions received at ${body.receivedAt}`);
-  console.log('[publish] open the dashboard → Configuración del agente → "Recargar análisis" to review the draft');
+  logUser(`Published to your project — ${body.routes} routes, ${body.actions} actions`);
+  logDev(`[publish] OK — ${body.routes} routes, ${body.actions} actions received at ${body.receivedAt}`);
+  logUser('Open the dashboard → Agent settings → "Reload analysis" to review');
 }
 
 main().catch((e) => {

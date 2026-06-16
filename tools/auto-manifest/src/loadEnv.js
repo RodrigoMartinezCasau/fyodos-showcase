@@ -50,12 +50,20 @@ function deriveFyodosApiKey() {
   if (apiKey) process.env.FYODOS_API_KEY = apiKey;
 }
 
-/** Prefer the target app's EXPO_PUBLIC_FYODOS_API_KEY when publishing that app. */
+/** Prefer the target app's Fyodos API key from .env when publishing that app. */
 function loadAppEnv(appRoot) {
   if (!appRoot) return;
   const appEnv = parseEnvFile(path.join(appRoot, '.env'));
-  const appKey = appEnv.EXPO_PUBLIC_FYODOS_API_KEY?.trim();
+  const appKey =
+    appEnv.VITE_FYODOS_API_KEY?.trim() ||
+    appEnv.NEXT_PUBLIC_FYODOS_API_KEY?.trim() ||
+    appEnv.EXPO_PUBLIC_FYODOS_API_KEY?.trim();
   if (appKey) process.env.FYODOS_API_KEY = appKey;
+  const appUrl =
+    appEnv.VITE_FYODOS_API_URL?.trim() ||
+    appEnv.NEXT_PUBLIC_FYODOS_API_URL?.trim() ||
+    appEnv.EXPO_PUBLIC_FYODOS_API_URL?.trim();
+  if (appUrl) process.env.FYODOS_API_URL = appUrl;
 }
 
 function loadEnv() {

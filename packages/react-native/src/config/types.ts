@@ -36,7 +36,13 @@ export interface AgentTimings {
   confirmationVoiceWindowMs: number;
   /** Grace period for a late transcript after the window closes. */
   confirmationTranscriptGraceMs: number;
-  /** Transcripts shorter than this are treated as noise. */
+  /**
+   * Transcripts shorter than this are treated as noise. Kept at 2 so natural
+   * short answers to the agent's own questions ("sí", "no", "ok", "ya") are
+   * NEVER rejected as "too short" — they are valid turns, usually replies that
+   * conversation memory resolves in context. (Matches the web SDK and the
+   * confirmation-window threshold.)
+   */
   minTranscriptChars: number;
 }
 
@@ -45,7 +51,7 @@ export const DEFAULT_AGENT_TIMINGS: AgentTimings = {
   maxListeningSeconds: 60,
   confirmationVoiceWindowMs: 8_000,
   confirmationTranscriptGraceMs: 3_000,
-  minTranscriptChars: 3,
+  minTranscriptChars: 2,
 };
 
 /** Verdict of the app's per-turn gate (quota, plan limits…). */

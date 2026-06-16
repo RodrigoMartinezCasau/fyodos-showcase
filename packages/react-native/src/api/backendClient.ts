@@ -126,6 +126,8 @@ export function createFyodosBackendClient(options: FyodosBackendClientOptions): 
         app_name: request.appName,
         app_description: request.appDescription,
       };
+      if (request.appType?.trim()) body.app_type = request.appType.trim();
+      if (request.appFlow?.trim()) body.app_flow = request.appFlow.trim();
       if (request.voice) body.voice = request.voice;
       if (request.screenContext?.trim()) body.screen_context = request.screenContext.trim();
       if (request.currentRoute?.trim()) body.current_route = request.currentRoute.trim();
@@ -223,5 +225,7 @@ export function buildManifestPayload(manifest: AppManifest) {
     manifestActions: manifestActionsForBackend(manifest),
     appName: manifest.appName,
     appDescription: manifest.appDescription,
+    ...(manifest.appType ? { appType: manifest.appType } : {}),
+    ...(manifest.appFlow ? { appFlow: manifest.appFlow } : {}),
   };
 }
