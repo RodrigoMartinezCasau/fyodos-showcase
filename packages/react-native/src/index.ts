@@ -12,6 +12,7 @@ export type {
   AgentPhase,
   AgentTimings,
   FyodosAgentConfig,
+  FyodosVoiceActivationConfig,
   TurnGateVerdict,
 } from './config/types';
 export { DEFAULT_AGENT_TIMINGS } from './config/types';
@@ -67,6 +68,13 @@ export {
   clearVoiceActivationOptIn,
   voiceActivationPrefsKey,
 } from './voice/voiceActivationPrefs';
+export { resolveVoiceActivationConfig } from './voice/resolveVoiceActivationConfig';
+export type {
+  PublishedVoiceActivation,
+  ResolvedVoiceActivationConfig,
+  ResolveVoiceActivationOptions,
+} from './voice/resolveVoiceActivationConfig';
+export { useVoiceActivationOptIn } from './voice/useVoiceActivationOptIn';
 export { useWakeWordActivation } from './voice/useWakeWordActivation';
 export type {
   VoiceActivationRuntimeConfig,
@@ -84,6 +92,8 @@ export { ActionConfirmationModal } from './components/ActionConfirmationModal';
 export type { ActionConfirmationModalProps } from './components/ActionConfirmationModal';
 export { ConsentModal } from './components/ConsentModal';
 export type { ConsentModalProps } from './components/ConsentModal';
+export { VoiceActivationSettings } from './components/VoiceActivationSettings';
+export type { VoiceActivationSettingsProps } from './components/VoiceActivationSettings';
 export { AgentTextBubble } from './components/AgentTextBubble';
 export type { AgentTextBubbleProps } from './components/AgentTextBubble';
 export { resolveImageDataUrlForDisplay, isDisplayableImageUri } from './utils/imageUri';

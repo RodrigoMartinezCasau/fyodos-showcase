@@ -77,7 +77,7 @@ export function AgentOrb({
   textPanelOffset,
   onTextPanelStateChange,
 }: AgentOrbProps) {
-  const { ui } = useFyodosRuntime();
+  const { ui, config } = useFyodosRuntime();
   const t = {
     ...DEFAULT_ORB_THEME,
     ...theme,
@@ -183,9 +183,19 @@ export function AgentOrb({
 
   const showChipImage = isDisplayableImageUri(chipIconUri) && !chipIconFailed;
 
+  const wakeDisplayPhrase = config.voiceActivation?.displayPhrase ?? '';
+  const wakeListeningLabel = wakeDisplayPhrase
+    ? ui.wakeWordListeningLabel.replace('{phrase}', wakeDisplayPhrase)
+    : ui.wakeWordListeningLabel.replace('{phrase}', '…');
+  const autoWakeConsent =
+    config.voiceActivation?.developerEnabled && config.voiceActivation.consentParagraph
+      ? config.voiceActivation.consentParagraph
+      : undefined;
+  const wakeConsentParagraph = consentWakeWordParagraph ?? autoWakeConsent;
+
   const consentCopy = [
     ...(consentParagraphs ?? [ui.consentBody, ui.consentBodySecondary]),
-    ...(consentWakeWordParagraph ? [consentWakeWordParagraph] : []),
+    ...(wakeConsentParagraph ? [wakeConsentParagraph] : []),
   ];
 
   return (
@@ -269,7 +279,7 @@ export function AgentOrb({
       <View style={{ width: orbLayout.totalPx, height: orbLayout.totalPx, alignItems: 'center', justifyContent: 'center' }}>
         {wakeWordListening ? (
           <View
-            accessibilityLabel={ui.wakeWordListeningLabel}
+            accessibilityLabel={wakeListeningLabel}
             accessibilityRole="text"
             style={[
               styles.wakeIndicator,

@@ -140,16 +140,33 @@ export interface FyodosAgentConfig {
   timings?: Partial<AgentTimings>;
 
   /**
-   * Wake-word voice activation ("Oye, Fiodos" / "Hello, Fiodos").
-   * Requires developer opt-in AND separate user opt-in in app settings.
-   * Disabled by default at every layer.
+   * Wake-word voice activation ("Oye, …" / "Hello, …").
+   * When omitted, resolved automatically from manifest.policies and
+   * `publishedVoiceActivation` (dashboard publish).
    */
-  voiceActivation?: {
-    /** Developer enables this capability for their app. Default: false. */
-    developerEnabled: boolean;
-    /** User opt-in — must resolve true for passive listening. Default: false. */
-    isUserOptedIn?: () => boolean | Promise<boolean>;
-    /** Override wake phrases; defaults from agent locale. */
-    phrases?: string[];
+  voiceActivation?: FyodosVoiceActivationConfig;
+
+  /**
+   * Live overrides from GET /v1/client/config (dashboard publish).
+   * Merged over manifest.policies for voice activation.
+   */
+  publishedVoiceActivation?: {
+    voiceActivationOffered?: boolean;
+    voiceActivationPhrase?: string;
   };
+}
+
+export interface FyodosVoiceActivationConfig {
+  /** Developer enables this capability for their app. Default: false. */
+  developerEnabled: boolean;
+  /** Optional extra opt-in (e.g. integrator settings toggle). Omitted = assistant consent suffices. */
+  isUserOptedIn?: () => boolean | Promise<boolean>;
+  /** Override wake phrases; defaults from manifest / published phrase. */
+  phrases?: string[];
+  /** Resolved wake-word name (auto-filled by FyodosProvider). */
+  wakePhraseName?: string;
+  /** Display form, e.g. «Oye, MiApp» (auto-filled by FyodosProvider). */
+  displayPhrase?: string;
+  /** Consent paragraph when offered (auto-filled by FyodosProvider). */
+  consentParagraph?: string;
 }

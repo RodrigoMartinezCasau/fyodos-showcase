@@ -14,7 +14,7 @@ import type { NavigationAdapter } from '@fyodos/core';
 export interface VoiceActivationRuntimeConfig {
   /** Developer offers wake-word in this app (manifest / dashboard). */
   developerEnabled: boolean;
-  /** User opt-in — must resolve true for listening to start. Default: false. */
+  /** Optional extra opt-in (e.g. a settings toggle). When omitted, assistant consent is enough. */
   isUserOptedIn?: () => boolean | Promise<boolean>;
   /** Override wake phrases; defaults from agent locale. */
   phrases?: string[];
@@ -69,10 +69,11 @@ export function useWakeWordActivation({
     if (!voice.supportsWakeWordDetection?.()) return false;
     if (phaseRef.current !== 'idle') return false;
     if (!(await consent.hasConsented())) return false;
-    const optedIn = voiceActivation?.isUserOptedIn
-      ? await voiceActivation.isUserOptedIn()
-      : false;
-    return optedIn === true;
+    if (voiceActivation?.isUserOptedIn) {
+      const optedIn = await voiceActivation.isUserOptedIn();
+      if (optedIn !== true) return false;
+    }
+    return true;
   }, [consent, developerEnabled, enabled, voice, voiceActivation]);
 
   const startWakeWord = useCallback(async () => {
@@ -124,7 +125,7 @@ export function useWakeWordActivation({
     };
   }, [phase, developerEnabled, enabled, startWakeWord, stopWakeWord]);
 
-  // Re-evaluate opt-in periodically when idle (user may toggle in settings).
+  // Re-evaluate when idle (consent or optional integrator opt-in may change).
   useEffect(() => {
     if (phase !== 'idle' || !developerEnabled) return;
     const id = setInterval(() => {

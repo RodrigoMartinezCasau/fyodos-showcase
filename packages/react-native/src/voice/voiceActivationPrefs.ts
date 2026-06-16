@@ -1,9 +1,7 @@
 /**
- * User opt-in preference for wake-word voice activation.
- *
- * Stored separately from assistant consent: the user must accept the
- * assistant consent first, then explicitly enable wake-word listening here.
- * Default is OFF (opt-in).
+ * Optional in-app opt-in for wake-word activation.
+ * Not required by default — assistant consent + system mic permission suffice.
+ * Use with `VoiceActivationSettings` only if the integrator adds a settings toggle.
  */
 import type { StorageAdapter } from '@fyodos/core';
 

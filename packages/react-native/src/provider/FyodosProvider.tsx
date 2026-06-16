@@ -31,6 +31,19 @@ import {
   createScreenContextStore,
   type ScreenContextStore,
 } from '../context/screenContextStore';
+import { resolveVoiceActivationConfig } from '../voice/resolveVoiceActivationConfig';
+
+function withResolvedVoiceActivation(config: FyodosAgentConfig): FyodosAgentConfig {
+  if (config.voiceActivation) return config;
+  return {
+    ...config,
+    voiceActivation: resolveVoiceActivationConfig({
+      manifest: config.manifest,
+      locale: config.locale,
+      published: config.publishedVoiceActivation,
+    }),
+  };
+}
 
 export interface FyodosRuntime {
   config: FyodosAgentConfig;
@@ -57,42 +70,43 @@ export function FyodosProvider({
   children: React.ReactNode;
 }) {
   const runtime = useMemo<FyodosRuntime>(() => {
-    const manifestCheck = validateManifest(config.manifest);
+    const resolvedConfig = withResolvedVoiceActivation(config);
+    const manifestCheck = validateManifest(resolvedConfig.manifest);
     if (!manifestCheck.valid) {
       throw new Error(
-        `[fyodos] Invalid manifest for "${config.manifest.appId}":\n- ` +
+        `[fyodos] Invalid manifest for "${resolvedConfig.manifest.appId}":\n- ` +
           manifestCheck.errors.join('\n- '),
       );
     }
 
-    const messages = resolveMessages(config.locale, config.messages);
-    const ui = resolveUiMessages(config.locale, config.uiMessages);
-    const lexicon = config.confirmationLexicon ?? resolveConfirmationLexicon(config.locale);
-    const sanitizer = config.sanitizer ?? createSanitizer();
-    const telemetry = createSafeTelemetry(config.telemetry);
+    const messages = resolveMessages(resolvedConfig.locale, resolvedConfig.messages);
+    const ui = resolveUiMessages(resolvedConfig.locale, resolvedConfig.uiMessages);
+    const lexicon = resolvedConfig.confirmationLexicon ?? resolveConfirmationLexicon(resolvedConfig.locale);
+    const sanitizer = resolvedConfig.sanitizer ?? createSanitizer();
+    const telemetry = createSafeTelemetry(resolvedConfig.telemetry);
     const consent = createConsentManager({
-      storage: config.storage,
-      appId: config.manifest.appId,
-      version: config.consentVersion,
+      storage: resolvedConfig.storage,
+      appId: resolvedConfig.manifest.appId,
+      version: resolvedConfig.consentVersion,
     });
     const executor = createActionExecutor({
-      manifest: config.manifest,
-      registries: config.registries,
-      navigation: config.navigation,
+      manifest: resolvedConfig.manifest,
+      registries: resolvedConfig.registries,
+      navigation: resolvedConfig.navigation,
       messages,
-      isAuthenticated: config.isAuthenticated,
+      isAuthenticated: resolvedConfig.isAuthenticated,
     });
     const screenStore = createScreenContextStore({
-      getCurrentRoute: () => config.navigation.getCurrentRoute(),
-      routeFallback: config.routeContextFallback,
+      getCurrentRoute: () => resolvedConfig.navigation.getCurrentRoute(),
+      routeFallback: resolvedConfig.routeContextFallback,
     });
     const notifyError =
-      config.notifyError ?? ((message: string) => Alert.alert(ui.errorTitle, message));
+      resolvedConfig.notifyError ?? ((message: string) => Alert.alert(ui.errorTitle, message));
     const getTtsVoice = () =>
-      typeof config.ttsVoice === 'function' ? config.ttsVoice() : config.ttsVoice;
+      typeof resolvedConfig.ttsVoice === 'function' ? resolvedConfig.ttsVoice() : resolvedConfig.ttsVoice;
 
     return {
-      config,
+      config: resolvedConfig,
       messages,
       ui,
       lexicon,

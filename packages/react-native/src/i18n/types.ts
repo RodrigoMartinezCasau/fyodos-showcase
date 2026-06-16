@@ -58,12 +58,16 @@ export interface AgentUiMessages {
   textSendLabel: string;
   textPanelCloseLabel: string;
   keyboardChipLabel: string;
-  /** Discreet indicator when wake-word listening is active. */
+  /** Discreet indicator when wake-word listening is active. `{phrase}` = display wake phrase. */
   wakeWordListeningLabel: string;
   /** Settings: voice activation section title. */
   voiceActivationSettingsTitle: string;
+  /** `{phrase}` = display wake phrase. */
   voiceActivationSettingsBody: string;
   voiceActivationSettingsEnable: string;
   voiceActivationSettingsDisable: string;
   voiceActivationSettingsHint: string;
+  voiceActivationSettingsUnavailable: string;
+  voiceActivationSettingsActive: string;
+  voiceActivationSettingsClose: string;
 }
