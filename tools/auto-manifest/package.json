@@ -9,5 +9,8 @@
   },
   "scripts": {
     "analyze": "node src/index.js"
+  },
+  "dependencies": {
+    "jsdom": "^24.0.0"
   }
 }

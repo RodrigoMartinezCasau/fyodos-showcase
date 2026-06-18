@@ -13,38 +13,75 @@
 const fs = require('fs');
 const path = require('path');
 
-const CODE_EXT = new Set(['.ts', '.tsx', '.js', '.jsx']);
-const SKIP_DIRS = new Set([
-  'node_modules', 'assets', '.git', 'dist', 'build', '.expo', 'android', 'ios',
-  'coverage', '.next', 'web-build',
-]);
+/**
+ * Per-platform collection profile: which source extensions are code, and which
+ * directories to skip. Native (Phase 1) reuses the SAME budget + tiering + AI
+ * pipeline as web/mobile — only the file selection differs by language.
+ */
+const PROFILES = {
+  web: {
+    exts: ['.ts', '.tsx', '.js', '.jsx', '.vue', '.svelte'],
+    skipDirs: ['node_modules', 'assets', '.git', 'dist', 'build', '.expo', 'android', 'ios', 'coverage', '.next', 'web-build'],
+  },
+  mobile: {
+    exts: ['.ts', '.tsx', '.js', '.jsx'],
+    skipDirs: ['node_modules', 'assets', '.git', 'dist', 'build', '.expo', 'android', 'ios', 'coverage', '.next', 'web-build'],
+  },
+  // Flutter: analyze lib/ (Dart); skip the native host wrappers + build output.
+  flutter: {
+    exts: ['.dart'],
+    skipDirs: ['.git', '.dart_tool', 'build', 'android', 'ios', 'web', 'linux', 'macos', 'windows', 'test', 'integration_test'],
+  },
+  // iOS: analyze Swift sources; skip SwiftPM/Xcode build output.
+  ios: {
+    exts: ['.swift'],
+    skipDirs: ['.git', '.build', 'build', 'DerivedData', 'Pods', 'Carthage', 'Tests'],
+  },
+  // Android: analyze Kotlin sources; skip Gradle build output.
+  android: {
+    exts: ['.kt'],
+    skipDirs: ['.git', '.gradle', 'build', '.idea'],
+  },
+};
+
 const SKIP_FILES = /\.(d\.ts|test\.|spec\.)|babel\.config|metro\.config|tailwind\.config|postcss\.config|jest\.config|eslint/;
+const SKIP_NATIVE_FILES = /\.(g\.dart|freezed\.dart|gr\.dart|mocks\.dart)$|_test\.(dart|kt|swift)$|Test\.kt$|Tests\.swift$/;
 
 /** Rough chars→tokens for budgeting (code averages ~3.6 chars/token). */
 const CHARS_PER_TOKEN = 3.6;
 
-/** Lower tier = higher priority when the budget forces choices. */
+/** Lower tier = higher priority when the budget forces choices. Generalized so
+ *  it ranks screens/state/services first across web, RN AND native naming. */
 function tierFor(rel) {
   const p = rel.replace(/\\/g, '/');
-  if (/^(src\/)?app\//.test(p)) return 0; // expo-router screens
-  if (/(^|\/)(state|store|stores|context|contexts|redux)\//.test(p)) return 1;
-  if (/(^|\/)(services|api|db|data|domain|agent|handlers|actions|lib|utils)\//.test(p)) return 1;
+  if (/^(src\/)?app\//.test(p)) return 0; // expo-router / Next screens
+  if (/(^|\/)(screens?|pages?|views?|routes?|activities|fragments)\//i.test(p)) return 0;
+  if (/(screen|page|view|activity|fragment)\.(dart|kt|swift)$/i.test(p)) return 0;
+  if (/(^|\/)(state|store|stores|context|contexts|redux|providers?|blocs?|cubits?|viewmodels?)\//i.test(p)) return 1;
+  if (/(viewmodel|notifier|bloc|cubit|store|controller)\.(dart|kt|swift)$/i.test(p)) return 1;
+  if (/(^|\/)(services?|api|db|data|domain|agent|handlers?|actions?|lib|utils|repositories|repository|usecases?)\//i.test(p)) return 1;
   if (/(^|\/)(hooks)\//.test(p)) return 2;
   return 3; // generic components / ui
 }
 
-function collectFiles(appRoot, { maxInputTokens = 150_000 } = {}) {
+function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' } = {}) {
+  const profile = PROFILES[platform] || PROFILES.mobile;
+  const codeExt = new Set(profile.exts);
+  const skipDirs = new Set(profile.skipDirs);
+  const isNative = platform === 'flutter' || platform === 'ios' || platform === 'android';
+
   const files = [];
   const walk = (dir) => {
     for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
       if (entry.isDirectory()) {
-        if (!SKIP_DIRS.has(entry.name)) walk(path.join(dir, entry.name));
+        if (!skipDirs.has(entry.name)) walk(path.join(dir, entry.name));
         continue;
       }
       const full = path.join(dir, entry.name);
       const rel = path.relative(appRoot, full);
-      if (!CODE_EXT.has(path.extname(entry.name))) continue;
+      if (!codeExt.has(path.extname(entry.name))) continue;
       if (SKIP_FILES.test(rel)) continue;
+      if (isNative && SKIP_NATIVE_FILES.test(rel)) continue;
       const content = fs.readFileSync(full, 'utf8');
       files.push({ rel, content, tier: tierFor(rel), chars: content.length });
     }

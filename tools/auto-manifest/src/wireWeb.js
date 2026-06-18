@@ -37,14 +37,30 @@ function readJsonSafe(file) {
   }
 }
 
-/** 'next' | 'vite' | null — used to pick env var names + the right snippet. */
+/**
+ * 'next' | 'vite' | 'vue' | 'svelte' | 'sveltekit' | 'angular' | null.
+ * Detected by real framework signals (deps + config files), used to pick the
+ * env-var convention and the correct paste snippet for that ecosystem.
+ *
+ * Order matters: Vue/Svelte/Angular apps usually ALSO depend on `vite`, so the
+ * framework-specific checks must come before the generic vite (React) one.
+ */
 function detectFramework(appRoot) {
   const pkg = readJsonSafe(path.join(appRoot, 'package.json')) || {};
   const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+  const has = (rel) => fs.existsSync(path.join(appRoot, rel));
+
   if (deps.next) return 'next';
+  if (deps['@angular/core'] || has('angular.json')) return 'angular';
+  if (deps['@sveltejs/kit']) return 'sveltekit';
+  if (deps.svelte || has('svelte.config.js') || has('svelte.config.ts')) return 'svelte';
+  if (deps.vue || deps['@vitejs/plugin-vue']) return 'vue';
   if (deps.vite || deps['@vitejs/plugin-react'] || deps['react-scripts']) return 'vite';
   return null;
 }
+
+/** Frameworks whose orb mount point we only PRINT (no safe AST-free auto-edit). */
+const PRINT_ONLY = new Set(['vue', 'svelte', 'sveltekit', 'angular']);
 
 function firstExisting(appRoot, rels) {
   for (const rel of rels) {
@@ -61,23 +77,45 @@ function firstExisting(appRoot, rels) {
  *         'next-pages' → pages/_app (already client; direct mount).
  *         'vite'       → Vite/CRA entry (already client; direct mount).
  */
-function detectTarget(appRoot) {
+function detectTarget(appRoot, framework = detectFramework(appRoot)) {
+  if (framework === 'vue') {
+    const f = firstExisting(appRoot, ['src/App.vue', 'src/main.ts', 'src/main.js']);
+    return f ? { kind: 'vue', file: f, ext: path.extname(f), framework } : { kind: 'vue', file: null, framework };
+  }
+  if (framework === 'sveltekit') {
+    const f = firstExisting(appRoot, [
+      'src/routes/+layout.svelte', 'src/routes/+page.svelte', 'src/App.svelte',
+    ]);
+    return f ? { kind: 'sveltekit', file: f, ext: '.svelte', framework } : { kind: 'sveltekit', file: null, framework };
+  }
+  if (framework === 'svelte') {
+    const f = firstExisting(appRoot, ['src/App.svelte', 'src/routes/+layout.svelte', 'src/main.ts']);
+    return f ? { kind: 'svelte', file: f, ext: '.svelte', framework } : { kind: 'svelte', file: null, framework };
+  }
+  if (framework === 'angular') {
+    const f = firstExisting(appRoot, [
+      'src/app/app.component.ts', 'src/app/app.ts', 'src/main.ts',
+    ]);
+    return f ? { kind: 'angular', file: f, ext: '.ts', framework } : { kind: 'angular', file: null, framework };
+  }
+
+  // ── React (Next / Vite / CRA): the original detection. ──────────────────────
   const appLayout = firstExisting(appRoot, [
     'app/layout.tsx', 'app/layout.jsx',
     'src/app/layout.tsx', 'src/app/layout.jsx',
   ]);
-  if (appLayout) return { kind: 'next-app', file: appLayout, ext: path.extname(appLayout) };
+  if (appLayout) return { kind: 'next-app', file: appLayout, ext: path.extname(appLayout), framework };
 
   const pagesApp = firstExisting(appRoot, [
     'pages/_app.tsx', 'pages/_app.jsx',
     'src/pages/_app.tsx', 'src/pages/_app.jsx',
   ]);
-  if (pagesApp) return { kind: 'next-pages', file: pagesApp, ext: path.extname(pagesApp) };
+  if (pagesApp) return { kind: 'next-pages', file: pagesApp, ext: path.extname(pagesApp), framework };
 
   const viteEntry = firstExisting(appRoot, [
     'src/main.tsx', 'src/main.jsx', 'src/index.tsx', 'src/App.tsx', 'src/App.jsx',
   ]);
-  if (viteEntry) return { kind: 'vite', file: viteEntry, ext: path.extname(viteEntry) };
+  if (viteEntry) return { kind: 'vite', file: viteEntry, ext: path.extname(viteEntry), framework };
 
   return null;
 }
@@ -102,6 +140,52 @@ function agentJsx(framework, ts, indent = '  ') {
     `${indent}  apiKey={${keyExpr}}\n` +
     `${indent}  apiUrl={${urlExpr}}\n` +
     `${indent}/>`
+  );
+}
+
+/** Vue: one-line drop-in. Only the apiKey is needed (auto-fetch manifest). */
+function agentSnippetVue() {
+  return (
+    `<script setup lang="ts">\n` +
+    `import { FyodosAgent } from '@fyodos/vue';\n` +
+    `const fyodosApiKey = import.meta.env.VITE_FYODOS_API_KEY;\n` +
+    `const fyodosApiUrl = import.meta.env.VITE_FYODOS_API_URL; // optional\n` +
+    `</script>\n\n` +
+    `<template>\n` +
+    `  <!-- ...your app... -->\n` +
+    `  <FyodosAgent :api-key="fyodosApiKey" :base-url="fyodosApiUrl" />\n` +
+    `</template>`
+  );
+}
+
+/** Svelte / SvelteKit: one-line drop-in (apiKey only). */
+function agentSnippetSvelte() {
+  return (
+    `<script lang="ts">\n` +
+    `  import FyodosAgent from '@fyodos/svelte/FyodosAgent.svelte';\n` +
+    `</script>\n\n` +
+    `<!-- ...your app... -->\n` +
+    `<FyodosAgent apiKey={import.meta.env.VITE_FYODOS_API_KEY} baseUrl={import.meta.env.VITE_FYODOS_API_URL} />`
+  );
+}
+
+/** Angular: standalone component drop-in (apiKey only). */
+function agentSnippetAngular() {
+  return (
+    `import { FyodosAgentComponent } from '@fyodos/angular/angular';\n\n` +
+    `@Component({\n` +
+    `  selector: 'app-root',\n` +
+    `  standalone: true,\n` +
+    `  imports: [/* ...your imports..., */ FyodosAgentComponent],\n` +
+    `  template: \`\n` +
+    `    <!-- ...your app... -->\n` +
+    `    <fyodos-agent [apiKey]="fyodosApiKey" />\n` +
+    `  \`,\n` +
+    `})\n` +
+    `export class AppComponent {\n` +
+    `  // Read it from your Angular environment.ts instead of hard-coding.\n` +
+    `  fyodosApiKey = 'YOUR_FYODOS_API_KEY';\n` +
+    `}`
   );
 }
 
@@ -193,6 +277,30 @@ function printSnippet(target, framework, colors, appRoot) {
   const ts = !target || target.ext === '.tsx';
   console.error(`\n${cyan}◉${reset} ${blue}Fiodos${reset} · ${dim}add the orb to your web app (copy this):${reset}`);
 
+  // ── Vue / Svelte / Angular: framework-correct snippet (NOT the React JSX). ──
+  if (framework === 'vue') {
+    const where = target && target.file ? path.relative(appRoot, target.file) : 'src/App.vue';
+    console.error(`${dim}In ${where} (or any always-mounted component), add @fyodos/vue's drop-in:${reset}\n`);
+    console.error(agentSnippetVue());
+    console.error(`\n${dim}Then set VITE_FYODOS_API_KEY in your .env. That's it — the manifest is fetched automatically.${reset}\n`);
+    return;
+  }
+  if (framework === 'svelte' || framework === 'sveltekit') {
+    const def = framework === 'sveltekit' ? 'src/routes/+layout.svelte' : 'src/App.svelte';
+    const where = target && target.file ? path.relative(appRoot, target.file) : def;
+    console.error(`${dim}In ${where} (mounted on every page), add @fyodos/svelte's drop-in:${reset}\n`);
+    console.error(agentSnippetSvelte());
+    console.error(`\n${dim}Then set VITE_FYODOS_API_KEY in your .env. The manifest is fetched automatically.${reset}\n`);
+    return;
+  }
+  if (framework === 'angular') {
+    const where = target && target.file ? path.relative(appRoot, target.file) : 'src/app/app.component.ts';
+    console.error(`${dim}In ${where}, import the standalone component and mount it in the template:${reset}\n`);
+    console.error(agentSnippetAngular());
+    console.error(`\n${dim}The manifest is fetched automatically from your apiKey.${reset}\n`);
+    return;
+  }
+
   if (!target || target.kind === 'next-app') {
     const where = target ? path.relative(appRoot, target.file) : 'your root layout (app/layout.tsx)';
     console.error(`${dim}In App Router the layout is a Server Component, so the orb goes in a client wrapper.${reset}`);
@@ -225,24 +333,26 @@ async function wireWebOrb(appRoot, opts = {}) {
   if (noWire) return { status: 'skipped' };
 
   const framework = detectFramework(appRoot);
-  const target = detectTarget(appRoot);
+  const target = detectTarget(appRoot, framework);
 
-  // No recognizable mount point → print generic guidance and report honestly.
-  if (!target) {
-    printSnippet(null, framework, colors, appRoot);
+  // No recognizable mount point (or framework whose entry file we couldn't
+  // locate) → print framework-correct guidance and report honestly.
+  if (!target || !target.file) {
+    printSnippet(target || null, framework, colors, appRoot);
     return { status: 'printed' };
   }
 
   const rel = path.relative(appRoot, target.file);
 
   // Idempotency: already wired anywhere in the target file.
-  if (/FyodosAgent/.test(fs.readFileSync(target.file, 'utf8'))) {
+  if (/FyodosAgent|fyodos-agent/.test(fs.readFileSync(target.file, 'utf8'))) {
     return { status: 'already', file: rel };
   }
 
-  // Only the App Router case is edited automatically; others get the snippet
-  // (their entry trees vary too much to edit safely without an AST).
-  if (target.kind !== 'next-app') {
+  // Only the Next.js App Router case is edited automatically; every other
+  // ecosystem (Vite/React, Vue, Svelte, Angular) gets the correct snippet —
+  // their entry trees vary too much to edit safely without an AST.
+  if (target.kind !== 'next-app' || PRINT_ONLY.has(framework)) {
     printSnippet(target, framework, colors, appRoot);
     return { status: 'printed', file: rel };
   }

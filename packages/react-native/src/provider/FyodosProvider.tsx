@@ -6,8 +6,8 @@
  * catalog, confirmation lexicon) with the explicit-locale policy: unknown
  * locales throw at mount, never silently fall back to another language.
  */
-import React, { createContext, useContext, useMemo } from 'react';
-import { Alert } from 'react-native';
+import React, { createContext, useContext, useEffect, useMemo } from 'react';
+import { Alert, Platform } from 'react-native';
 import {
   createActionExecutor,
   createConsentManager,
@@ -120,6 +120,14 @@ export function FyodosProvider({
       getTtsVoice,
     };
   }, [config]);
+
+  // Heartbeat: prove the orb actually booted inside the running app so the
+  // dashboard onboarding can confirm a real install (manifest alone is not
+  // proof). Best-effort and fired once per mount; never blocks the orb.
+  useEffect(() => {
+    const platform = Platform.OS === 'ios' || Platform.OS === 'android' ? Platform.OS : 'mobile';
+    void runtime.config.backend.reportOrbSeen?.(platform);
+  }, [runtime]);
 
   return <FyodosContext.Provider value={runtime}>{children}</FyodosContext.Provider>;
 }

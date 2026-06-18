@@ -214,6 +214,20 @@ export function createFyodosBackendClient(options: FyodosBackendClientOptions): 
       if (!res.ok) throw await errorFromResponse(res);
       return (await res.json()) as ClientConfigResponse;
     },
+
+    async reportOrbSeen(platform = 'mobile'): Promise<void> {
+      // Best-effort: prove the orb booted in the running app so the dashboard
+      // onboarding can confirm a real install. Never throws / never blocks.
+      try {
+        await fetchWithTimeout(
+          `${baseUrl}/v1/client/orb-seen`,
+          { method: 'POST', headers: buildHeaders(), body: JSON.stringify({ platform }) },
+          5_000,
+        );
+      } catch {
+        /* heartbeat is best-effort; never block the orb on it */
+      }
+    },
   };
 }
 

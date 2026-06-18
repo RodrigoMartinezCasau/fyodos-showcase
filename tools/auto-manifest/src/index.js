@@ -65,9 +65,10 @@ loadEnv();
 
 const { scanRoutes } = require('./routes');
 const { collectFiles } = require('./collect');
-const { analyzeWithAI, DEFAULT_MODEL, resolveModel } = require('./aiAnalyze');
+const { analyzeWithAI, correctActionWiring, DEFAULT_MODEL, resolveModel } = require('./aiAnalyze');
 const { verifyManifest } = require('./verify');
 const { wireWebOrb, reportWireResult } = require('./wireWeb');
+const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
 
 function arg(flag, fallback) {
   const i = process.argv.indexOf(flag);
@@ -146,13 +147,16 @@ async function main() {
   // truth, so the AI proposes routes and we keep them unverified (honest flag).
   const { appDir, routes: scannedRoutes } = scanRoutes(appRoot);
   const platformArg = (arg('--platform', '') || '').toLowerCase();
-  const platform = platformArg === 'web' || platformArg === 'mobile'
+  const KNOWN_PLATFORMS = ['web', 'mobile', 'flutter', 'ios', 'android'];
+  const platform = KNOWN_PLATFORMS.includes(platformArg)
     ? platformArg
     : detectPlatform(appRoot, appDir);
   // The expo-router filesystem scan ONLY describes a mobile app. A Next.js App
   // Router web app also has an app/ dir, so the scan would otherwise produce
   // bogus "routes" and misclassify the project; for web we ignore it and let
   // the AI propose routes (the documented web contract).
+  // Only Expo/RN ('mobile') has a static route ground truth. Web AND the native
+  // platforms (flutter/ios/android) have the AI infer routes (kept unverified).
   const routes = platform === 'mobile' ? scannedRoutes : [];
   const verifyRoutes = platform === 'mobile' && routes.length > 0;
   const appMeta = readAppMeta(appRoot);
@@ -160,7 +164,7 @@ async function main() {
     (platform === 'web' ? ' (web: routes inferred by AI, not statically verified)' : ''));
 
   // ── 2. Collect source files (rule-based, budget-aware) ────────────────────
-  const { included, omitted, estimatedTokens } = collectFiles(appRoot, { maxInputTokens });
+  const { included, omitted, estimatedTokens } = collectFiles(appRoot, { maxInputTokens, platform });
   fs.writeFileSync(path.join(outDir, 'files-sent.json'), JSON.stringify({
     included: included.map((f) => f.rel),
     omitted,
@@ -170,6 +174,8 @@ async function main() {
 
   let manifest;
   let provenance;
+  let evidence = {};
+  let wiring = {};
   let analysisMeta = { engine: 'auto-manifest-v3-ai-first', model: null, costUSD: 0 };
 
   if (!useLLM) {
@@ -209,7 +215,8 @@ async function main() {
       }),
     );
     const proposed = parsed.manifest || {};
-    const evidence = parsed.evidence || {};
+    evidence = parsed.evidence || {};
+    wiring = parsed.wiring || {};
     logDev(`[ai] model=${model} proposed routes=${(proposed.routes || []).length} ` +
       `actions=${(proposed.actions || []).length} in ${(elapsedMs / 1000).toFixed(1)}s`);
     logDev(`[ai] tokens in=${usage.prompt_tokens} out=${usage.completion_tokens} cost=$${costUSD.toFixed(4)}`);
@@ -227,7 +234,7 @@ async function main() {
     logUser(`Analysis complete — ${manifest.routes.length} routes, ${manifest.actions.length} actions`);
 
     fs.writeFileSync(path.join(outDir, 'evidence.json'), JSON.stringify({
-      evidence, uncertain: parsed.uncertain || [],
+      evidence, wiring, uncertain: parsed.uncertain || [],
     }, null, 2));
     fs.writeFileSync(path.join(outDir, 'usage.json'), JSON.stringify({
       model, elapsedMs, usage,
@@ -286,13 +293,52 @@ async function main() {
   // wired by its own installer and is intentionally left untouched here.
   if (platform === 'web') {
     const { apiUrl } = resolveApiTarget();
-    const result = await wireWebOrb(path.resolve(appRoot), {
-      apiUrl,
+    const assumeYes = process.argv.includes('--yes') || process.argv.includes('--wire-yes');
+    const noWire = process.argv.includes('--no-wire');
+    // --no-orb-wire skips ONLY the orb mount (useful to test handler wiring in
+    // isolation without modifying the app's entrypoint / package.json).
+    if (!process.argv.includes('--no-orb-wire')) {
+      const result = await wireWebOrb(path.resolve(appRoot), {
+        apiUrl,
+        colors: fyodosTermColors(),
+        assumeYes,
+        noWire,
+      });
+      reportWireResult(result, fyodosTermColors());
+    }
+
+    // ── 7. Web: SECOND consent — connect detected actions to real app functions.
+    // The orb is mounted but the agent cannot DO anything until each manifest
+    // action is bridged to the function that performs it. We prepare that wiring,
+    // write a readable document into the project's Fyodos folder, and ask a
+    // separate, informed [yes/no] before touching anything. Security is enforced
+    // upstream by the engine, so generated handlers can never skip a confirmation.
+    const { runPostWireTest } = require('./postWireTest');
+    // Corrector: when a wired action fails install-time verification, re-prompt the
+    // AI with the concrete error to fix THAT action. Disable with --no-self-correct.
+    const selfCorrect = !process.argv.includes('--no-self-correct');
+    const corrector = selfCorrect
+      ? async (args) => {
+          const { wiring: fixed } = await correctActionWiring({ ...args, model, platform });
+          return fixed;
+        }
+      : null;
+    const handlerResult = await wireHandlers(path.resolve(appRoot), {
+      manifest,
+      evidence,
+      wiring,
+      appName: manifest.appName,
       colors: fyodosTermColors(),
-      assumeYes: process.argv.includes('--yes') || process.argv.includes('--wire-yes'),
-      noWire: process.argv.includes('--no-wire'),
+      assumeYes,
+      noWire,
+      runTest: !process.argv.includes('--no-wire-test'),
+      revertOnFailure: true,
+      testRunner: runPostWireTest,
+      corrector,
+      files: included,
+      maxAttempts: Number(process.env.FYODOS_WIRE_MAX_ATTEMPTS || 3),
     });
-    reportWireResult(result, fyodosTermColors());
+    reportHandlerResult(handlerResult, fyodosTermColors());
   }
 }
 
@@ -303,6 +349,36 @@ async function main() {
  * old app/-dir heuristic only when no framework dependency is recognizable.
  */
 function detectPlatform(appRoot, appDir) {
+  // Native projects are recognized by their build manifests (no package.json).
+  const has = (rel) => fs.existsSync(path.join(appRoot, rel));
+  const hasAnyExt = (ext) => {
+    // Shallow check: any source of this extension within a few levels.
+    let found = false;
+    const walk = (dir, depth) => {
+      if (found || depth > 12) return;
+      let entries = [];
+      try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        if (found) return;
+        if (e.isDirectory()) {
+          if (!['node_modules', '.git', 'build', '.gradle', '.dart_tool', '.build', 'Pods'].includes(e.name)) {
+            walk(path.join(dir, e.name), depth + 1);
+          }
+        } else if (e.name.endsWith(ext)) {
+          found = true;
+        }
+      }
+    };
+    walk(appRoot, 0);
+    return found;
+  };
+
+  if (has('pubspec.yaml')) return 'flutter';
+  if (has('Package.swift') || hasAnyExt('.xcodeproj') || (has('Sources') && hasAnyExt('.swift'))) return 'ios';
+  if ((has('settings.gradle.kts') || has('settings.gradle') || has('build.gradle.kts') || has('build.gradle')) && hasAnyExt('.kt')) {
+    return 'android';
+  }
+
   let deps = {};
   try {
     const pkg = JSON.parse(fs.readFileSync(path.join(appRoot, 'package.json'), 'utf8'));
@@ -311,7 +387,13 @@ function detectPlatform(appRoot, appDir) {
     /* no package.json → fall through to the directory heuristic */
   }
   if (deps.expo || deps['expo-router'] || deps['react-native']) return 'mobile';
-  if (deps.next || deps.vite || deps['@vitejs/plugin-react'] || deps['react-scripts']) return 'web';
+  if (
+    deps.next || deps.vite || deps['@vitejs/plugin-react'] || deps['react-scripts'] ||
+    deps['@angular/core'] || deps['@angular-devkit/build-angular'] ||
+    deps['@sveltejs/kit'] || deps.svelte || deps.vue || deps['@vue/cli-service']
+  ) {
+    return 'web';
+  }
   return appDir ? 'mobile' : 'web';
 }
 
@@ -333,6 +415,21 @@ function readAppMeta(appRoot) {
     const bundleMatch = text.match(/BUNDLE_IDENTIFIER\s*=\s*["']([^"']+)["']/) || text.match(/"bundleIdentifier"\s*:\s*"([^"]+)"/);
     if (bundleMatch) meta.bundleId = bundleMatch[1];
   }
+  // Native projects have no package.json — read their own manifests for a name.
+  const pubspec = path.join(appRoot, 'pubspec.yaml');
+  if (fs.existsSync(pubspec)) {
+    const text = fs.readFileSync(pubspec, 'utf8');
+    const n = text.match(/^name:\s*([A-Za-z0-9_\-]+)/m);
+    const d = text.match(/^description:\s*["']?([^"'\n]+)/m);
+    if (n) meta.name = n[1];
+    if (d && !meta.description) meta.description = d[1].trim().slice(0, 300);
+  }
+  const pkgSwift = path.join(appRoot, 'Package.swift');
+  if (fs.existsSync(pkgSwift)) {
+    const n = fs.readFileSync(pkgSwift, 'utf8').match(/name:\s*"([^"]+)"/);
+    if (n) meta.name = n[1];
+  }
+
   const readme = path.join(appRoot, 'README.md');
   if (!meta.description && fs.existsSync(readme)) {
     const lines = fs.readFileSync(readme, 'utf8').split('\n').filter((l) => l.trim() && !l.startsWith('#'));
