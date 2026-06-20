@@ -81,6 +81,9 @@ export type {
   UseWakeWordActivationOptions,
 } from './voice/useWakeWordActivation';
 
+// Haptics (unified orb feedback; baseline RN Vibration impl)
+export { createRnOrbHaptics } from './haptics';
+
 // UI
 export { AgentOrb } from './components/AgentOrb';
 export type { AgentOrbProps } from './components/AgentOrb';

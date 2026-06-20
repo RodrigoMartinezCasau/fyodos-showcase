@@ -67,7 +67,7 @@ export interface FyodosAgentConfig {
   /** The app manifest (validated with validateManifest at integration time). */
   manifest: AppManifest;
 
-  /** Agent locale (reply language, message catalogs). MANDATORY — no default. */
+  /** App locale (UI catalogs + fallback when user message language is ambiguous). MANDATORY — no default. */
   locale: string;
   /** Speech recognition locale, e.g. 'en-US', 'es-ES'. MANDATORY — no default. */
   sttLocale: string;

@@ -26,6 +26,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
+import type { OrbDeployment } from '@fyodos/core';
 import type { AgentExchange } from '../hooks/useAgent';
 import { DEFAULT_MODAL_THEME, type AgentModalTheme } from './theme';
 
@@ -33,15 +34,19 @@ export interface AgentTextBubbleProps {
   visible: boolean;
   onClose: () => void;
   onSend: (text: string) => void;
+  /** Cancel the in-flight turn (pressing STOP while busy). */
+  onCancel?: () => void;
   /** Current exchange (typed or spoken) shown in text. */
   exchange: AgentExchange | null;
-  /** A turn is in flight: disable send, show the activity dot. */
+  /** A turn is in flight: the send button becomes a STOP button. */
   busy: boolean;
   accentColor: string;
   theme?: Partial<AgentModalTheme>;
   /** Anchor: distance from the bottom/right edges (mirrors the orb layer). */
   bottom: number;
   right: number;
+  /** Free-side deployment so the bubble never clips off screen. */
+  deployment?: OrbDeployment;
   placeholder: string;
   sendLabel: string;
   closeLabel: string;
@@ -51,12 +56,11 @@ export function AgentTextBubble({
   visible,
   onClose,
   onSend,
+  onCancel,
   exchange,
   busy,
   accentColor,
   theme,
-  bottom,
-  right,
   placeholder,
   sendLabel,
   closeLabel,
@@ -88,9 +92,12 @@ export function AgentTextBubble({
     <Modal visible transparent animationType="fade" onRequestClose={onClose}>
       {/* Tapping outside the bubble closes it; the app stays visible behind. */}
       <Pressable style={styles.backdrop} onPress={onClose} accessibilityLabel={closeLabel} />
+      {/* The conversation bar is ALWAYS anchored to the bottom of the screen,
+          just above the keyboard (KeyboardAvoidingView), and centred
+          horizontally — never tied to the orb's position. */}
       <KeyboardAvoidingView
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        style={styles.avoider}
+        style={[styles.avoider, { justifyContent: 'flex-end', alignItems: 'center' }]}
         pointerEvents="box-none"
       >
         <View
@@ -100,8 +107,7 @@ export function AgentTextBubble({
               backgroundColor: t.cardBackgroundColor,
               borderColor: t.cardBorderColor,
               borderRadius: t.borderRadius ?? 18,
-              marginBottom: bottom,
-              marginRight: right,
+              marginBottom: 16,
             },
           ]}
         >
@@ -137,20 +143,31 @@ export function AgentTextBubble({
               returnKeyType="send"
             />
             <Pressable
-              onPress={send}
-              disabled={busy || !draft.trim()}
+              onPress={() => {
+                // STOP (cancel) while a turn is processing; SEND otherwise.
+                if (busy) {
+                  onCancel?.();
+                  return;
+                }
+                send();
+              }}
+              disabled={!busy && !draft.trim()}
               accessibilityRole="button"
-              accessibilityLabel={sendLabel}
+              accessibilityLabel={busy ? closeLabel : sendLabel}
               style={({ pressed }) => [
                 styles.sendBtn,
                 {
                   backgroundColor: sendButtonColor,
                   borderRadius: t.sendButtonRadius ?? 16,
-                  opacity: busy || !draft.trim() ? 0.35 : pressed ? 0.8 : 1,
+                  opacity: !busy && !draft.trim() ? 0.35 : pressed ? 0.8 : 1,
                 },
               ]}
             >
-              <Text style={styles.sendIcon}>↑</Text>
+              {busy ? (
+                <View style={styles.stopSquare} />
+              ) : (
+                <Text style={styles.sendIcon}>↑</Text>
+              )}
             </Pressable>
           </View>
         </View>
@@ -229,5 +246,11 @@ const styles = StyleSheet.create({
     fontSize: 17,
     fontWeight: '700',
     lineHeight: 20,
+  },
+  stopSquare: {
+    width: 12,
+    height: 12,
+    borderRadius: 2,
+    backgroundColor: '#000',
   },
 });

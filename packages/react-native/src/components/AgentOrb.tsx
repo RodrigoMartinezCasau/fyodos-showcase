@@ -12,9 +12,9 @@
  * feedback (e.g. haptics), accessibility texts (from the locale UI catalog
  * by default).
  */
-import React, { useCallback, useEffect, useState } from 'react';
-import { Image, Pressable, StyleSheet, View } from 'react-native';
-import type { OrbLogoTransform } from '@fyodos/core';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Animated, Dimensions, Image, PanResponder, Pressable, StyleSheet, View } from 'react-native';
+import type { OrbDeployment, OrbLogoTransform } from '@fyodos/core';
 import {
   chipBorderRadius,
   chipIconBaseSizePx,
@@ -24,7 +24,11 @@ import {
   resolveChipIconColor,
   resolveInnerBorderStrokeColor,
   resolveOrbBackgroundColor,
+  resolveOrbDeployment,
+  viewportPixelsToOrbScreenPosition,
+  ORB_LAYOUT_MARGIN,
 } from '@fyodos/core';
+import { createRnOrbHaptics } from '../haptics';
 import { ChipIconNative } from './ChipIconNative';
 import { ChipIconScaled } from './ChipIconScaled';
 import { OutwardDoubleBorder, resolveRnOutwardBorderLayout } from './OutwardDoubleBorder';
@@ -106,13 +110,31 @@ export function AgentOrb({
     confirmPendingAction,
     cancelPendingAction,
     wakeWordListening,
+    voiceAvailable,
   } = useAgent({ enabled });
 
   const [textOpen, setTextOpen] = useState(false);
+  // Mic denied/unavailable: tapping still puts the orb in the "active" visual
+  // and reveals the keyboard chip — text is always available (Change 1).
+  const [micFallbackActive, setMicFallbackActive] = useState(false);
+
+  // Subtle haptics on every relevant orb interaction (silent if unsupported).
+  const haptics = useRef(createRnOrbHaptics()).current;
+  const lastPhaseRef = useRef<typeof phase | null>(null);
+  useEffect(() => {
+    const prev = lastPhaseRef.current;
+    if (phase !== prev) {
+      if (phase === 'listening') haptics.trigger('listenStart');
+      else if (prev === 'listening') haptics.trigger('listenStop');
+      if (prev === 'thinking') haptics.trigger('response');
+      lastPhaseRef.current = phase;
+    }
+  }, [phase, haptics]);
 
   const setTextPanel = useCallback(
     (open: boolean) => {
       setTextOpen(open);
+      if (!open) setMicFallbackActive(false);
       try {
         onTextPanelStateChange?.(open);
       } catch {
@@ -122,12 +144,122 @@ export function AgentOrb({
     [onTextPanelStateChange],
   );
 
+  // ── Drag (finger) + smart deployment. Session-only: the orb always starts at
+  // the dashboard position (host layer) and resets on remount. ────────────────
+  const pan = useRef(new Animated.ValueXY()).current;
+  const orbBoxRef = useRef<View>(null);
+  const draggedRef = useRef(false);
+  const [deployment, setDeployment] = useState<OrbDeployment>({ horizontal: 'left', vertical: 'up' });
+  // The orb's measured window box. The keyboard chip is rendered in a SEPARATE
+  // full-screen overlay (not nested beside the orb), positioned from this box, so
+  // it is always hit-testable: a child placed outside its parent's bounds is drawn
+  // but never receives touches in React Native (iOS + Android clip touches to the
+  // parent frame) — which made the chip "deploy nothing" when tapped.
+  const [orbRect, setOrbRect] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+
+  const measureDeploy = useCallback(() => {
+    const node = orbBoxRef.current;
+    if (!node) return;
+    node.measureInWindow((x, y, w, h) => {
+      if (!w || !h) return;
+      setOrbRect({ x, y, w, h });
+      const win = Dimensions.get('window');
+      const pos = viewportPixelsToOrbScreenPosition({
+        centerX: x + w / 2,
+        centerY: y + h / 2,
+        viewportWidth: win.width,
+        viewportHeight: win.height,
+        orbDiameter: w,
+      });
+      setDeployment(resolveOrbDeployment(pos));
+    });
+  }, []);
+
+  // AssistiveTouch-style snap: after a drag the orb glides to the nearest
+  // left/right edge (vertical drop position preserved). We measure the orb's
+  // window box, compute the horizontal delta to the target edge and spring
+  // pan.x there; pan.y is untouched so vertical travel stays free.
+  const snapToNearestEdge = useCallback(() => {
+    const node = orbBoxRef.current;
+    if (!node) {
+      measureDeploy();
+      return;
+    }
+    node.measureInWindow((x, _y, w) => {
+      if (!w) {
+        measureDeploy();
+        return;
+      }
+      const win = Dimensions.get('window');
+      const centerX = x + w / 2;
+      const targetCenterX =
+        centerX < win.width / 2
+          ? ORB_LAYOUT_MARGIN + w / 2
+          : win.width - ORB_LAYOUT_MARGIN - w / 2;
+      const deltaX = targetCenterX - centerX;
+      const currentX = (pan.x as unknown as { __getValue: () => number }).__getValue();
+      Animated.spring(pan.x, {
+        toValue: currentX + deltaX,
+        useNativeDriver: false,
+        bounciness: 4,
+        speed: 14,
+      }).start(() => measureDeploy());
+    });
+  }, [measureDeploy, pan.x]);
+
+  const panResponder = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_e, g) => Math.hypot(g.dx, g.dy) > 6,
+      onPanResponderGrant: () => {
+        pan.extractOffset();
+      },
+      onPanResponderMove: Animated.event([null, { dx: pan.x, dy: pan.y }], {
+        useNativeDriver: false,
+      }),
+      onPanResponderRelease: () => {
+        draggedRef.current = true;
+        pan.flattenOffset();
+        snapToNearestEdge();
+      },
+      onPanResponderTerminate: () => {
+        pan.flattenOffset();
+        snapToNearestEdge();
+      },
+    }),
+  ).current;
+
+  useEffect(() => {
+    // Initial deployment from the dashboard-anchored position.
+    const id = setTimeout(measureDeploy, 60);
+    return () => clearTimeout(id);
+  }, [measureDeploy]);
+
   const handlePress = () => {
-    if (showThinking) return;
+    // Tapping the orb while it is processing CANCELS the in-flight turn (aborts
+    // the request, no reply is delivered) and returns the orb to its idle icon.
+    if (showThinking) {
+      haptics.trigger('orbTap');
+      cancelAll();
+      return;
+    }
+    haptics.trigger('orbTap');
     try {
       onPressFeedback?.();
     } catch {
       /* feedback must never break the agent */
+    }
+    if (voiceAvailable) {
+      setMicFallbackActive(false);
+      void toggleListening();
+      return;
+    }
+    // No microphone: skip the "active + chip" step and open the keyboard +
+    // conversation bar DIRECTLY — text is the only useful channel here
+    // (Change 2, unified across SDKs).
+    if (textInputEnabled) {
+      setMicFallbackActive(false);
+      openTextPanel();
+      return;
     }
     void toggleListening();
   };
@@ -138,9 +270,11 @@ export function AgentOrb({
     setTextPanel(true);
   };
 
-  // The chip appears next to the ACTIVE orb (listening), stays discreet, and
-  // disappears while the bubble is open. Voice remains the default mode.
-  const showKeyboardChip = textInputEnabled && !textOpen && phase === 'listening';
+  // The chip appears next to the ACTIVE orb (real listening OR mic fallback),
+  // stays discreet, and disappears while the bubble is open.
+  const showKeyboardChip =
+    textInputEnabled && !textOpen && (phase === 'listening' || micFallbackActive);
+  const orbActive = showWaveform || micFallbackActive;
   const chip = t.keyboardChip ?? {};
   const chipSize = chip.size ?? 30;
   const chipShape = chip.shape ?? 'circle';
@@ -225,11 +359,19 @@ export function AgentOrb({
         <AgentTextBubble
           visible={textOpen}
           onClose={() => setTextPanel(false)}
-          onSend={(text) => void submitTextTurn(text)}
+          onSend={(text) => {
+            haptics.trigger('send');
+            void submitTextTurn(text);
+          }}
+          onCancel={() => {
+            haptics.trigger('orbTap');
+            cancelAll();
+          }}
           exchange={lastExchange}
           busy={showThinking}
           accentColor={t.accentColor}
           theme={modalTheme}
+          deployment={deployment}
           bottom={textPanelOffset?.bottom ?? 96}
           right={textPanelOffset?.right ?? 16}
           placeholder={ui.textInputPlaceholder}
@@ -237,46 +379,18 @@ export function AgentOrb({
           closeLabel={ui.textPanelCloseLabel}
         />
       ) : null}
-      {showKeyboardChip ? (
-        <Pressable
-          onPress={openTextPanel}
-          accessibilityRole="button"
-          accessibilityLabel={ui.keyboardChipLabel}
-          style={({ pressed }) => [
-            styles.keyboardChip,
-            {
-              right: orbLayout.totalPx + 10,
-              top: (orbLayout.totalPx - chipLayout.totalPx) / 2,
-              opacity: pressed ? 0.8 : 1,
-            },
-          ]}
+      <Animated.View
+        {...panResponder.panHandlers}
+        style={{
+          width: orbLayout.totalPx,
+          height: orbLayout.totalPx,
+          transform: pan.getTranslateTransform(),
+        }}
+      >
+        <View
+          ref={orbBoxRef}
+          style={{ width: orbLayout.totalPx, height: orbLayout.totalPx, alignItems: 'center', justifyContent: 'center' }}
         >
-          <OutwardDoubleBorder
-            fillDiameter={chipSize}
-            cornerRadius={chipCornerRadius}
-            exteriorColor={chipBorder}
-            exteriorWidthSlider={chip.borderWidth ?? 100}
-            interiorColor={chipInteriorColor}
-            interiorWidthSlider={chip.innerBorderWidth}
-            fillColor={chipBg}
-          >
-            <ChipIconScaled chipSize={chipSize} baseSize={chipIconBase} scale={chipIconScale}>
-              {showChipImage ? (
-                <Image
-                  source={{ uri: chipIconUri! }}
-                  style={{ width: chipIconBase, height: chipIconBase, alignSelf: 'center' }}
-                  resizeMode="contain"
-                  accessibilityIgnoresInvertColors
-                  onError={() => setChipIconFailed(true)}
-                />
-              ) : (
-                <ChipIconNative icon={chipIconPreset} size={chipIconBase} color={chipIconColor} />
-              )}
-            </ChipIconScaled>
-          </OutwardDoubleBorder>
-        </Pressable>
-      ) : null}
-      <View style={{ width: orbLayout.totalPx, height: orbLayout.totalPx, alignItems: 'center', justifyContent: 'center' }}>
         {wakeWordListening ? (
           <View
             accessibilityLabel={wakeListeningLabel}
@@ -296,18 +410,18 @@ export function AgentOrb({
         ) : null}
         <Pressable
           onPress={handlePress}
-          disabled={!enabled || showThinking}
+          disabled={!enabled}
           accessibilityRole="button"
           accessibilityLabel={ui.orbAccessibilityLabel}
           accessibilityHint={isListening ? ui.orbHintListening : ui.orbHintIdle}
-          style={({ pressed }) => [{ opacity: pressed && enabled && !showThinking ? 0.92 : 1 }]}
+          style={({ pressed }) => [{ opacity: pressed && enabled ? 0.92 : 1 }]}
         >
           <OrbVisual
             size={t.size}
             theme={t}
             logoDataUrl={logoDataUrl}
             logoTransform={logoTransform}
-            showLogo={!showThinking && !showWaveform}
+            showLogo={!showThinking && !orbActive}
             speaking={phase === 'speaking'}
           >
             {showThinking ? (
@@ -315,7 +429,7 @@ export function AgentOrb({
                 orbSizePx={t.size}
                 color={t.waveformColor ?? t.accentColor}
               />
-            ) : showWaveform ? (
+            ) : orbActive ? (
               <VoiceWaveform
                 volume={volumeLevel}
                 color={t.waveformColor ?? t.accentColor}
@@ -326,12 +440,63 @@ export function AgentOrb({
             )}
           </OrbVisual>
         </Pressable>
-      </View>
+        </View>
+      </Animated.View>
+      {showKeyboardChip && orbRect ? (
+        <View pointerEvents="box-none" style={styles.chipOverlay}>
+          <Pressable
+            onPress={() => {
+              haptics.trigger('keyboardChip');
+              openTextPanel();
+            }}
+            accessibilityRole="button"
+            accessibilityLabel={ui.keyboardChipLabel}
+            style={({ pressed }) => [
+              styles.keyboardChip,
+              {
+                ...(deployment.horizontal === 'left'
+                  ? { left: orbRect.x - chipLayout.totalPx - 10 }
+                  : { left: orbRect.x + orbRect.w + 10 }),
+                top: orbRect.y + (orbRect.h - chipLayout.totalPx) / 2,
+                opacity: pressed ? 0.8 : 1,
+              },
+            ]}
+          >
+            <OutwardDoubleBorder
+              fillDiameter={chipSize}
+              cornerRadius={chipCornerRadius}
+              exteriorColor={chipBorder}
+              exteriorWidthSlider={chip.borderWidth ?? 100}
+              interiorColor={chipInteriorColor}
+              interiorWidthSlider={chip.innerBorderWidth}
+              fillColor={chipBg}
+            >
+              <ChipIconScaled chipSize={chipSize} baseSize={chipIconBase} scale={chipIconScale}>
+                {showChipImage ? (
+                  <Image
+                    source={{ uri: chipIconUri! }}
+                    style={{ width: chipIconBase, height: chipIconBase, alignSelf: 'center' }}
+                    resizeMode="contain"
+                    accessibilityIgnoresInvertColors
+                    onError={() => setChipIconFailed(true)}
+                  />
+                ) : (
+                  <ChipIconNative icon={chipIconPreset} size={chipIconBase} color={chipIconColor} />
+                )}
+              </ChipIconScaled>
+            </OutwardDoubleBorder>
+          </Pressable>
+        </View>
+      ) : null}
     </>
   );
 }
 
 const styles = StyleSheet.create({
+  chipOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    zIndex: 130,
+  },
   keyboardChip: {
     position: 'absolute',
     alignItems: 'stretch',

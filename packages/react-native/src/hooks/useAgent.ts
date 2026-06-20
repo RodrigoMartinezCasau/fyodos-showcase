@@ -94,6 +94,8 @@ export interface UseAgentResult {
   showThinking: boolean;
   isBusy: boolean;
   volumeLevel: number;
+  /** Whether speech recognition is available (mic granted + STT module up). */
+  voiceAvailable: boolean;
   toggleListening: () => Promise<void>;
   /**
    * Text entry point: runs a full agent turn from typed text instead of a
@@ -1282,6 +1284,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     showThinking,
     isBusy: showThinking || phase === 'speaking',
     volumeLevel: speech.volumeLevel,
+    voiceAvailable: voice.isRecognitionAvailable(),
     toggleListening,
     submitTextTurn,
     lastExchange,
