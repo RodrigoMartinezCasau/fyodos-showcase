@@ -14,7 +14,7 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Animated, Dimensions, Image, PanResponder, Pressable, StyleSheet, View } from 'react-native';
-import type { OrbDeployment, OrbLogoTransform } from '@fyodos/core';
+import type { OrbDeployment, OrbLogoTransform } from '@fiodos/core';
 import {
   chipBorderRadius,
   chipIconBaseSizePx,
@@ -27,13 +27,13 @@ import {
   resolveOrbDeployment,
   viewportPixelsToOrbScreenPosition,
   ORB_LAYOUT_MARGIN,
-} from '@fyodos/core';
+} from '@fiodos/core';
 import { createRnOrbHaptics } from '../haptics';
 import { ChipIconNative } from './ChipIconNative';
 import { ChipIconScaled } from './ChipIconScaled';
 import { OutwardDoubleBorder, resolveRnOutwardBorderLayout } from './OutwardDoubleBorder';
 import { useAgent } from '../hooks/useAgent';
-import { useFyodosRuntime } from '../provider/FyodosProvider';
+import { useFiodosRuntime } from '../provider/FiodosProvider';
 import { resolveImageDataUrlForDisplay, isDisplayableImageUri } from '../utils/imageUri';
 import { ActionConfirmationModal } from './ActionConfirmationModal';
 import { AgentTextBubble } from './AgentTextBubble';
@@ -42,13 +42,13 @@ import { OrbThinkingSpinner } from './OrbThinkingSpinner';
 import { VoiceWaveform } from './VoiceWaveform';
 import { OrbVisual } from './OrbVisual';
 import { DEFAULT_ORB_THEME, type AgentModalTheme, type AgentOrbTheme } from './theme';
-import { FyodosOrbMark } from './FyodosOrbMark';
+import { FiodosOrbMark } from './FiodosOrbMark';
 
 export interface AgentOrbProps {
   enabled?: boolean;
   theme?: Partial<AgentOrbTheme>;
   modalTheme?: Partial<AgentModalTheme>;
-  /** Idle icon when no logoDataUrl. Default: the neutral Fyodos brand mark. */
+  /** Idle icon when no logoDataUrl. Default: the neutral Fiodos brand mark. */
   icon?: React.ReactNode;
   /** Published logo — rendered inside OrbVisual above fill (transparent PNG safe). */
   logoDataUrl?: string | null;
@@ -81,7 +81,7 @@ export function AgentOrb({
   textPanelOffset,
   onTextPanelStateChange,
 }: AgentOrbProps) {
-  const { ui, config } = useFyodosRuntime();
+  const { ui, config } = useFiodosRuntime();
   const t = {
     ...DEFAULT_ORB_THEME,
     ...theme,
@@ -436,7 +436,7 @@ export function AgentOrb({
                 height={t.waveformHeight}
               />
             ) : logoDataUrl ? null : (
-              icon ?? <FyodosOrbMark orbSize={t.size} />
+              icon ?? <FiodosOrbMark orbSize={t.size} />
             )}
           </OrbVisual>
         </Pressable>

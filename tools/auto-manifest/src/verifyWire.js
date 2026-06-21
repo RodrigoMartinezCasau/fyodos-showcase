@@ -158,7 +158,7 @@ function sampleParams(entry) {
   const p = {};
   for (const mp of entry.manifestParams || []) {
     const n = (mp.name || '').toLowerCase();
-    if (/title|text|name|label|todo|task|note/.test(n)) p[mp.name] = 'Fyodos probe item';
+    if (/title|text|name|label|todo|task|note/.test(n)) p[mp.name] = 'Fiodos probe item';
     else if (/id|key/.test(n)) p[mp.name] = 1;
     else if (/count|qty|amount|number/.test(n)) p[mp.name] = 1;
     else if (/done|complete|checked/.test(n)) p[mp.name] = true;

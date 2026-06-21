@@ -1,7 +1,7 @@
-# @fyodos/auto-manifest — motor de auto-detección (v3, AI-first)
+# @fiodos/auto-manifest — motor de auto-detección (v3, AI-first)
 
 Motor que analiza una app Expo/React Native y genera un borrador de `AppManifest`
-(esquema real de `@fyodos/core`). **La IA lee el código fuente directamente** y
+(esquema real de `@fiodos/core`). **La IA lee el código fuente directamente** y
 propone rutas y acciones con evidencia obligatoria; una verificación mecánica de
 salida confirma que cada claim existe de verdad en el código antes de aceptarlo.
 
@@ -22,7 +22,7 @@ node src/index.js /ruta/a/la/app --out output/mi-app --model gpt-5-mini
 # Pasada solo estática (gratis, sin enviar código a la IA — solo rutas, sin acciones):
 node src/index.js /ruta/a/la/app --out output/mi-app --no-llm
 
-# Publicar el resultado en tu proyecto Fyodos (dashboard → "Recargar análisis"):
+# Publicar el resultado en tu proyecto Fiodos (dashboard → "Recargar análisis"):
 node src/index.js /ruta/a/la/app --out output/mi-app \
   --publish --api-url http://localhost:8000
 ```
@@ -35,7 +35,7 @@ Las keys se cargan solas desde `tools/auto-manifest/.env` y `fyodos/backend/.env
 
 Dos fronteras distintas, sé transparente con ambas:
 
-1. **Backend de Fyodos: el código NUNCA llega.** Con `--publish` solo viaja el
+1. **Backend de Fiodos: el código NUNCA llega.** Con `--publish` solo viaja el
    `manifest.json` resultante + metadatos pequeños (motor, modelo, contadores,
    coste). El endpoint solo acepta JSON con esquema de `AppManifest` y rechaza
    payloads grandes. No existe ningún endpoint capaz de recibir código.
@@ -59,7 +59,7 @@ El coste del análisis lo asume quien analiza (su key, su proveedor).
 | 2 | `src/collect.js` | Selección de archivos **por reglas** (extensión/ruta, nunca análisis): excluye deps/nativo/tests/configs; si la app excede el presupuesto (`--max-input-tokens`, 150K por defecto) prioriza pantallas→estado→servicios→UI y reporta lo omitido | No puede "fallar a cero" |
 | 3 | `src/aiAnalyze.js` | **UNA llamada**: el modelo lee el código completo y propone manifest + evidencia por ítem (`{file, symbol}`) + `uncertain` | La IA lidera |
 | 4 | `src/verify.js` | Revisor de salida: el archivo de evidencia debe existir entre los enviados, el handler/símbolo debe aparecer como identificador real en ese archivo, la ruta debe existir en el escaneo del paso 1. Lo no probado se **elimina** y queda en `provenance.json` | Anti-alucinación |
-| 5 | core | `validateManifest` real de `@fyodos/core` | Gate final |
+| 5 | core | `validateManifest` real de `@fiodos/core` | Gate final |
 
 ## Salvaguardas anti-alucinación
 
@@ -89,7 +89,7 @@ Céntimos por análisis, una vez, pagados por el desarrollador con su key.
 
 | Archivo | Contenido |
 | --- | --- |
-| `manifest.json` | `AppManifest` (esquema `@fyodos/core`), verificado y validado |
+| `manifest.json` | `AppManifest` (esquema `@fiodos/core`), verificado y validado |
 | `provenance.json` | Por cada ruta/acción: verificación superada o motivo de descarte |
 | `evidence.json` | Evidencia declarada por el modelo + sus dudas (`uncertain`) |
 | `usage.json` | Tokens reales de la API + coste en USD del análisis |

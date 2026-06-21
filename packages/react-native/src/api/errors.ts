@@ -1,7 +1,7 @@
 /**
  * Typed API errors. The original client classified failures by matching
  * Spanish substrings in error messages — language-dependent and fragile.
- * The Fyodos client throws AgentApiError with a stable machine code; the
+ * The Fiodos client throws AgentApiError with a stable machine code; the
  * orchestrator maps codes to the locale UI catalog.
  */
 

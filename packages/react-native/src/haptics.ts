@@ -1,6 +1,6 @@
 /**
  * React Native orb haptics. Uses the always-available `Vibration` API (no extra
- * native dependency), mapping the unified @fyodos/core haptic events to short,
+ * native dependency), mapping the unified @fiodos/core haptic events to short,
  * subtle taps. Silent degradation: if vibration is unavailable or disabled, it
  * simply does nothing.
  *
@@ -13,7 +13,7 @@ import {
   orbHapticWebPattern,
   type OrbHaptics,
   type OrbHapticEvent,
-} from '@fyodos/core';
+} from '@fiodos/core';
 
 /** Baseline RN haptics via the Vibration API, with fully silent degradation. */
 export function createRnOrbHaptics(): OrbHaptics {

@@ -41,7 +41,7 @@ function applyEnv(parsed) {
 }
 
 /** Derive FYODOS_API_KEY from FYODOS_CLIENT_KEYS (api_key:client_id,...). */
-function deriveFyodosApiKey() {
+function deriveFiodosApiKey() {
   if (process.env.FYODOS_API_KEY) return;
   const raw = process.env.FYODOS_CLIENT_KEYS || '';
   const first = raw.split(',')[0]?.trim();
@@ -50,7 +50,7 @@ function deriveFyodosApiKey() {
   if (apiKey) process.env.FYODOS_API_KEY = apiKey;
 }
 
-/** Prefer the target app's Fyodos API key from .env when publishing that app. */
+/** Prefer the target app's Fiodos API key from .env when publishing that app. */
 function loadAppEnv(appRoot) {
   if (!appRoot) return;
   const appEnv = parseEnvFile(path.join(appRoot, '.env'));
@@ -75,7 +75,7 @@ function loadEnv() {
   for (const file of files) {
     applyEnv(parseEnvFile(file));
   }
-  deriveFyodosApiKey();
+  deriveFiodosApiKey();
 }
 
 module.exports = { loadEnv, loadAppEnv };

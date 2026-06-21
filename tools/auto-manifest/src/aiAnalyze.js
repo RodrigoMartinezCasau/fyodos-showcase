@@ -4,7 +4,7 @@
  *
  * PRIVACY NOTE: this sends the collected source files to the AI provider
  * (Anthropic or OpenAI) using the DEVELOPER'S OWN key. It never touches the
- * Fyodos backend — only the resulting manifest is published, optionally, later.
+ * Fiodos backend — only the resulting manifest is published, optionally, later.
  */
 'use strict';
 
@@ -132,7 +132,7 @@ const PLATFORM_GUIDES = {
 function buildSystemPrompt(platform) {
   const guide = PLATFORM_GUIDES[platform] || PLATFORM_GUIDES.mobile;
   const { appKindLabel, screenWord, routeHintLine, actionHintLine } = guide;
-  return `You analyze the FULL source code of ${appKindLabel} and produce the manifest of an in-app voice agent (Fyodos AppManifest).
+  return `You analyze the FULL source code of ${appKindLabel} and produce the manifest of an in-app voice agent (Fiodos AppManifest).
 
 ROUTES: every ${screenWord} the user can navigate to. ${routeHintLine} Skip auth screens (sign-in/sign-up) and dynamic [param] routes. Always include a BACK route ("route": "BACK").
 
@@ -207,7 +207,7 @@ For EVERY action, also return a "wiring" entry describing how a separate module 
   · an exported service/singleton object or class instance with a method,
   · a local-first data layer exported from a module (e.g. a Dexie \`db\`: await db.items.add({ ... })), or any repository/DAO module.
   Provide "imports" (exact repo-relative paths, same as the FILE headers; the generator rewrites them to relative paths) and a single "call" expression. Use params['name'] for every manifest parameter, by NAME, never by position. The expression may build objects/ids inline (crypto.randomUUID(), Date.now()).
-- Use "strategy": "bridge" when the action can ONLY be performed through component-local state (React useState / Vue ref / Angular component field or an @Injectable service the component injects) with NO module-reachable store, service or data layer. Fyodos WILL edit the user's component (under explicit consent) to register a tiny bridge, so you MUST fill the "bridge" object precisely:
+- Use "strategy": "bridge" when the action can ONLY be performed through component-local state (React useState / Vue ref / Angular component field or an @Injectable service the component injects) with NO module-reachable store, service or data layer. Fiodos WILL edit the user's component (under explicit consent) to register a tiny bridge, so you MUST fill the "bridge" object precisely:
   · "file": the component that owns the state.
   · "scope": "statement" for function-style components (React function body, Vue <script setup>), or "class-field" for class components (Angular @Component classes) where a bare statement would be a syntax error.
   · "anchor": an exact, UNIQUE existing line to place the registration next to, in the SAME scope where the action's function / reactive state / injected instance is in scope. It must appear only ONCE in the file.
@@ -360,7 +360,7 @@ async function correctActionWiring({
     .map((f) => `===== FILE: ${f.rel} =====\n${f.content}`)
     .join('\n\n');
   const system =
-    `You are fixing the WIRING of ONE Fyodos action that FAILED automatic verification during install. ` +
+    `You are fixing the WIRING of ONE Fiodos action that FAILED automatic verification during install. ` +
     `Re-read the relevant code and the concrete error, diagnose the ROOT CAUSE, and return CORRECTED wiring for this single action.\n\n` +
     `${wiringGuide(platform)}\n\n` +
     `Common root causes & fixes:\n` +

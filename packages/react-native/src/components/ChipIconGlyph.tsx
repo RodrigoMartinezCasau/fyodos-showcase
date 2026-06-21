@@ -1,6 +1,6 @@
 import React from 'react';
 import Svg, { Path, Rect } from 'react-native-svg';
-import type { KeyboardChipIcon } from '@fyodos/core';
+import type { KeyboardChipIcon } from '@fiodos/core';
 
 /** Preset chip icon — simple SVG shapes (reliable on iOS, matches dashboard). */
 export function ChipIconGlyph({

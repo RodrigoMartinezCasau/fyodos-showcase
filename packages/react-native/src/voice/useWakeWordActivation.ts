@@ -6,10 +6,10 @@
  * audio stream is sent to Fiodos servers during wake-word listening.
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import { defaultWakePhrasesForLocale, type VoiceAdapter } from '@fyodos/core';
-import type { ConsentManager } from '@fyodos/core';
-import type { TelemetryAdapter } from '@fyodos/core';
-import type { NavigationAdapter } from '@fyodos/core';
+import { defaultWakePhrasesForLocale, type VoiceAdapter } from '@fiodos/core';
+import type { ConsentManager } from '@fiodos/core';
+import type { TelemetryAdapter } from '@fiodos/core';
+import type { NavigationAdapter } from '@fiodos/core';
 
 export interface VoiceActivationRuntimeConfig {
   /** Developer offers wake-word in this app (manifest / dashboard). */

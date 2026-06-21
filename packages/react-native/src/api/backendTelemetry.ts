@@ -1,5 +1,5 @@
 /**
- * Default Fyodos telemetry adapter — maps the SDK's agent events to the
+ * Default Fiodos telemetry adapter — maps the SDK's agent events to the
  * backend's privacy-safe usage events and ships them to POST /v1/agent/events.
  *
  * Design constraints:
@@ -13,9 +13,9 @@
  * Statistics are produced server-side by COUNTING these events (SQL), never by
  * AI — this adapter only reports the countable facts.
  */
-import type { AgentEventParams, TelemetryAdapter } from '@fyodos/core';
+import type { AgentEventParams, TelemetryAdapter } from '@fiodos/core';
 
-export interface FyodosTelemetryOptions {
+export interface FiodosTelemetryOptions {
   baseUrl: string;
   /** Client API key sent as x-api-key (same contract as the backend client). */
   apiKey?: string;
@@ -70,7 +70,7 @@ function mapEvent(params: AgentEventParams): WireEvent[] {
   }
 }
 
-export function createFyodosTelemetry(options: FyodosTelemetryOptions): TelemetryAdapter {
+export function createFiodosTelemetry(options: FiodosTelemetryOptions): TelemetryAdapter {
   const baseUrl = options.baseUrl.replace(/\/$/, '');
   const flushIntervalMs = options.flushIntervalMs ?? 4000;
   const maxBatch = options.maxBatch ?? 20;

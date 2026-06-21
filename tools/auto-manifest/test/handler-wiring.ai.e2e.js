@@ -15,8 +15,8 @@
  *        · a call referencing a bare identifier that is neither imported nor a
  *          safe global,
  *        · an action the AI marked "bridge" (not module-reachable).
- *   3. Runs wireHandlers() with consent assumed, then runs the REAL @fyodos/core
- *      executor + @fyodos/web-core decideAction over the GENERATED registry to
+ *   3. Runs wireHandlers() with consent assumed, then runs the REAL @fiodos/core
+ *      executor + @fiodos/web-core decideAction over the GENERATED registry to
  *      prove a non-sensitive AI-wired action executes, a sensitive one is gated,
  *      and the rejected proposals are NEVER written.
  *

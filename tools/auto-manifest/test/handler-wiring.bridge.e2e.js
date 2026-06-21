@@ -1,6 +1,6 @@
 /**
  * E2E proof for the BRIDGE wiring path: when an action's state is locked inside
- * a component (not reachable from a module), Fyodos edits the user's OWN file to
+ * a component (not reachable from a module), Fiodos edits the user's OWN file to
  * register a tiny bridge, generates the holder + registry, and the action then
  * executes for real against the component's live state.
  *
@@ -27,7 +27,7 @@ const {
   applyComponentEdits,
   buildBridgeModule,
   buildRegistryModule,
-  stripFyodosBlocks,
+  stripFiodosBlocks,
   revertAll,
 } = require('../src/wireHandlers');
 
@@ -113,8 +113,8 @@ async function main() {
 
   const editedSrc = fs.readFileSync(path.join(appRoot, componentRel), 'utf8');
   console.log(editedSrc);
-  assert.ok(/import \{ registerFyodosBridge \} from '\.\/bridge'/.test(editedSrc), 'import injected');
-  assert.ok(/registerFyodosBridge\(\{/.test(editedSrc), 'registration injected');
+  assert.ok(/import \{ registerFiodosBridge \} from '\.\/bridge'/.test(editedSrc), 'import injected');
+  assert.ok(/registerFiodosBridge\(\{/.test(editedSrc), 'registration injected');
   assert.ok(editedSrc.includes('addItem(args.title)'), 'invoke injected');
   console.log('  PASS — the component now registers its live function via the bridge');
 

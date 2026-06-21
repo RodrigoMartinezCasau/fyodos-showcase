@@ -4,7 +4,7 @@ import {
   computeOrbRimCounterSpinDegPerSec,
   computeOrbRimMotionOpacity,
   computeOrbSpinDegPerSec,
-} from '@fyodos/core';
+} from '@fiodos/core';
 
 type RimMotionOptions = {
   reverse?: boolean;

@@ -5,7 +5,7 @@ import {
   chipIconSpec,
   normalizeKeyboardChipIcon,
   type KeyboardChipIcon,
-} from '@fyodos/core';
+} from '@fiodos/core';
 
 /** Preset chip icon — centered in viewBox (matches ChipIconSvg + rasterized PNG). */
 export function ChipIconNative({

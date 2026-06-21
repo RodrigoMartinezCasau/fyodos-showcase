@@ -5,7 +5,7 @@ import {
   resolveVoiceActivationPolicies,
   type AppManifest,
   type VoiceActivationPolicySource,
-} from '@fyodos/core';
+} from '@fiodos/core';
 import type { VoiceActivationRuntimeConfig } from './useWakeWordActivation';
 
 export interface PublishedVoiceActivation extends VoiceActivationPolicySource {}
@@ -28,7 +28,7 @@ export interface ResolveVoiceActivationOptions {
 
 /**
  * Builds voice-activation runtime config from manifest + optional published
- * dashboard overrides. Used automatically by FyodosProvider when integrators
+ * dashboard overrides. Used automatically by FiodosProvider when integrators
  * omit `config.voiceActivation`.
  *
  * Wake-word listening starts after assistant consent (ConsentModal). No separate

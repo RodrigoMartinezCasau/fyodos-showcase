@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { computeOrbSpinDegPerSec } from '@fyodos/core';
+import { computeOrbSpinDegPerSec } from '@fiodos/core';
 
 /** Continuous rim rotation (deg) — rAF instead of Animated (Fabric-safe on RN 0.81). */
 export function useOrbSpinAngle(speed = 42, active = true): number {

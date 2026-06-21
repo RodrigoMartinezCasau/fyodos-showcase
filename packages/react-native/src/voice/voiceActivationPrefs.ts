@@ -3,10 +3,10 @@
  * Not required by default — assistant consent + system mic permission suffice.
  * Use with `VoiceActivationSettings` only if the integrator adds a settings toggle.
  */
-import type { StorageAdapter } from '@fyodos/core';
+import type { StorageAdapter } from '@fiodos/core';
 
 export function voiceActivationPrefsKey(appId: string): string {
-  return `@fyodos/${appId}/voice_activation_user_opt_in`;
+  return `@fiodos/${appId}/voice_activation_user_opt_in`;
 }
 
 export async function loadVoiceActivationOptIn(

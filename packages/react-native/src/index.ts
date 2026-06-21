@@ -1,9 +1,9 @@
 /**
- * @fyodos/react-native — React Native bindings for the Fyodos agent.
+ * @fiodos/react-native — React Native bindings for the Fiodos agent.
  *
  * Main entry: depends only on react + react-native. Expo-specific adapters
  * (voice, expo-router navigation, AsyncStorage) live under
- * '@fyodos/react-native/expo' so Metro only resolves Expo packages in apps
+ * '@fiodos/react-native/expo' so Metro only resolves Expo packages in apps
  * that use them.
  */
 
@@ -11,15 +11,15 @@
 export type {
   AgentPhase,
   AgentTimings,
-  FyodosAgentConfig,
-  FyodosVoiceActivationConfig,
+  FiodosAgentConfig,
+  FiodosVoiceActivationConfig,
   TurnGateVerdict,
 } from './config/types';
 export { DEFAULT_AGENT_TIMINGS } from './config/types';
 
 // Provider + orchestrator
-export { FyodosProvider, useFyodosRuntime } from './provider/FyodosProvider';
-export type { FyodosRuntime } from './provider/FyodosProvider';
+export { FiodosProvider, useFiodosRuntime } from './provider/FiodosProvider';
+export type { FiodosRuntime } from './provider/FiodosProvider';
 export { useAgent } from './hooks/useAgent';
 export type { AgentExchange, UseAgentOptions, UseAgentResult } from './hooks/useAgent';
 
@@ -40,10 +40,10 @@ export { createUiRegistry } from './bridge/createUiRegistry';
 export type { UiRegistry } from './bridge/createUiRegistry';
 
 // Backend HTTP client
-export { createFyodosBackendClient, buildManifestPayload } from './api/backendClient';
-export type { FyodosBackendClientOptions } from './api/backendClient';
-export { createFyodosTelemetry } from './api/backendTelemetry';
-export type { FyodosTelemetryOptions } from './api/backendTelemetry';
+export { createFiodosBackendClient, buildManifestPayload } from './api/backendClient';
+export type { FiodosBackendClientOptions } from './api/backendClient';
+export { createFiodosTelemetry } from './api/backendTelemetry';
+export type { FiodosTelemetryOptions } from './api/backendTelemetry';
 export { AgentApiError, isAgentApiError } from './api/errors';
 export type { AgentApiErrorCode } from './api/errors';
 

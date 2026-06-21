@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Fyodos auto-manifest engine v3 — AI-FIRST.
+ * Fiodos auto-manifest engine v3 — AI-FIRST.
  *
  * The model reads the app's SOURCE CODE directly and proposes the manifest;
  * the mechanical layer verifies its output afterwards. Inverted from v2,
@@ -13,7 +13,7 @@
  *   3. AI      — ONE call: model reads the code, proposes manifest + evidence
  *   4. verify  — mechanical output check: file + symbol + route must exist;
  *                unproven claims are dropped, never published
- *   5. gate    — @fyodos/core validateManifest
+ *   5. gate    — @fiodos/core validateManifest
  *
  * Usage:
  *   node src/index.js <target-app-root> --out <output-dir> \
@@ -28,7 +28,7 @@
  *   for the full diagnostic log (for Fiodos operators debugging locally).
  *
  * Web orb wiring (web targets only):
- *   After analysis, a web target is OFFERED automatic wiring of <FyodosAgent/>
+ *   After analysis, a web target is OFFERED automatic wiring of <FiodosAgent/>
  *   into the app's root layout. It asks before editing your code; on "no" (or a
  *   non-interactive shell) it prints the ready-to-paste snippet instead.
  *     --yes      accept the wiring without the prompt (CI / express installer)
@@ -43,14 +43,14 @@
  *
  * PRIVACY:
  *   - The analysis runs on THIS machine. With --publish, only the resulting
- *     manifest.json + small metadata are POSTed to the Fyodos backend.
- *     Source files NEVER reach the Fyodos backend.
+ *     manifest.json + small metadata are POSTed to the Fiodos backend.
+ *     Source files NEVER reach the Fiodos backend.
  *   - The AI step sends the collected source files to the AI provider
  *     (Anthropic Claude Opus by default) using the developer's own key.
  *     Use --no-llm for a static-only pass (routes, no actions) if that is not acceptable.
  *
  * Output:
- *   manifest.json     — AppManifest (schema of @fyodos/core), verified
+ *   manifest.json     — AppManifest (schema of @fiodos/core), verified
  *   provenance.json   — per route/action: verification result or drop reason
  *   evidence.json     — model's claimed evidence + declared uncertainties
  *   usage.json        — REAL token usage + cost in USD for this analysis
@@ -100,7 +100,7 @@ function logUser(line) {
   console.log(`${cyan}◉${reset} ${blue}Fiodos${reset} · ${line}`);
 }
 
-/** Branded terminal spinner (Fyodos orb + colors when stderr is a TTY). */
+/** Branded terminal spinner (Fiodos orb + colors when stderr is a TTY). */
 async function withSpinner(label, work) {
   const orbFrames = ['◴', '◷', '◶', '◵'];
   const brailleFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
@@ -261,12 +261,12 @@ async function main() {
   // the rest 'allow'. Closed-by-default still applies regardless of this hint.
   annotateExternalAgentRecommendations(manifest);
 
-  // ── 5. Final gate: the real @fyodos/core validator ─────────────────────────
+  // ── 5. Final gate: the real @fiodos/core validator ─────────────────────────
   try {
     const { validateManifest } = require(path.join(__dirname, '../../../packages/core/dist/manifest/validate.js'));
     const validation = validateManifest(manifest);
     provenance.coreValidation = validation;
-    logDev(`[validate] @fyodos/core validateManifest → valid=${validation.valid}` +
+    logDev(`[validate] @fiodos/core validateManifest → valid=${validation.valid}` +
       (validation.errors?.length ? ` errors=${JSON.stringify(validation.errors)}` : ''));
   } catch {
     provenance.coreValidation = { skipped: 'core dist not built' };
@@ -288,7 +288,7 @@ async function main() {
   }
 
   // ── 6. Web: offer to wire the orb into the app (consent-based) ─────────────
-  // The same command the developer already runs also drops <FyodosAgent/> into
+  // The same command the developer already runs also drops <FiodosAgent/> into
   // their app, so the onboarding never needs a separate manual step. Mobile is
   // wired by its own installer and is intentionally left untouched here.
   if (platform === 'web') {
@@ -310,7 +310,7 @@ async function main() {
     // ── 7. Web: SECOND consent — connect detected actions to real app functions.
     // The orb is mounted but the agent cannot DO anything until each manifest
     // action is bridged to the function that performs it. We prepare that wiring,
-    // write a readable document into the project's Fyodos folder, and ask a
+    // write a readable document into the project's Fiodos folder, and ask a
     // separate, informed [yes/no] before touching anything. Security is enforced
     // upstream by the engine, so generated handlers can never skip a confirmation.
     const { runPostWireTest } = require('./postWireTest');
@@ -507,7 +507,7 @@ function annotateExternalAgentRecommendations(manifest) {
 
 /**
  * POST the resulting manifest (and only the manifest + small metadata) to the
- * developer's Fyodos project. Authenticated with the project API key shown in
+ * developer's Fiodos project. Authenticated with the project API key shown in
  * the dashboard. Never sends source files, evidence or usage logs.
  */
 /** Resolve the Fiodos backend target (project API key + URL) from flags/env. */

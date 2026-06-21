@@ -7,7 +7,7 @@
  * render AgentLayer, or manually anywhere under the router).
  */
 import { useEffect } from 'react';
-import type { NavigationAdapter } from '@fyodos/core';
+import type { NavigationAdapter } from '@fiodos/core';
 import { parseRouteString } from '../navigation/parseRoute';
 
 interface ExpoRouterLike {
@@ -20,7 +20,7 @@ interface ExpoRouterLike {
   usePathname(): string;
 }
 
-// Static require: resolved by Metro only when the app imports '@fyodos/react-native/expo'.
+// Static require: resolved by Metro only when the app imports '@fiodos/react-native/expo'.
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const expoRouter = require('expo-router') as ExpoRouterLike;
 

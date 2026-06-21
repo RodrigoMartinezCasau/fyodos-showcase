@@ -1,5 +1,5 @@
 /**
- * Locale resolution for the UI catalog. Same policy as @fyodos/core:
+ * Locale resolution for the UI catalog. Same policy as @fiodos/core:
  * exact match → base-language match → throw. No silent language fallback.
  */
 import type { AgentUiMessages } from './types';

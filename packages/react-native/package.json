@@ -1,8 +1,11 @@
 {
-  "name": "@fyodos/react-native",
+  "name": "@fiodos/react-native",
   "version": "0.1.0",
-  "description": "Fyodos agent React Native bindings — orchestrator hook, UI components, navigation/voice/storage adapters and HTTP client over @fyodos/core.",
-  "license": "UNLICENSED",
+  "description": "Fiodos agent React Native bindings — orchestrator hook, UI components, navigation/voice/storage adapters and HTTP client over @fiodos/core.",
+  "license": "SEE LICENSE IN LICENSE",
+  "publishConfig": {
+    "access": "public"
+  },
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "exports": {
@@ -16,7 +19,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "LICENSE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
@@ -24,7 +28,7 @@
     "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
-    "@fyodos/core": "0.1.0"
+    "@fiodos/core": "0.1.0"
   },
   "peerDependencies": {
     "@react-native-async-storage/async-storage": "*",

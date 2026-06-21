@@ -8,7 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const IMPORT_NAME = 'FyodosAgentMount';
+const IMPORT_NAME = 'FiodosAgentMount';
 const WRAPPER_BASENAME = 'fyodos-agent-mount';
 
 const ORB_JSX_START = '{/* FYODOS:ORB:START (auto-generated — safe to remove) */}';
@@ -76,7 +76,7 @@ function agentJsx(framework, ts, indent = '  ') {
   const keyExpr = envExpr(framework, 'key', ts);
   const urlExpr = envExpr(framework, 'url', ts);
   return (
-    `${indent}<FyodosAgent\n` +
+    `${indent}<FiodosAgent\n` +
     `${indent}  apiKey={${keyExpr}}\n` +
     `${indent}  apiUrl={${urlExpr}}\n` +
     `${indent}/>`
@@ -84,7 +84,7 @@ function agentJsx(framework, ts, indent = '  ') {
 }
 
 function isAlreadyMounted(source) {
-  return /FyodosAgent|fyodos-agent|FYODOS:ORB:START/.test(source);
+  return /FiodosAgent|fyodos-agent|FYODOS:ORB:START/.test(source);
 }
 
 /**
@@ -170,23 +170,23 @@ function describePlan(plan) {
       lines.push(`Import wrapper and mount before </body>`);
       break;
     case 'vite-main':
-      lines.push('Add import { FyodosAgent } from @fyodos/react');
-      lines.push('Mount <FyodosAgent /> inside createRoot().render() (marked FYODOS:ORB:*)');
+      lines.push('Add import { FiodosAgent } from @fiodos/react');
+      lines.push('Mount <FiodosAgent /> inside createRoot().render() (marked FYODOS:ORB:*)');
       break;
     case 'react-return':
-      lines.push('Add import { FyodosAgent } from @fyodos/react');
-      lines.push('Mount <FyodosAgent /> inside the root JSX return (marked FYODOS:ORB:*)');
+      lines.push('Add import { FiodosAgent } from @fiodos/react');
+      lines.push('Mount <FiodosAgent /> inside the root JSX return (marked FYODOS:ORB:*)');
       break;
     case 'vue-sfc':
-      lines.push('Add @fyodos/vue import + env vars in <script>');
-      lines.push('Mount <FyodosAgent /> in <template> (marked FYODOS:ORB:*)');
+      lines.push('Add @fiodos/vue import + env vars in <script>');
+      lines.push('Mount <FiodosAgent /> in <template> (marked FYODOS:ORB:*)');
       break;
     case 'svelte-sfc':
-      lines.push('Add @fyodos/svelte import in <script>');
-      lines.push('Mount <FyodosAgent /> in layout (marked FYODOS:ORB:*)');
+      lines.push('Add @fiodos/svelte import in <script>');
+      lines.push('Mount <FiodosAgent /> in layout (marked FYODOS:ORB:*)');
       break;
     case 'angular-component':
-      lines.push('Add FyodosAgentComponent to @Component imports');
+      lines.push('Add FiodosAgentComponent to @Component imports');
       lines.push('Mount <fyodos-agent> in template (marked FYODOS:ORB:*)');
       break;
     default:
@@ -199,12 +199,12 @@ function writeWrapper(layoutFile, framework, ts) {
   const dir = path.dirname(layoutFile);
   const ext = ts ? '.tsx' : '.jsx';
   const wrapperFile = path.join(dir, `${WRAPPER_BASENAME}${ext}`);
-  if (fs.existsSync(wrapperFile) && /FyodosAgent/.test(readFile(wrapperFile))) {
+  if (fs.existsSync(wrapperFile) && /FiodosAgent/.test(readFile(wrapperFile))) {
     return wrapperFile;
   }
   const body =
     `'use client';\n\n` +
-    `import { FyodosAgent } from '@fyodos/react';\n\n` +
+    `import { FiodosAgent } from '@fiodos/react';\n\n` +
     `export default function ${IMPORT_NAME}() {\n` +
     `  return (\n` +
     `${agentJsx(framework, ts, '    ')}\n` +
@@ -237,7 +237,7 @@ function injectViteMain(plan) {
   const { target, framework } = plan;
   const ts = target.ext === '.tsx';
   let source = stripMarkedRegion(readFile(target.file), ORB_JSX_START, ORB_JSX_END);
-  const importLine = `import { FyodosAgent } from '@fyodos/react';`;
+  const importLine = `import { FiodosAgent } from '@fiodos/react';`;
   if (!source.includes(importLine)) {
     source = insertImportAfterLastImport(source, importLine);
   }
@@ -266,7 +266,7 @@ function injectReactReturn(plan) {
   const { target, framework } = plan;
   const ts = target.ext === '.tsx';
   let source = stripMarkedRegion(readFile(target.file), ORB_JSX_START, ORB_JSX_END);
-  const importLine = `import { FyodosAgent } from '@fyodos/react';`;
+  const importLine = `import { FiodosAgent } from '@fiodos/react';`;
   if (!source.includes(importLine)) {
     source = insertImportAfterLastImport(source, importLine);
   }
@@ -295,12 +295,12 @@ function injectVueSfc(plan) {
   if (!/from ['"]@fyodos\/vue['"]/.test(source)) {
     source = source.replace(
       /(<script[^>]*>)/,
-      `$1\nimport { FyodosAgent } from '@fyodos/vue';\nconst fyodosApiKey = import.meta.env.VITE_FYODOS_API_KEY;\nconst fyodosApiUrl = import.meta.env.VITE_FYODOS_API_URL;\n`,
+      `$1\nimport { FiodosAgent } from '@fiodos/vue';\nconst fyodosApiKey = import.meta.env.VITE_FYODOS_API_KEY;\nconst fyodosApiUrl = import.meta.env.VITE_FYODOS_API_URL;\n`,
     );
   }
   const block = [
     ORB_HTML_START,
-    '  <FyodosAgent :api-key="fyodosApiKey" :base-url="fyodosApiUrl" />',
+    '  <FiodosAgent :api-key="fyodosApiKey" :base-url="fyodosApiUrl" />',
     ORB_HTML_END,
   ].join('\n');
   source = source.replace('</template>', `${block}\n</template>`);
@@ -313,12 +313,12 @@ function injectSvelteSfc(plan) {
   if (!/from ['"]@fyodos\/svelte/.test(source)) {
     source = source.replace(
       /(<script[^>]*>)/,
-      `$1\n\timport FyodosAgent from '@fyodos/svelte/FyodosAgent.svelte';\n`,
+      `$1\n\timport FiodosAgent from '@fiodos/svelte/FiodosAgent.svelte';\n`,
     );
   }
   const block = [
     ORB_HTML_START,
-    '<FyodosAgent apiKey={import.meta.env.VITE_FYODOS_API_KEY} baseUrl={import.meta.env.VITE_FYODOS_API_URL} />',
+    '<FiodosAgent apiKey={import.meta.env.VITE_FYODOS_API_KEY} baseUrl={import.meta.env.VITE_FYODOS_API_URL} />',
     ORB_HTML_END,
   ].join('\n');
   if (source.includes('</main>')) {
@@ -334,11 +334,11 @@ function injectAngularComponent(plan) {
   let ts = stripMarkedRegion(readFile(target.file), ORB_SCRIPT_START, ORB_SCRIPT_END);
   let html = stripMarkedRegion(readFile(templatePath), ORB_HTML_START, ORB_HTML_END);
 
-  if (!/FyodosAgentComponent/.test(ts)) {
-    ts = insertImportAfterLastImport(ts, `import { FyodosAgentComponent } from '@fyodos/angular/angular';`);
+  if (!/FiodosAgentComponent/.test(ts)) {
+    ts = insertImportAfterLastImport(ts, `import { FiodosAgentComponent } from '@fiodos/angular/angular';`);
   }
-  if (!/FyodosAgentComponent/.test(ts)) {
-    ts = ts.replace(/imports:\s*\[/, 'imports: [FyodosAgentComponent, ');
+  if (!/FiodosAgentComponent/.test(ts)) {
+    ts = ts.replace(/imports:\s*\[/, 'imports: [FiodosAgentComponent, ');
   }
   const envPath = path.join(path.dirname(target.file), '../environments/environment.ts');
   const hasEnv = fs.existsSync(envPath);
@@ -389,7 +389,7 @@ function applyMount(plan) {
 function verifyMounted(plan) {
   for (const f of plan.files) {
     const src = readFile(f);
-    if (!/FyodosAgent|fyodos-agent|FYODOS:ORB:START/.test(src)) return false;
+    if (!/FiodosAgent|fyodos-agent|FYODOS:ORB:START/.test(src)) return false;
   }
   return true;
 }
@@ -398,7 +398,7 @@ function writeConsentDoc(appRoot, plan) {
   const dir = path.join(appRoot, 'src', 'fyodos');
   fs.mkdirSync(dir, { recursive: true });
   const doc = [
-    '# Fyodos orb mount (auto-generated)',
+    '# Fiodos orb mount (auto-generated)',
     '',
     `Date: ${new Date().toISOString()}`,
     `Strategy: ${plan.strategy}`,
@@ -406,7 +406,7 @@ function writeConsentDoc(appRoot, plan) {
     ...plan.files.map((f) => `- ${path.relative(appRoot, f)}`),
     '',
     'Changes are wrapped in FYODOS:ORB:START / FYODOS:ORB:END markers.',
-    'Remove those blocks (and the Fyodos import) to revert manually.',
+    'Remove those blocks (and the Fiodos import) to revert manually.',
     '',
     'Planned edits:',
     ...describePlan(plan).map((l) => `- ${l}`),

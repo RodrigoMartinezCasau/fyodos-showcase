@@ -2,7 +2,7 @@
  * StorageAdapter over @react-native-async-storage/async-storage.
  * Under '/expo' so Metro only resolves the package when used.
  */
-import type { StorageAdapter } from '@fyodos/core';
+import type { StorageAdapter } from '@fiodos/core';
 
 interface AsyncStorageLike {
   getItem(key: string): Promise<string | null>;

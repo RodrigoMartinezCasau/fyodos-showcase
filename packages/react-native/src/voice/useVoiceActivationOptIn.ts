@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { useFyodosRuntime } from '../provider/FyodosProvider';
+import { useFiodosRuntime } from '../provider/FiodosProvider';
 import { loadVoiceActivationOptIn, saveVoiceActivationOptIn } from './voiceActivationPrefs';
 
 /** Reactive user opt-in for wake-word activation (Settings screens). */
@@ -9,7 +9,7 @@ export function useVoiceActivationOptIn(): {
   setOptedIn: (enabled: boolean) => Promise<void>;
   refresh: () => Promise<void>;
 } {
-  const { config } = useFyodosRuntime();
+  const { config } = useFiodosRuntime();
   const [optedIn, setOptedInState] = useState(false);
   const [loading, setLoading] = useState(true);
 

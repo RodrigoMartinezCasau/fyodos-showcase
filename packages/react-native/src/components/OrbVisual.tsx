@@ -3,13 +3,13 @@
  */
 import React, { useEffect, useRef } from 'react';
 import { Animated, Image, StyleSheet, View } from 'react-native';
-import type { OrbLogoTransform } from '@fyodos/core';
+import type { OrbLogoTransform } from '@fiodos/core';
 import {
   normalizeOrbGlowIntensity,
   normalizeOrbLogoTransform,
   resolveInnerBorderStrokeColor,
   resolveOrbBackgroundColor,
-} from '@fyodos/core';
+} from '@fiodos/core';
 import { OutwardDoubleBorder, resolveRnOutwardBorderLayout } from './OutwardDoubleBorder';
 import type { AgentOrbTheme } from './theme';
 

@@ -1,5 +1,5 @@
 /**
- * '@fyodos/react-native/expo' — adapters over the Expo stack. Importing this
+ * '@fiodos/react-native/expo' — adapters over the Expo stack. Importing this
  * entry requires: expo, expo-audio, expo-asset, expo-file-system, expo-speech,
  * expo-router (for the navigation adapter) and
  * @react-native-async-storage/async-storage.

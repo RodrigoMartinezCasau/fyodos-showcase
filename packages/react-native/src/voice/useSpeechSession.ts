@@ -10,7 +10,7 @@
  * used to re-render the whole orb tree and lag heavy screens.)
  */
 import { useCallback, useEffect, useRef, useState } from 'react';
-import type { VoiceAdapter } from '@fyodos/core';
+import type { VoiceAdapter } from '@fiodos/core';
 
 export type SpeechSessionState = 'idle' | 'recording' | 'transcribing';
 

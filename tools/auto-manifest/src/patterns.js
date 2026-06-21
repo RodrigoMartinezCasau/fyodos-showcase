@@ -1,7 +1,7 @@
 /**
  * Layer 4 — pattern knowledge base.
  *
- * Loads patterns/*.md from the Fyodos monorepo, gives the LLM a summary list
+ * Loads patterns/*.md from the Fiodos monorepo, gives the LLM a summary list
  * for classification, and (when a pattern matches) feeds the full pattern to
  * the gap-fill step. With only 2-3 patterns today this layer is a seed: the
  * mechanism works, the coverage will come with volume.

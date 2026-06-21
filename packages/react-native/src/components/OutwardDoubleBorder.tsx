@@ -7,7 +7,7 @@ import { PixelRatio, StyleSheet, View, type StyleProp, type ViewStyle } from 're
 import {
   computeOutwardBorderLayout,
   normalizeOrbGlowIntensity,
-} from '@fyodos/core';
+} from '@fiodos/core';
 
 function layerRadius(layerPx: number, cornerRadius: number | 'circle'): number {
   return cornerRadius === 'circle' ? layerPx / 2 : cornerRadius;

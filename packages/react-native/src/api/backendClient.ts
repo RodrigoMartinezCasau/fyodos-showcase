@@ -1,5 +1,5 @@
 /**
- * HTTP client for the Fyodos backend — implements AgentBackendClient.
+ * HTTP client for the Fiodos backend — implements AgentBackendClient.
  *
  * Hardening preserved from production:
  * - Turn timeout 15 s (measured real range 3.4–10.8 s; 10 s gave false
@@ -19,10 +19,10 @@ import {
   type AppManifest,
   type ClientConfigResponse,
   type ConversationTurn,
-} from '@fyodos/core';
+} from '@fiodos/core';
 import { AgentApiError } from './errors';
 
-export interface FyodosBackendClientOptions {
+export interface FiodosBackendClientOptions {
   baseUrl: string;
   /** Client API key sent as x-api-key. */
   apiKey?: string;
@@ -100,7 +100,7 @@ async function errorFromResponse(res: Response): Promise<AgentApiError> {
   return new AgentApiError('unknown', detail ?? res.statusText, res.status);
 }
 
-export function createFyodosBackendClient(options: FyodosBackendClientOptions): AgentBackendClient {
+export function createFiodosBackendClient(options: FiodosBackendClientOptions): AgentBackendClient {
   const baseUrl = options.baseUrl.replace(/\/$/, '');
   const turnTimeoutMs = options.turnTimeoutMs ?? DEFAULT_TURN_TIMEOUT_MS;
   const ttsTimeoutMs = options.ttsTimeoutMs ?? DEFAULT_TTS_TIMEOUT_MS;

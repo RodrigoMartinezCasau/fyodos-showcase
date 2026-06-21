@@ -1,5 +1,5 @@
 {
-  "name": "@fyodos/auto-manifest",
+  "name": "@fiodos/auto-manifest",
   "version": "0.1.0",
   "private": true,
   "description": "Auto-detection engine: static analysis (AST) + explicit LLM calls + pattern knowledge base → draft AppManifest with per-item provenance.",

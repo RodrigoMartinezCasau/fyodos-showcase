@@ -17,7 +17,7 @@ import type {
   StorageAdapter,
   TelemetryAdapter,
   VoiceAdapter,
-} from '@fyodos/core';
+} from '@fiodos/core';
 import type { AgentUiMessages } from '../i18n/types';
 
 export type AgentPhase = 'idle' | 'listening' | 'thinking' | 'speaking' | 'confirming';
@@ -63,7 +63,7 @@ export type TurnGateVerdict =
       message?: string;
     };
 
-export interface FyodosAgentConfig {
+export interface FiodosAgentConfig {
   /** The app manifest (validated with validateManifest at integration time). */
   manifest: AppManifest;
 
@@ -74,7 +74,7 @@ export interface FyodosAgentConfig {
   /** Device-TTS fallback locale. Defaults to sttLocale. */
   ttsLocale?: string;
 
-  // ── Adapters (dependency inversion — see @fyodos/core) ────────────────────
+  // ── Adapters (dependency inversion — see @fiodos/core) ────────────────────
   navigation: NavigationAdapter;
   registries: ActionRegistries;
   backend: AgentBackendClient;
@@ -144,7 +144,7 @@ export interface FyodosAgentConfig {
    * When omitted, resolved automatically from manifest.policies and
    * `publishedVoiceActivation` (dashboard publish).
    */
-  voiceActivation?: FyodosVoiceActivationConfig;
+  voiceActivation?: FiodosVoiceActivationConfig;
 
   /**
    * Live overrides from GET /v1/client/config (dashboard publish).
@@ -156,17 +156,17 @@ export interface FyodosAgentConfig {
   };
 }
 
-export interface FyodosVoiceActivationConfig {
+export interface FiodosVoiceActivationConfig {
   /** Developer enables this capability for their app. Default: false. */
   developerEnabled: boolean;
   /** Optional extra opt-in (e.g. integrator settings toggle). Omitted = assistant consent suffices. */
   isUserOptedIn?: () => boolean | Promise<boolean>;
   /** Override wake phrases; defaults from manifest / published phrase. */
   phrases?: string[];
-  /** Resolved wake-word name (auto-filled by FyodosProvider). */
+  /** Resolved wake-word name (auto-filled by FiodosProvider). */
   wakePhraseName?: string;
-  /** Display form, e.g. «Oye, MiApp» (auto-filled by FyodosProvider). */
+  /** Display form, e.g. «Oye, MiApp» (auto-filled by FiodosProvider). */
   displayPhrase?: string;
-  /** Consent paragraph when offered (auto-filled by FyodosProvider). */
+  /** Consent paragraph when offered (auto-filled by FiodosProvider). */
   consentParagraph?: string;
 }

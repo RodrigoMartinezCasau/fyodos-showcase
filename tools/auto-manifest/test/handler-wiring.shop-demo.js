@@ -35,7 +35,7 @@ function setup() {
 // The shop's real manifest actions (from src/agent/manifest.ts).
 const manifest = {
   appId: 'web-shop-demo',
-  appName: 'Fyodos Web Shop',
+  appName: 'Fiodos Web Shop',
   version: '1.0.0',
   routes: [{ intent: 'back', label: 'Back', route: 'BACK', examples: ['back'] }],
   actions: [

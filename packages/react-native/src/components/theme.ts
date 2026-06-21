@@ -3,7 +3,7 @@
  * app-branded in the source app (accent color, icon, sizes) is a prop here —
  * exactly the surface a customization dashboard will drive.
  */
-import { FYODOS_DEFAULT_ORB_THEME, FYODOS_DEFAULT_KEYBOARD_CHIP } from '@fyodos/core';
+import { FYODOS_DEFAULT_ORB_THEME, FYODOS_DEFAULT_KEYBOARD_CHIP } from '@fiodos/core';
 
 export interface AgentModalTheme {
   backdropColor: string;
@@ -74,7 +74,7 @@ export interface AgentOrbTheme {
   keyboardChip?: Partial<KeyboardChipTheme>;
 }
 
-// Derived from the SINGLE SOURCE OF TRUTH in @fyodos/core so the app's default
+// Derived from the SINGLE SOURCE OF TRUTH in @fiodos/core so the app's default
 // orb is identical to the dashboard preview's default orb (brand blue, neutral
 // mark, same keyboard chip). Do not hardcode brand values here.
 export const DEFAULT_ORB_THEME: AgentOrbTheme = {

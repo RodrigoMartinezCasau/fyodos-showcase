@@ -15,8 +15,8 @@ import type {
   VoiceAdapter,
   WakeWordDetectionEvents,
   WakeWordDetectionOptions,
-} from '@fyodos/core';
-import { detectWakePhrase } from '@fyodos/core';
+} from '@fiodos/core';
+import { detectWakePhrase } from '@fiodos/core';
 
 // ── Structural types for the lazily-required Expo modules ────────────────────
 
@@ -310,7 +310,7 @@ export function createExpoVoiceAdapter(options: ExpoVoiceAdapterOptions = {}): V
       continuous: true,
       // PRIVACY (critical): the passive wake mic is open continuously, so its
       // audio must be transcribed ON-DEVICE and never streamed to Apple/Google.
-      // Only the command TEXT (after the wake phrase) is later sent to Fyodos.
+      // Only the command TEXT (after the wake phrase) is later sent to Fiodos.
       requiresOnDeviceRecognition: true,
       androidIntentOptions: { EXTRA_PREFER_OFFLINE: true },
     });

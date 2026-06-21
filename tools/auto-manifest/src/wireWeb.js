@@ -103,13 +103,13 @@ function detectTarget(appRoot, framework = detectFramework(appRoot)) {
 function agentSnippetVue() {
   return (
     `<script setup lang="ts">\n` +
-    `import { FyodosAgent } from '@fyodos/vue';\n` +
+    `import { FiodosAgent } from '@fiodos/vue';\n` +
     `const fyodosApiKey = import.meta.env.VITE_FYODOS_API_KEY;\n` +
     `const fyodosApiUrl = import.meta.env.VITE_FYODOS_API_URL;\n` +
     `</script>\n\n` +
     `<template>\n` +
     `  <!-- ...your app... -->\n` +
-    `  <FyodosAgent :api-key="fyodosApiKey" :base-url="fyodosApiUrl" />\n` +
+    `  <FiodosAgent :api-key="fyodosApiKey" :base-url="fyodosApiUrl" />\n` +
     `</template>`
   );
 }
@@ -117,17 +117,17 @@ function agentSnippetVue() {
 function agentSnippetSvelte() {
   return (
     `<script lang="ts">\n` +
-    `  import FyodosAgent from '@fyodos/svelte/FyodosAgent.svelte';\n` +
+    `  import FiodosAgent from '@fiodos/svelte/FiodosAgent.svelte';\n` +
     `</script>\n\n` +
-    `<FyodosAgent apiKey={import.meta.env.VITE_FYODOS_API_KEY} baseUrl={import.meta.env.VITE_FYODOS_API_URL} />`
+    `<FiodosAgent apiKey={import.meta.env.VITE_FYODOS_API_KEY} baseUrl={import.meta.env.VITE_FYODOS_API_URL} />`
   );
 }
 
 function agentSnippetAngular() {
   return (
-    `import { FyodosAgentComponent } from '@fyodos/angular/angular';\n\n` +
+    `import { FiodosAgentComponent } from '@fiodos/angular/angular';\n\n` +
     `@Component({\n` +
-    `  imports: [FyodosAgentComponent],\n` +
+    `  imports: [FiodosAgentComponent],\n` +
     `  templateUrl: './app.component.html',\n` +
     `})\n` +
     `export class AppComponent {\n` +
@@ -184,14 +184,14 @@ function printSnippet(target, framework, colors, appRoot, reason) {
     const where = target ? path.relative(appRoot, target.file) : 'app/layout.tsx';
     console.error(`${dim}Next App Router — client wrapper + layout edit:${reset}\n`);
     console.error(
-      `'use client';\nimport { FyodosAgent } from '@fyodos/react';\n` +
+      `'use client';\nimport { FiodosAgent } from '@fiodos/react';\n` +
       `export default function ${IMPORT_NAME}() { return (${agentJsx(framework || 'next', ts, '\n    ')}\n  ); }`,
     );
     console.error(`\n${dim}In ${where}, before </body>: <${IMPORT_NAME} />${reset}`);
   } else {
     const where = path.relative(appRoot, target.file);
     console.error(`${dim}In ${where}:${reset}\n`);
-    console.error(`import { FyodosAgent } from '@fyodos/react';\n\n${agentJsx(framework || 'vite', ts, '')}`);
+    console.error(`import { FiodosAgent } from '@fiodos/react';\n\n${agentJsx(framework || 'vite', ts, '')}`);
   }
   console.error('');
 }
@@ -236,7 +236,7 @@ async function wireWebOrb(appRoot, opts = {}) {
   try {
     applyMount(plan);
     if (!verifyMounted(plan)) {
-      throw new Error('post-edit verification failed — FyodosAgent not found in edited files');
+      throw new Error('post-edit verification failed — FiodosAgent not found in edited files');
     }
     const test = await runPostWireTest(appRoot, { timeoutMs: 180000 });
     if (!test.ok && test.stage !== 'skipped-no-deps') {

@@ -1,5 +1,5 @@
 /**
- * postWireTest — verify the app still builds after Fyodos wired the handlers and
+ * postWireTest — verify the app still builds after Fiodos wired the handlers and
  * (when needed) edited the user's own components. This is the safety net that
  * lets wireHandlers REVERT instead of leaving a broken app.
  *

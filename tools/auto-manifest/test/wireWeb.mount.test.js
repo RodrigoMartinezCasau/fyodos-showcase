@@ -43,10 +43,10 @@ function testViteReactMain() {
   applyMount(plan);
   assert.ok(verifyMounted(plan), 'vite main verify');
   const out = fs.readFileSync(main, 'utf8');
-  assert.ok(out.includes('FyodosAgent'), 'has FyodosAgent');
+  assert.ok(out.includes('FiodosAgent'), 'has FiodosAgent');
   assert.ok(out.includes('FYODOS:ORB:START'), 'has markers');
   revertFiles(backups);
-  assert.ok(!/FyodosAgent/.test(fs.readFileSync(main, 'utf8')), 'reverted');
+  assert.ok(!/FiodosAgent/.test(fs.readFileSync(main, 'utf8')), 'reverted');
   console.log('PASS vite/react main.tsx');
 }
 
@@ -66,7 +66,7 @@ function testVueSfc() {
   applyMount(plan);
   assert.ok(verifyMounted(plan));
   const out = fs.readFileSync(app, 'utf8');
-  assert.ok(out.includes('@fyodos/vue'));
+  assert.ok(out.includes('@fiodos/vue'));
   assert.ok(out.includes('FYODOS:ORB:START'));
   console.log('PASS vue App.vue');
 }
@@ -109,7 +109,7 @@ function testAngularComponent() {
   applyMount(plan);
   assert.ok(verifyMounted(plan));
   assert.ok(/fyodos-agent/.test(fs.readFileSync(html, 'utf8')));
-  assert.ok(/FyodosAgentComponent/.test(fs.readFileSync(ts, 'utf8')));
+  assert.ok(/FiodosAgentComponent/.test(fs.readFileSync(ts, 'utf8')));
   console.log('PASS angular app.component');
 }
 

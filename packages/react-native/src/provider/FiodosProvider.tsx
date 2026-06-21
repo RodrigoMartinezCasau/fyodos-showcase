@@ -1,5 +1,5 @@
 /**
- * FyodosProvider — resolves the SDK runtime from the integrator's config and
+ * FiodosProvider — resolves the SDK runtime from the integrator's config and
  * exposes it to useAgent(), the screen-context hooks and the UI components.
  *
  * Everything locale-dependent is resolved here ONCE (message catalogs, UI
@@ -22,8 +22,8 @@ import {
   type ConsentManager,
   type Sanitizer,
   type TelemetryAdapter,
-} from '@fyodos/core';
-import type { AgentTimings, FyodosAgentConfig } from '../config/types';
+} from '@fiodos/core';
+import type { AgentTimings, FiodosAgentConfig } from '../config/types';
 import { DEFAULT_AGENT_TIMINGS } from '../config/types';
 import { resolveUiMessages } from '../i18n/resolve';
 import type { AgentUiMessages } from '../i18n/types';
@@ -33,7 +33,7 @@ import {
 } from '../context/screenContextStore';
 import { resolveVoiceActivationConfig } from '../voice/resolveVoiceActivationConfig';
 
-function withResolvedVoiceActivation(config: FyodosAgentConfig): FyodosAgentConfig {
+function withResolvedVoiceActivation(config: FiodosAgentConfig): FiodosAgentConfig {
   if (config.voiceActivation) return config;
   return {
     ...config,
@@ -45,8 +45,8 @@ function withResolvedVoiceActivation(config: FyodosAgentConfig): FyodosAgentConf
   };
 }
 
-export interface FyodosRuntime {
-  config: FyodosAgentConfig;
+export interface FiodosRuntime {
+  config: FiodosAgentConfig;
   messages: AgentMessages;
   ui: AgentUiMessages;
   lexicon: ConfirmationLexicon;
@@ -60,16 +60,16 @@ export interface FyodosRuntime {
   getTtsVoice: () => string | undefined;
 }
 
-const FyodosContext = createContext<FyodosRuntime | null>(null);
+const FiodosContext = createContext<FiodosRuntime | null>(null);
 
-export function FyodosProvider({
+export function FiodosProvider({
   config,
   children,
 }: {
-  config: FyodosAgentConfig;
+  config: FiodosAgentConfig;
   children: React.ReactNode;
 }) {
-  const runtime = useMemo<FyodosRuntime>(() => {
+  const runtime = useMemo<FiodosRuntime>(() => {
     const resolvedConfig = withResolvedVoiceActivation(config);
     const manifestCheck = validateManifest(resolvedConfig.manifest);
     if (!manifestCheck.valid) {
@@ -129,13 +129,13 @@ export function FyodosProvider({
     void runtime.config.backend.reportOrbSeen?.(platform);
   }, [runtime]);
 
-  return <FyodosContext.Provider value={runtime}>{children}</FyodosContext.Provider>;
+  return <FiodosContext.Provider value={runtime}>{children}</FiodosContext.Provider>;
 }
 
-export function useFyodosRuntime(): FyodosRuntime {
-  const runtime = useContext(FyodosContext);
+export function useFiodosRuntime(): FiodosRuntime {
+  const runtime = useContext(FiodosContext);
   if (!runtime) {
-    throw new Error('[fyodos] FyodosProvider is missing above this component.');
+    throw new Error('[fyodos] FiodosProvider is missing above this component.');
   }
   return runtime;
 }

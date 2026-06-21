@@ -26,7 +26,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import type { OrbDeployment } from '@fyodos/core';
+import type { OrbDeployment } from '@fiodos/core';
 import type { AgentExchange } from '../hooks/useAgent';
 import { DEFAULT_MODAL_THEME, type AgentModalTheme } from './theme';
 

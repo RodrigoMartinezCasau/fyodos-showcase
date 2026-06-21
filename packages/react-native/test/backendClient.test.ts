@@ -1,8 +1,8 @@
 import { test, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createFyodosBackendClient } from '../src/api/backendClient';
+import { createFiodosBackendClient } from '../src/api/backendClient';
 import { isAgentApiError } from '../src/api/errors';
-import type { AgentTurnRequest } from '@fyodos/core';
+import type { AgentTurnRequest } from '@fiodos/core';
 
 const realFetch = globalThis.fetch;
 afterEach(() => {
@@ -58,7 +58,7 @@ test('sendTurn posts the contract body and parses the response', async () => {
       was_truncated: false,
     },
   }));
-  const client = createFyodosBackendClient({
+  const client = createFiodosBackendClient({
     baseUrl: 'https://api.example.com/',
     apiKey: 'k-123',
     getUserId: () => 'u-9',
@@ -92,7 +92,7 @@ test('HTTP statuses map to stable machine codes (no language matching)', async (
   ];
   for (const c of cases) {
     mockFetch(() => ({ status: c.status, body: c.body }));
-    const client = createFyodosBackendClient({ baseUrl: 'https://x.test' });
+    const client = createFiodosBackendClient({ baseUrl: 'https://x.test' });
     await assert.rejects(
       client.sendTurn(turnRequest),
       (e: unknown) => isAgentApiError(e) && e.code === c.code,
@@ -103,7 +103,7 @@ test('HTTP statuses map to stable machine codes (no language matching)', async (
 
 test('turn timeout surfaces as code "timeout" (never retried)', async () => {
   const calls = mockFetch(() => 'hang');
-  const client = createFyodosBackendClient({ baseUrl: 'https://x.test', turnTimeoutMs: 30 });
+  const client = createFiodosBackendClient({ baseUrl: 'https://x.test', turnTimeoutMs: 30 });
   await assert.rejects(
     client.sendTurn(turnRequest),
     (e: unknown) => isAgentApiError(e) && e.code === 'timeout',
@@ -113,7 +113,7 @@ test('turn timeout surfaces as code "timeout" (never retried)', async () => {
 
 test('caller abort surfaces as code "cancelled"', async () => {
   mockFetch(() => 'hang');
-  const client = createFyodosBackendClient({ baseUrl: 'https://x.test' });
+  const client = createFiodosBackendClient({ baseUrl: 'https://x.test' });
   const controller = new AbortController();
   const promise = client.sendTurn(turnRequest, { signal: controller.signal });
   controller.abort();
@@ -124,7 +124,7 @@ test('network failures surface as code "network"', async () => {
   globalThis.fetch = (async () => {
     throw new Error('Network request failed');
   }) as typeof fetch;
-  const client = createFyodosBackendClient({ baseUrl: 'https://x.test' });
+  const client = createFiodosBackendClient({ baseUrl: 'https://x.test' });
   await assert.rejects(
     client.sendTurn(turnRequest),
     (e: unknown) => isAgentApiError(e) && e.code === 'network',
@@ -133,7 +133,7 @@ test('network failures surface as code "network"', async () => {
 
 test('previewTts returns audio or null, never throws', async () => {
   mockFetch(() => ({ status: 200, body: { audio_base64: 'mp3data' } }));
-  const client = createFyodosBackendClient({ baseUrl: 'https://x.test' });
+  const client = createFiodosBackendClient({ baseUrl: 'https://x.test' });
   assert.equal(await client.previewTts('voice-1', 'hello'), 'mp3data');
 
   mockFetch(() => ({ status: 500, body: {} }));
@@ -147,7 +147,7 @@ test('previewTts returns audio or null, never throws', async () => {
 
 test('optional fields are omitted from the body when absent', async () => {
   const calls = mockFetch(() => ({ status: 200, body: { reply: 'ok' } }));
-  const client = createFyodosBackendClient({ baseUrl: 'https://x.test' });
+  const client = createFiodosBackendClient({ baseUrl: 'https://x.test' });
   await client.sendTurn(turnRequest);
   const sent = JSON.parse(calls[0]!.init.body) as Record<string, unknown>;
   assert.ok(!('voice' in sent));
@@ -160,7 +160,7 @@ test('optional fields are omitted from the body when absent', async () => {
 
 test('sendTurn includes conversation memory when provided', async () => {
   const calls = mockFetch(() => ({ status: 200, body: { reply: 'ok' } }));
-  const client = createFyodosBackendClient({ baseUrl: 'https://x.test' });
+  const client = createFiodosBackendClient({ baseUrl: 'https://x.test' });
   await client.sendTurn({
     ...turnRequest,
     conversationHistory: [

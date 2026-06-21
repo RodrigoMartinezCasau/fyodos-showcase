@@ -1,0 +1,77 @@
+Fiodos SDK License Agreement
+
+Copyright (c) 2026 Fiodos / Rodrigo Martínez. All rights reserved.
+
+This is a proprietary, commercial software license. It is NOT an open-source
+license. Please read it carefully before installing or using the Software.
+
+1. Definitions.
+   "Software" means the Fiodos SDK packages (including, without limitation, the
+   @fiodos/* npm packages and the fiodos_flutter package) together with any
+   accompanying files, documentation, and updates provided by the Licensor.
+   "Service" means the hosted Fiodos backend, APIs, and related services
+   operated by the Licensor.
+   "Licensor" means Fiodos / Rodrigo Martínez (and, once incorporated, the
+   company that succeeds to these rights).
+   "You" means the individual or legal entity that installs or uses the
+   Software.
+
+2. Grant of License.
+   Subject to Your continued compliance with this Agreement, the Licensor grants
+   You a limited, non-exclusive, non-transferable, non-sublicensable, and
+   revocable license to install and use the Software solely for the purpose of
+   integrating with and accessing the Fiodos Service from within Your own
+   applications.
+
+3. Restrictions.
+   Except as expressly permitted in Section 2, You may NOT, in whole or in part:
+   (a) copy the Software, except for the copying strictly necessary to install
+       and run it for its intended purpose;
+   (b) modify, adapt, translate, or create derivative works of the Software;
+   (c) redistribute, publish, sublicense, sell, rent, lease, lend, or otherwise
+       make the Software available to any third party as a standalone item;
+   (d) reverse engineer, decompile, or disassemble the Software, or attempt to
+       derive its source code, except and only to the extent that this
+       restriction is expressly prohibited by applicable law;
+   (e) remove, obscure, or alter any copyright, trademark, or other proprietary
+       notices contained in the Software; or
+   (f) use the Software, or any portion of it, to develop, train, or assist in
+       developing a product or service that competes with Fiodos.
+
+4. Reservation of Rights.
+   The Software is licensed, not sold. All right, title, and interest in and to
+   the Software, including all related intellectual property rights, are and
+   shall remain the exclusive property of the Licensor. All rights not expressly
+   granted to You under this Agreement are reserved by the Licensor.
+
+5. Termination.
+   This license terminates automatically and immediately if You breach any term
+   of this Agreement. Upon termination, You must cease all use of the Software
+   and delete all copies in Your possession or control. Sections 3, 4, 6, and 7
+   survive termination.
+
+6. Disclaimer of Warranty.
+   THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+   IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+   FITNESS FOR A PARTICULAR PURPOSE, AND NONINFRINGEMENT.
+
+7. Limitation of Liability.
+   TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, IN NO EVENT SHALL THE
+   LICENSOR BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY, WHETHER IN AN
+   ACTION OF CONTRACT, TORT, OR OTHERWISE, ARISING FROM, OUT OF, OR IN CONNECTION
+   WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+
+8. Contact.
+   For licensing inquiries, contact Rodrigo Martínez (Fiodos).
+
+--------------------------------------------------------------------------------
+
+Nota (ES) — Licencia propietaria:
+Se permite INSTALAR y USAR el SDK únicamente para integrar y acceder al servicio
+Fiodos desde tus propias aplicaciones. Quedan PROHIBIDOS: copiar el código (salvo
+la copia imprescindible para instalarlo y ejecutarlo), modificarlo, redistribuirlo,
+sublicenciarlo, venderlo, hacer ingeniería inversa o crear obras derivadas o un
+producto que compita con Fiodos. El software se licencia, no se vende; todos los
+derechos no concedidos expresamente quedan reservados al Licenciante. Este texto
+corresponde a la fase de pruebas y será revisado por un abogado al constituir la
+sociedad.

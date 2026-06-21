@@ -8,7 +8,7 @@ import {
   View,
   type ViewStyle,
 } from 'react-native';
-import { useFyodosRuntime } from '../provider/FyodosProvider';
+import { useFiodosRuntime } from '../provider/FiodosProvider';
 import { useVoiceActivationOptIn } from '../voice/useVoiceActivationOptIn';
 
 export interface VoiceActivationSettingsProps {
@@ -30,7 +30,7 @@ export function VoiceActivationSettings({
   style,
   accentColor = '#3f7bff',
 }: VoiceActivationSettingsProps) {
-  const { config, ui } = useFyodosRuntime();
+  const { config, ui } = useFiodosRuntime();
   const { optedIn, loading, setOptedIn } = useVoiceActivationOptIn();
   const va = config.voiceActivation;
 

@@ -30,7 +30,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const SENTINEL = `FyodosProbe_${Math.random().toString(36).slice(2, 8)}`;
+const SENTINEL = `FiodosProbe_${Math.random().toString(36).slice(2, 8)}`;
 const SEED_ID = 'fyodos-seed-id-1';
 
 function reqFrom(appRoot, mod) {

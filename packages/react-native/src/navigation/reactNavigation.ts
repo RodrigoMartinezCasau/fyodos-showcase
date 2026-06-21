@@ -8,7 +8,7 @@
  * manifest route strings into screen names + params. No magic conventions —
  * less fragile, and the mapping is auditable next to the manifest.
  */
-import type { NavigationAdapter } from '@fyodos/core';
+import type { NavigationAdapter } from '@fiodos/core';
 import { parseRouteString } from './parseRoute';
 
 /** Structural subset of react-navigation's NavigationContainerRef. */

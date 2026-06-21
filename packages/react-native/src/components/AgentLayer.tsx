@@ -10,8 +10,8 @@
  */
 import React, { useEffect, useState } from 'react';
 import { Keyboard, Platform, StyleSheet, useWindowDimensions, View } from 'react-native';
-import { resolveOrbLayerInsets, type OrbScreenPosition } from '@fyodos/core';
-import { useFyodosRuntime } from '../provider/FyodosProvider';
+import { resolveOrbLayerInsets, type OrbScreenPosition } from '@fiodos/core';
+import { useFiodosRuntime } from '../provider/FiodosProvider';
 import { AgentOrb, type AgentOrbProps } from './AgentOrb';
 
 export interface AgentLayerProps {
@@ -25,7 +25,7 @@ export interface AgentLayerProps {
   /**
    * Dashboard-published NORMALIZED position (0–1). When provided, the SDK places
    * the orb itself at the precise relative point on ANY screen size (same model
-   * as @fyodos/core's resolveOrbLayerInsets and the web/native orbs), so the host
+   * as @fiodos/core's resolveOrbLayerInsets and the web/native orbs), so the host
    * does not have to compute insets by hand. `bottom`/`right` stay as the
    * fallback when it is absent. Pass the app's safe-area insets so the position
    * stays inside notches/home indicators.
@@ -53,7 +53,7 @@ export function AgentLayer({
   warmUpOnVisible = true,
   orbProps,
 }: AgentLayerProps) {
-  const { config } = useFyodosRuntime();
+  const { config } = useFiodosRuntime();
   const { width, height } = useWindowDimensions();
   const [keyboardOpen, setKeyboardOpen] = useState(false);
 

@@ -4,8 +4,8 @@
  * It does NOT mock the engine. It:
  *   1. Creates a tiny fixture app (exported functions + a manifest + evidence).
  *   2. Runs the REAL wireHandlers() with consent assumed (yes).
- *   3. Loads the GENERATED registry and runs the REAL @fyodos/core executor +
- *      @fyodos/web-core decideAction over it, proving:
+ *   3. Loads the GENERATED registry and runs the REAL @fiodos/core executor +
+ *      @fiodos/web-core decideAction over it, proving:
  *        · a non-sensitive action EXECUTES for real (mutates app state),
  *        · a sensitive action (requireConfirmation) is GATED — never executed by
  *          the generated wiring — and only runs after explicit confirmation,

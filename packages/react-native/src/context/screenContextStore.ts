@@ -5,7 +5,7 @@
  * The structured part is the core's generic AgentScreenContext
  * (visibleContent + custom) — no domain types.
  */
-import type { AgentScreenContext } from '@fyodos/core';
+import type { AgentScreenContext } from '@fiodos/core';
 
 /** What a screen registers for the agent. */
 export interface AgentScreenSnapshot {

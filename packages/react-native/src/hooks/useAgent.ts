@@ -37,11 +37,11 @@ import {
   defaultWakePhrasesForLocale,
   type AgentAction,
   type AgentScreenContext,
-} from '@fyodos/core';
+} from '@fiodos/core';
 import { isAgentApiError } from '../api/errors';
 import { buildManifestPayload } from '../api/backendClient';
 import type { AgentPhase } from '../config/types';
-import { useFyodosRuntime } from '../provider/FyodosProvider';
+import { useFiodosRuntime } from '../provider/FiodosProvider';
 import { useSpeechSession } from '../voice/useSpeechSession';
 import { useWakeWordActivation } from '../voice/useWakeWordActivation';
 
@@ -131,7 +131,7 @@ function devLog(invocationId: number, step: string, extra?: string): void {
 }
 
 export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResult {
-  const runtime = useFyodosRuntime();
+  const runtime = useFiodosRuntime();
   const {
     config,
     messages,
