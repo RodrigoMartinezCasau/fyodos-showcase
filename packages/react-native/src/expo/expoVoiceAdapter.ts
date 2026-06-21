@@ -21,7 +21,15 @@ import { detectWakePhrase } from '@fyodos/core';
 // ── Structural types for the lazily-required Expo modules ────────────────────
 
 interface SpeechRecognitionModule {
-  start(opts: { lang: string; interimResults: boolean; continuous: boolean }): void;
+  start(opts: {
+    lang: string;
+    interimResults: boolean;
+    continuous: boolean;
+    /** iOS: force on-device transcription (no audio to Apple's servers). */
+    requiresOnDeviceRecognition?: boolean;
+    /** Android: request offline recognition (no audio to Google's servers). */
+    androidIntentOptions?: Record<string, unknown>;
+  }): void;
   stop(): void;
   abort(): void;
   requestPermissionsAsync(): Promise<{ granted: boolean }>;
@@ -300,6 +308,11 @@ export function createExpoVoiceAdapter(options: ExpoVoiceAdapterOptions = {}): V
       lang: wakeLocale,
       interimResults: true,
       continuous: true,
+      // PRIVACY (critical): the passive wake mic is open continuously, so its
+      // audio must be transcribed ON-DEVICE and never streamed to Apple/Google.
+      // Only the command TEXT (after the wake phrase) is later sent to Fyodos.
+      requiresOnDeviceRecognition: true,
+      androidIntentOptions: { EXTRA_PREFER_OFFLINE: true },
     });
   }
 

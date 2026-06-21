@@ -111,17 +111,27 @@ export function AgentTextBubble({
             },
           ]}
         >
-          {/* Current exchange — capped height, scroll inside the bubble. */}
-          {exchange ? (
-            <ScrollView style={styles.exchangeScroll} contentContainerStyle={styles.exchange}>
-              <Text style={[styles.userText, { color: t.bodyColor }]} selectable>
-                {exchange.userText}
+          <ScrollView style={styles.exchangeScroll} contentContainerStyle={styles.exchange}>
+            <View style={styles.userRow}>
+              <Text style={[styles.userText, { color: t.bodyColor, flex: 1 }]} selectable>
+                {exchange?.userText ?? ''}
               </Text>
+              <Pressable
+                onPress={onClose}
+                accessibilityRole="button"
+                accessibilityLabel={closeLabel}
+                hitSlop={8}
+                style={styles.closeBtn}
+              >
+                <Text style={[styles.closeIcon, { color: t.bodyColor }]}>×</Text>
+              </Pressable>
+            </View>
+            {exchange?.replyText ? (
               <Text style={[styles.replyText, { color: t.titleColor }]} selectable>
                 {exchange.replyText}
               </Text>
-            </ScrollView>
-          ) : null}
+            ) : null}
+          </ScrollView>
           {busy ? (
             <View style={styles.busyRow}>
               <ActivityIndicator size="small" color={sendButtonColor} />
@@ -197,6 +207,25 @@ const styles = StyleSheet.create({
     shadowRadius: 12,
     shadowOffset: { width: 0, height: 4 },
     elevation: 8,
+  },
+  closeBtn: {
+    flexShrink: 0,
+    width: 32,
+    height: 32,
+    marginTop: -10,
+    marginRight: -8,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  closeIcon: {
+    fontSize: 18,
+    lineHeight: 18,
+    opacity: 0.75,
+  },
+  userRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 6,
   },
   exchangeScroll: {
     flexGrow: 0,
