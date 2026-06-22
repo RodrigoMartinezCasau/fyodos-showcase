@@ -1,16 +1,30 @@
 {
-  "name": "@fiodos/auto-manifest",
+  "name": "@fiodos/cli",
   "version": "0.1.0",
-  "private": true,
-  "description": "Auto-detection engine: static analysis (AST) + explicit LLM calls + pattern knowledge base → draft AppManifest with per-item provenance.",
+  "description": "Fiodos CLI — analyzes your app's source code and generates the in-app voice-agent manifest, then wires the orb. Powers `npx @fiodos/cli analyze`.",
   "type": "commonjs",
   "bin": {
-    "fyodos-auto-manifest": "src/index.js"
+    "fiodos": "src/index.js"
   },
+  "main": "src/index.js",
+  "files": [
+    "src",
+    "LICENSE",
+    "README.md"
+  ],
   "scripts": {
     "analyze": "node src/index.js"
   },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
+    "@fiodos/core": "^0.1.0",
+    "esbuild": "^0.28.1",
     "jsdom": "^24.0.0"
+  },
+  "license": "SEE LICENSE IN LICENSE",
+  "publishConfig": {
+    "access": "public"
   }
 }

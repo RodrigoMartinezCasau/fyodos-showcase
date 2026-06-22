@@ -2,9 +2,13 @@
  * The AI-first analysis call: the model reads the app's SOURCE CODE directly
  * and proposes the full AppManifest, with mandatory per-item evidence.
  *
- * PRIVACY NOTE: this sends the collected source files to the AI provider
- * (Anthropic or OpenAI) using the DEVELOPER'S OWN key. It never touches the
- * Fiodos backend — only the resulting manifest is published, optionally, later.
+ * PRIVACY NOTE (hybrid key model):
+ *   - DEFAULT (proxy): the prompt — which contains the collected source files —
+ *     is sent to the Fiodos backend, which calls the AI provider with Fiodos's
+ *     key (see analyzeViaProxy). The code passes through Fiodos in this mode.
+ *   - --own-ai-key: the prompt is sent to the AI provider directly with the
+ *     DEVELOPER'S OWN key and never touches the Fiodos backend.
+ *   Either way, only the resulting manifest is published later (never code).
  */
 'use strict';
 
@@ -321,25 +325,94 @@ async function completeOpenAI({ model, system, user }) {
 }
 
 /**
- * @returns {{ parsed: object, usage: object, costUSD: number, elapsedMs: number, model: string }}
+ * PROXY mode (hybrid key model, DEFAULT): instead of calling the AI provider
+ * directly with the developer's own key, POST the prompt to the Fiodos backend,
+ * which runs the call with FIODOS'S key and returns the model's JSON. The
+ * developer needs no AI key. PRIVACY: the prompt (which contains the source
+ * code) travels to the Fiodos backend in this mode; see the CLI README.
+ * @returns {{ parsed, usage, serverModel, analysisToken }}
  */
-async function analyzeWithAI({ appMeta, files, omitted, staticRoutes, model = DEFAULT_MODEL, platform = 'mobile' }) {
+async function analyzeViaProxy({ apiKey, apiUrl, model, system, user }) {
+  if (!apiKey) {
+    throw new Error(
+      'Hosted analysis needs your Fiodos project API key (--api-key or FYODOS_API_KEY). ' +
+      'Or pass --own-ai-key to analyze with your own AI key (code never reaches Fiodos).',
+    );
+  }
+  const res = await fetch(`${apiUrl}/v1/developer/analyze`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+    body: JSON.stringify({ model, system, user }),
+  });
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const j = await res.json();
+      detail = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail || j || '');
+    } catch {
+      /* non-JSON error body */
+    }
+    if (res.status === 429) {
+      throw new Error(`Hosted analysis unavailable (plan quota or rate limit). ${detail}`);
+    }
+    if (res.status === 413) {
+      throw new Error('Project too large for hosted analysis — lower --max-input-tokens or use --own-ai-key.');
+    }
+    if (res.status === 503) {
+      throw new Error('Hosted analysis is not available right now — try again or use --own-ai-key.');
+    }
+    throw new Error(`Hosted analysis failed: ${res.status} ${detail}`);
+  }
+  const data = await res.json();
+  return {
+    parsed: parseJsonContent(data.text || '{}'),
+    usage: {
+      prompt_tokens: data.promptTokens || 0,
+      completion_tokens: data.completionTokens || 0,
+    },
+    serverModel: data.model || model,
+    analysisToken: data.analysisToken || null,
+  };
+}
+
+/**
+ * @returns {{ parsed: object, usage: object, costUSD: number, elapsedMs: number, model: string, analysisToken: string|null }}
+ *
+ * When `useProxy` is true (default in the CLI), the AI call runs on the Fiodos
+ * backend with Fiodos's key; otherwise it runs locally with the developer's own
+ * provider key (the privacy-preserving path: code goes straight to the AI).
+ */
+async function analyzeWithAI({
+  appMeta, files, omitted, staticRoutes, model = DEFAULT_MODEL, platform = 'mobile',
+  useProxy = false, apiKey = '', apiUrl = '',
+}) {
   const resolved = resolveModel(model);
   const system = buildSystemPrompt(platform);
   const user = buildUserPrompt(appMeta, files, omitted, staticRoutes);
 
   const t0 = Date.now();
-  const { parsed, usage } = isAnthropicModel(resolved)
-    ? await completeAnthropic({ model: resolved, system, user })
-    : await completeOpenAI({ model: resolved, system, user });
+  let parsed;
+  let usage;
+  let serverModel = resolved;
+  let analysisToken = null;
+  if (useProxy) {
+    ({ parsed, usage, serverModel, analysisToken } = await analyzeViaProxy({
+      apiKey, apiUrl, model: resolved, system, user,
+    }));
+  } else {
+    ({ parsed, usage } = isAnthropicModel(resolved)
+      ? await completeAnthropic({ model: resolved, system, user })
+      : await completeOpenAI({ model: resolved, system, user }));
+  }
   const elapsedMs = Date.now() - t0;
 
-  const price = PRICES[resolved] || { input: 0, output: 0 };
+  const usedModel = serverModel || resolved;
+  const price = PRICES[usedModel] || { input: 0, output: 0 };
   const costUSD =
     ((usage.prompt_tokens || 0) / 1e6) * price.input +
     ((usage.completion_tokens || 0) / 1e6) * price.output;
 
-  return { parsed, usage, costUSD, elapsedMs, model: resolved, promptChars: user.length };
+  return { parsed, usage, costUSD, elapsedMs, model: usedModel, promptChars: user.length, analysisToken };
 }
 
 /**

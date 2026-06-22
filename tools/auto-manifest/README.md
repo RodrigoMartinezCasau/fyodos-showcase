@@ -10,46 +10,67 @@ salida confirma que cada claim existe de verdad en el código antes de aceptarlo
 > (p. ej. React Context). En v3 la mecánica ya no es portero de entrada: solo
 > revisor de salida.
 
-## Uso
+## Instalación y uso (como lo hace un desarrollador)
+
+El CLI se publica en npm como **`@fiodos/cli`** (binario `fiodos`). El comando
+que el dashboard muestra para integrar el orbe en una web:
 
 ```bash
-cd tools/auto-manifest
-node src/index.js /ruta/a/la/app --out output/mi-app
-
-# Elegir modelo (por defecto Claude Opus; override con --model gpt-5, sonnet, …):
-node src/index.js /ruta/a/la/app --out output/mi-app --model gpt-5-mini
-
-# Pasada solo estática (gratis, sin enviar código a la IA — solo rutas, sin acciones):
-node src/index.js /ruta/a/la/app --out output/mi-app --no-llm
-
-# Publicar el resultado en tu proyecto Fiodos (dashboard → "Recargar análisis"):
-node src/index.js /ruta/a/la/app --out output/mi-app \
-  --publish --api-url http://localhost:8000
+cd /ruta/a/tu/web
+npx @fiodos/cli analyze . --publish --api-key fyd_xxx
 ```
 
-Las keys se cargan solas desde `tools/auto-manifest/.env` y `fyodos/backend/.env`
-(el export del shell tiene prioridad). Al publicar, se usa la
-`EXPO_PUBLIC_FYODOS_API_KEY` del `.env` de la app analizada si existe.
+Eso analiza el código, publica el manifest en tu proyecto Fiodos y te ofrece
+cablear el orbe `<FiodosAgent/>` en tu app.
+
+Opciones de análisis:
+
+```bash
+# Análisis alojado (POR DEFECTO): la IA corre en el backend de Fiodos con
+# NUESTRA clave; no necesitas clave de IA propia. Tu código pasa por el backend
+# de Fiodos de camino a la IA (ver Privacidad).
+npx @fiodos/cli analyze . --publish --api-key fyd_xxx
+
+# Clave propia (PRIVADO): la IA corre en tu máquina con TU clave; el código va
+# directo a la IA y NUNCA pasa por Fiodos. Requiere ANTHROPIC_API_KEY (o
+# OPENAI_API_KEY si usas --model gpt-…).
+npx @fiodos/cli analyze . --publish --api-key fyd_xxx --own-ai-key
+
+# Solo estático (sin IA): rutas, sin acciones; no se envía código a ningún sitio.
+npx @fiodos/cli analyze . --publish --api-key fyd_xxx --no-llm
+
+# Backend local (desarrollo):
+npx @fiodos/cli analyze . --publish --api-key fyd_xxx --api-url http://localhost:8000
+```
+
+> Alternativa SIN IA — instalación manual: el flujo base de cualquier SDK
+> siempre funciona y no requiere IA ni clave de proveedor:
+> `npm install @fiodos/react @fiodos/core` y montar `<FiodosAgent/>` (el
+> dashboard da los pasos). El `analyze` con IA es el extra que detecta y cablea
+> las acciones automáticamente, no el único camino.
 
 ## Privacidad — léelo antes de vender esto
 
-Dos fronteras distintas, sé transparente con ambas:
+Sé transparente con dónde va el código en CADA modo:
 
-1. **Backend de Fiodos: el código NUNCA llega.** Con `--publish` solo viaja el
-   `manifest.json` resultante + metadatos pequeños (motor, modelo, contadores,
-   coste). El endpoint solo acepta JSON con esquema de `AppManifest` y rechaza
-   payloads grandes. No existe ningún endpoint capaz de recibir código.
-2. **Proveedor de IA: el código SÍ se envía durante el análisis.** Para que la
-   IA lea el código, los archivos fuente recopilados se mandan a la API de
-   OpenAI o Anthropic **con la key del propio desarrollador** (`ANTHROPIC_API_KEY`
-   por defecto, o `OPENAI_API_KEY` si usas `--model gpt-…`), una vez
-   por análisis. Es el mismo modelo que cualquier herramienta de IA sobre
-   código, pero debe figurar en la política de privacidad y mencionarse a
-   clientes sensibles (banca, salud…). Para esos casos: `--no-llm` da una
-   pasada solo estática sin enviar nada, y a futuro cabe un modelo local/privado.
+1. **Publicación (`--publish`): el código NUNCA viaja.** Solo el `manifest.json`
+   resultante + metadatos pequeños (motor, modelo, contadores). El endpoint de
+   publicación solo acepta JSON con esquema de `AppManifest`.
+2. **Análisis con IA — depende del modo:**
+   - **Alojado (por defecto):** el código fuente **SÍ pasa por el backend de
+     Fiodos**, que lo reenvía al proveedor de IA con **nuestra** clave. Se
+     mantiene en memoria solo durante la llamada; **no se guarda ni se loguea**.
+     Cómodo (sin clave propia) pero el código toca nuestros servidores.
+   - **`--own-ai-key` (privado):** el código va **directo de tu máquina al
+     proveedor de IA** con **tu** clave; **no toca el backend de Fiodos**. Para
+     clientes sensibles (banca, salud) que no quieren que el código pase por
+     nosotros.
+   - **`--no-llm`:** no se envía código a ningún sitio (solo rutas estáticas).
 
-El coste del análisis lo asume quien analiza (su key, su proveedor).
-`files-sent.json` deja auditado exactamente qué archivos se enviaron.
+En modo alojado, el coste del análisis lo asume Fiodos (parte de la
+suscripción) y está limitado por la cuota del plan (server-side). En
+`--own-ai-key`, el coste es del desarrollador (su key, su proveedor).
+`files-sent.json` deja auditado exactamente qué archivos entraron en el prompt.
 
 ## Arquitectura (v3)
 

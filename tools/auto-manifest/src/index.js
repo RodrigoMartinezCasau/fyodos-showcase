@@ -34,20 +34,32 @@
  *     --yes      accept the wiring without the prompt (CI / express installer)
  *     --no-wire  skip wiring entirely (analysis/publish unaffected)
  *
+ * AI key — HYBRID model:
+ *   DEFAULT (hosted): the AI analysis runs on the Fiodos backend with FIODOS'S
+ *     key; you need no AI key of your own and the cost is part of the plan.
+ *     In this mode your source code travels to the Fiodos backend on its way to
+ *     the AI provider (see PRIVACY).
+ *   --own-ai-key: the AI call runs locally with YOUR provider key — the source
+ *     code goes straight from this machine to the AI and never reaches Fiodos.
+ *       ANTHROPIC_API_KEY — own-key analysis default (Claude); your key, your cost
+ *       OPENAI_API_KEY    — own-key analysis if you pass --model gpt-5 / gpt-4o / …
+ *   --no-llm: static-only pass (routes, no actions); no code leaves this machine.
+ *
  * Env (auto-loaded from tools/auto-manifest/.env and fyodos/backend/.env;
  * shell exports take precedence):
- *   ANTHROPIC_API_KEY   — AI analysis default (Claude Opus; your key, your cost)
- *   OPENAI_API_KEY      — only if you pass --model gpt-5 / gpt-4o / …
- *   FYODOS_API_KEY      — project key for --publish (or the analyzed app's
- *                         EXPO_PUBLIC_FYODOS_API_KEY, which wins)
+ *   FYODOS_API_KEY      — project key for hosted analysis + --publish (or the
+ *                         analyzed app's EXPO_PUBLIC_FYODOS_API_KEY, which wins)
  *
- * PRIVACY:
- *   - The analysis runs on THIS machine. With --publish, only the resulting
- *     manifest.json + small metadata are POSTed to the Fiodos backend.
- *     Source files NEVER reach the Fiodos backend.
- *   - The AI step sends the collected source files to the AI provider
- *     (Anthropic Claude Opus by default) using the developer's own key.
- *     Use --no-llm for a static-only pass (routes, no actions) if that is not acceptable.
+ * PRIVACY (honest, per mode):
+ *   - The PUBLISH step only ever POSTs the resulting manifest.json + small
+ *     metadata to the Fiodos backend — never source code.
+ *   - The ANALYSIS (AI) step differs by mode:
+ *       · default (hosted/proxy): your source code IS sent to the Fiodos
+ *         backend, which relays it to the AI provider with Fiodos's key. Held
+ *         in memory for the call only; never stored or logged.
+ *       · --own-ai-key: your source code is sent to the AI provider directly
+ *         from this machine and never touches the Fiodos backend.
+ *       · --no-llm: no source code is sent anywhere (static routes only).
  *
  * Output:
  *   manifest.json     — AppManifest (schema of @fiodos/core), verified
@@ -59,6 +71,7 @@
 'use strict';
 
 const fs = require('fs');
+const os = require('os');
 const path = require('path');
 const { loadEnv, loadAppEnv } = require('./loadEnv');
 loadEnv();
@@ -73,6 +86,35 @@ const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
 function arg(flag, fallback) {
   const i = process.argv.indexOf(flag);
   return i > -1 ? process.argv[i + 1] : fallback;
+}
+
+// Flags that consume the following token as their value. Used by the
+// positional parser so a value like the path in `--out <dir>` is not mistaken
+// for the target app root.
+const VALUE_FLAGS = new Set([
+  '--out', '--model', '--max-input-tokens', '--platform', '--api-key', '--api-url',
+]);
+
+/**
+ * Positional (non-flag) arguments, skipping flags and their values. Lets the
+ * CLI accept BOTH `fiodos analyze <dir> [flags]` (the form the dashboard prints)
+ * and the bare `fiodos <dir> [flags]`. Without this, the literal word "analyze"
+ * was read as the target directory (the published-CLI bug this fixes).
+ */
+function positionalArgs() {
+  const rest = process.argv.slice(2);
+  const out = [];
+  for (let i = 0; i < rest.length; i += 1) {
+    const tok = rest[i];
+    if (tok.startsWith('-')) {
+      if (VALUE_FLAGS.has(tok) && i + 1 < rest.length && !rest[i + 1].startsWith('-')) {
+        i += 1; // consume the flag's value
+      }
+      continue;
+    }
+    out.push(tok);
+  }
+  return out;
 }
 
 function fyodosTermColors() {
@@ -127,12 +169,15 @@ async function withSpinner(label, work) {
 }
 
 async function main() {
-  const appRoot = process.argv[2];
-  if (!appRoot) {
-    console.error('Usage: node src/index.js <target-app-root> --out <dir> [--model claude-opus-4-8] [--no-llm] [--publish]');
-    process.exit(1);
-  }
-  const outDir = arg('--out', path.join(__dirname, '../output', path.basename(appRoot)));
+  // Accept an optional leading `analyze` subcommand: `fiodos analyze <dir>`.
+  let positionals = positionalArgs();
+  if (positionals[0] === 'analyze') positionals = positionals.slice(1);
+  const appRoot = positionals[0] || '.';
+  // Default output dir lives in the OS temp dir, NOT inside the installed
+  // package (when run via npx, __dirname is under node_modules and writing
+  // there pollutes the package). Operators can still override with --out.
+  const safeName = path.basename(path.resolve(appRoot)).replace(/[^a-z0-9_-]/gi, '_') || 'app';
+  const outDir = arg('--out', path.join(os.tmpdir(), 'fiodos', 'analysis', safeName));
   // Model precedence: explicit --model (operator override) > backend plan model
   // (resolved below from the analysis-quota pre-check) > DEFAULT_MODEL fallback.
   const explicitModel = arg('--model', '');
@@ -177,6 +222,10 @@ async function main() {
   let evidence = {};
   let wiring = {};
   let analysisMeta = { engine: 'auto-manifest-v3-ai-first', model: null, costUSD: 0 };
+  // Signed proof returned by the hosted-analysis proxy: it tells the publish
+  // step the quota was already consumed at /v1/developer/analyze (no double
+  // count). Null in own-key / --no-llm mode.
+  let analysisToken = null;
 
   if (!useLLM) {
     // Static-only fallback: routes with mechanical naming, no actions.
@@ -186,21 +235,30 @@ async function main() {
     logDev('[no-llm] static-only manifest (routes only, no actions)');
     logUser(`Static analysis complete — ${manifest.routes.length} routes`);
   } else {
+    // Hybrid AI-key model. DEFAULT: hosted analysis via the Fiodos backend
+    // proxy (Fiodos's AI key, no key needed by the developer). With
+    // --own-ai-key the analysis runs locally against the developer's own
+    // provider key (privacy path: source code goes straight to the AI and
+    // never reaches Fiodos). --no-llm (handled above) sends no code anywhere.
+    loadAppEnv(path.resolve(appRoot));
+    const { apiKey, apiUrl } = resolveApiTarget();
+    const useProxy = !process.argv.includes('--own-ai-key');
+
     // ── 2b. Plan quota pre-check (before spending any AI tokens) ─────────────
-    // When publishing, ask the backend whether this project's plan still allows
-    // an analysis. The Free plan includes exactly one (the initial onboarding
-    // analysis); paid plans allow several. The publish step re-checks server-
-    // side, so this is only a courtesy to avoid wasting AI tokens.
-    if (process.argv.includes('--publish')) {
-      loadAppEnv(path.resolve(appRoot));
-      const quota = await fetchAnalysisQuota(resolveApiTarget());
+    // Ask the backend whether this project's plan still allows an analysis. The
+    // Free plan includes exactly one; paid plans allow several. Both the proxy
+    // and the publish step re-check server-side, so this is a courtesy to fail
+    // fast (and, in own-key mode, to avoid wasting the developer's tokens).
+    if (apiKey) {
+      const quota = await fetchAnalysisQuota({ apiKey, apiUrl });
       if (quota && quota.allowed === false) {
         printQuotaBlocked(quota);
         return;
       }
       // Tier-based model: the backend tells us which model this plan is
       // entitled to. The user never sees or sets it. An explicit --model
-      // (operator override) always wins.
+      // (operator override) always wins. In proxy mode the server forces the
+      // model regardless; this only matters for the own-key path.
       if (!explicitModel && quota && quota.model) {
         model = resolveModel(quota.model);
       }
@@ -208,12 +266,16 @@ async function main() {
 
     // ── 3. AI reads the code ────────────────────────────────────────────────
     logUser('Analyzing your project — may take 1–2 min');
-    const { parsed, usage, costUSD, elapsedMs, promptChars } = await withSpinner(
-      'Analyzing your project with AI',
-      () => analyzeWithAI({
-        appMeta, files: included, omitted, staticRoutes: routes, model, platform,
-      }),
-    );
+    const { parsed, usage, costUSD, elapsedMs, promptChars, model: usedModel, analysisToken: token } =
+      await withSpinner(
+        'Analyzing your project with AI',
+        () => analyzeWithAI({
+          appMeta, files: included, omitted, staticRoutes: routes, model, platform,
+          useProxy, apiKey, apiUrl,
+        }),
+      );
+    if (usedModel) model = usedModel;
+    analysisToken = token || null;
     const proposed = parsed.manifest || {};
     evidence = parsed.evidence || {};
     wiring = parsed.wiring || {};
@@ -262,14 +324,16 @@ async function main() {
   annotateExternalAgentRecommendations(manifest);
 
   // ── 5. Final gate: the real @fiodos/core validator ─────────────────────────
+  // Loaded as a package dependency (not a monorepo path) so it resolves when
+  // the CLI is installed from npm.
   try {
-    const { validateManifest } = require(path.join(__dirname, '../../../packages/core/dist/manifest/validate.js'));
+    const { validateManifest } = require('@fiodos/core');
     const validation = validateManifest(manifest);
     provenance.coreValidation = validation;
     logDev(`[validate] @fiodos/core validateManifest → valid=${validation.valid}` +
       (validation.errors?.length ? ` errors=${JSON.stringify(validation.errors)}` : ''));
-  } catch {
-    provenance.coreValidation = { skipped: 'core dist not built' };
+  } catch (e) {
+    provenance.coreValidation = { skipped: `@fiodos/core validateManifest unavailable: ${e.message}` };
   }
 
   fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
@@ -284,7 +348,7 @@ async function main() {
       generatedAt: new Date().toISOString(),
       routesIncluded: manifest.routes.length,
       actionsIncluded: manifest.actions.length,
-    });
+    }, analysisToken);
   }
 
   // ── 6. Web: offer to wire the orb into the app (consent-based) ─────────────
@@ -510,10 +574,16 @@ function annotateExternalAgentRecommendations(manifest) {
  * developer's Fiodos project. Authenticated with the project API key shown in
  * the dashboard. Never sends source files, evidence or usage logs.
  */
+// Production Fiodos backend. The published CLI defaults here so the dashboard's
+// `npx @fiodos/cli analyze . --publish --api-key …` (no --api-url) reaches prod.
+// Local dev overrides with --api-url http://localhost:8000 or FYODOS_API_URL
+// (or the analyzed app's VITE/NEXT/EXPO_PUBLIC_FYODOS_API_URL via loadAppEnv).
+const DEFAULT_API_URL = 'https://api.fyodos.com';
+
 /** Resolve the Fiodos backend target (project API key + URL) from flags/env. */
 function resolveApiTarget() {
   const apiKey = arg('--api-key', process.env.FYODOS_API_KEY || '');
-  const apiUrl = (arg('--api-url', process.env.FYODOS_API_URL || 'http://localhost:8000') || '').replace(/\/$/, '');
+  const apiUrl = (arg('--api-url', process.env.FYODOS_API_URL || DEFAULT_API_URL) || '').replace(/\/$/, '');
   return { apiKey, apiUrl };
 }
 
@@ -553,7 +623,7 @@ function printQuotaBlocked(quota) {
   );
 }
 
-async function publishManifest(manifest, meta) {
+async function publishManifest(manifest, meta, analysisToken = null) {
   const { apiKey, apiUrl } = resolveApiTarget();
   if (!apiKey) {
     console.error(
@@ -563,10 +633,14 @@ async function publishManifest(manifest, meta) {
   }
   logDev(`[publish] POST ${apiUrl}/v1/developer/manifest (manifest + metadata only — no source code)`);
   logDev(`[publish] project API key: ${apiKey.slice(0, 12)}…`);
+  // In proxy mode, forward the signed analysis token so the backend knows the
+  // quota was already consumed at the analyze step (no double count). Stripped
+  // server-side before the meta is persisted.
+  const payloadMeta = analysisToken ? { ...meta, analysisToken } : meta;
   const res = await fetch(`${apiUrl}/v1/developer/manifest`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-    body: JSON.stringify({ manifest, meta }),
+    body: JSON.stringify({ manifest, meta: payloadMeta }),
   });
   if (!res.ok) {
     if (res.status === 429) {
