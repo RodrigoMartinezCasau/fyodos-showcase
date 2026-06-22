@@ -31,8 +31,18 @@
  *   After analysis, a web target is OFFERED automatic wiring of <FiodosAgent/>
  *   into the app's root layout. It asks before editing your code; on "no" (or a
  *   non-interactive shell) it prints the ready-to-paste snippet instead.
- *     --yes      accept the wiring without the prompt (CI / express installer)
- *     --no-wire  skip wiring entirely (analysis/publish unaffected)
+ *     --yes          accept the wiring/env without the prompt (CI / express)
+ *     --no-wire      skip wiring entirely (analysis/publish unaffected)
+ *     --no-write-env skip the offer to align the app's .env with the published
+ *                    key/URL (see below)
+ *
+ * Avoiding the silent "orb fetches the wrong backend" failure:
+ *   After --publish the CLI (1) re-fetches the manifest with the SAME key+URL to
+ *   confirm the orb will find it, printing the exact key/URL your app must use,
+ *   and (2) on web, OFFERS to write that key/URL into the app's env file
+ *   (.env.local for Next, .env for Vite) so the runtime matches what you
+ *   published. It never overwrites a differing value silently — it warns and
+ *   asks first. Disable with --no-write-env.
  *
  * AI key — HYBRID model:
  *   DEFAULT (hosted): the AI analysis runs on the Fiodos backend with FIODOS'S
@@ -82,6 +92,7 @@ const { analyzeWithAI, correctActionWiring, DEFAULT_MODEL, resolveModel } = requ
 const { verifyManifest } = require('./verify');
 const { wireWebOrb, reportWireResult } = require('./wireWeb');
 const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
+const { offerWriteEnv } = require('./writeEnv');
 
 function arg(flag, fallback) {
   const i = process.argv.indexOf(flag);
@@ -129,7 +140,7 @@ function fyodosTermColors() {
 
 /** Internal diagnostics (tokens, cost, paths…) — only with --verbose. */
 function isVerbose() {
-  return process.argv.includes('--verbose') || process.argv.includes('-v');
+  return process.argv.includes('--verbose') || process.argv.includes('-v') || process.argv.includes('--debug');
 }
 
 function logDev(...args) {
@@ -356,9 +367,27 @@ async function main() {
   // their app, so the onboarding never needs a separate manual step. Mobile is
   // wired by its own installer and is intentionally left untouched here.
   if (platform === 'web') {
-    const { apiUrl } = resolveApiTarget();
+    const { apiKey, apiUrl } = resolveApiTarget();
     const assumeYes = process.argv.includes('--yes') || process.argv.includes('--wire-yes');
     const noWire = process.argv.includes('--no-wire');
+
+    // ── 5b. Offer to align the app's .env with the published key/URL (consent).
+    // Removes the second manual copy of the key — the root cause of the silent
+    // "orb fetches the wrong backend" failure. Skipped with --no-write-env.
+    if (process.argv.includes('--publish') && !process.argv.includes('--no-write-env')) {
+      try {
+        await offerWriteEnv({
+          appRoot: path.resolve(appRoot),
+          apiKey,
+          apiUrl,
+          defaultApiUrl: DEFAULT_API_URL,
+          assumeYes,
+          log: logUser,
+        });
+      } catch (e) {
+        logDev(`[write-env] skipped: ${e.message}`);
+      }
+    }
     // --no-orb-wire skips ONLY the orb mount (useful to test handler wiring in
     // isolation without modifying the app's entrypoint / package.json).
     if (!process.argv.includes('--no-orb-wire')) {
@@ -658,7 +687,55 @@ async function publishManifest(manifest, meta, analysisToken = null) {
   const body = await res.json();
   logUser(`Published to your project — ${body.routes} routes, ${body.actions} actions`);
   logDev(`[publish] OK — ${body.routes} routes, ${body.actions} actions received at ${body.receivedAt}`);
+
+  // ── Self-check: confirm the orb will actually FIND this manifest ───────────
+  // Re-fetch it the way the SDK does at runtime (GET /v1/client/manifest with
+  // the SAME key + URL). This catches the silent-failure setup BEFORE the
+  // developer is left wondering why the orb never appears, and prints the exact
+  // key/URL their app must use so they can compare with their .env.
+  await verifyOrbCanFetch({ apiKey, apiUrl });
+
   logUser('Open the dashboard → Agent settings → "Reload analysis" to review');
+}
+
+/**
+ * Verify the just-published manifest is retrievable through the public client
+ * endpoint with the same credentials, and tell the developer EXACTLY which key
+ * and URL their running app must use. Never hard-fails the publish (the publish
+ * already succeeded); a failed re-fetch is surfaced as an actionable warning.
+ */
+async function verifyOrbCanFetch({ apiKey, apiUrl }) {
+  try {
+    const res = await fetch(`${apiUrl}/v1/client/manifest`, {
+      method: 'GET',
+      headers: { 'x-api-key': apiKey },
+    });
+    if (res.ok) {
+      const data = await res.json().catch(() => null);
+      if (data && data.manifest) {
+        logUser(
+          `✓ Verified: your orb will find this manifest using API key ${apiKey.slice(0, 12)}… ` +
+            `against ${apiUrl}.`,
+        );
+        logUser(
+          'Make sure your app uses this SAME key and URL in its .env ' +
+            '(NEXT_PUBLIC_FYODOS_API_KEY / VITE_FYODOS_API_KEY, and the API URL).',
+        );
+        return true;
+      }
+    }
+    logUser(
+      `⚠︎ Published, but could not re-read the manifest from ${apiUrl} (HTTP ${res.status}). ` +
+        'Check that your app uses this same key and URL.',
+    );
+  } catch (e) {
+    logDev(`[verify] re-fetch failed: ${e.message}`);
+    logUser(
+      `⚠︎ Published, but could not reach ${apiUrl} to verify. ` +
+        'Confirm your app points to this same URL and key.',
+    );
+  }
+  return false;
 }
 
 main().catch((e) => {

@@ -28,7 +28,7 @@
     "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
-    "@fiodos/core": "0.1.0"
+    "@fiodos/core": "^0.1.0"
   },
   "peerDependencies": {
     "@react-native-async-storage/async-storage": "*",

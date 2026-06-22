@@ -145,11 +145,11 @@ async function probeDexie(appRoot, entry, fyodosDirRel) {
     const op = dbMatch[3];
     const grew = after > before;
     const changed = after !== before || /update|put|delete/.test(op);
-    if (op === 'delete') return { status: 'effect-pass', detail: `delete ejecutó sobre la tabla '${table}'` };
-    if (grew || changed) return { status: 'effect-pass', detail: `'${table}' cambió (${before}→${after}) ejecutando la expresión real` };
-    return { status: 'fail', detail: `la expresión ejecutó pero '${table}' no cambió (${before}→${after})` };
+    if (op === 'delete') return { status: 'effect-pass', detail: `delete ran on the table '${table}'` };
+    if (grew || changed) return { status: 'effect-pass', detail: `'${table}' changed (${before}→${after}) running the real expression` };
+    return { status: 'fail', detail: `the expression ran but '${table}' did not change (${before}→${after})` };
   } catch (err) {
-    return { status: 'fail', detail: `la expresión lanzó: ${err && err.message ? err.message : String(err)}` };
+    return { status: 'fail', detail: `the expression threw: ${err && err.message ? err.message : String(err)}` };
   }
 }
 
@@ -200,16 +200,16 @@ async function probeEffect(appRoot, entry, opts = {}) {
         sensitive: opts.sensitive || entry.requireConfirmation,
       });
     } catch (err) {
-      return { status: 'unverifiable', detail: `render-probe no disponible (${err && err.message}); efecto real no verificable automáticamente — probar a mano` };
+      return { status: 'unverifiable', detail: `render-probe not available (${err && err.message}); real effect not automatically verifiable — test by hand` };
     }
   }
   if (opts.sensitive || entry.requireConfirmation) {
-    return { status: 'skipped', detail: 'acción con confirmación: no se dispara su efecto en la simulación (seguridad)' };
+    return { status: 'skipped', detail: 'confirmation action: its effect is not fired in the simulation (security)' };
   }
   // Module strategy: try the Dexie data-layer probe.
   const dexie = await probeDexie(appRoot, entry, opts.fyodosDirRel);
   if (dexie) return dexie;
-  return { status: 'skipped', detail: 'objetivo de módulo no simulable de forma segura en proceso; verificado por compilación' };
+  return { status: 'skipped', detail: 'module target not safely simulable in-process; verified by compilation' };
 }
 
 module.exports = { probeEffect, compileRegressed, extractErrorLines, readDexieStores };

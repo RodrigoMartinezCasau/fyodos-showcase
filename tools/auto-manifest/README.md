@@ -43,6 +43,23 @@ npx @fiodos/cli analyze . --publish --api-key fyd_xxx --no-llm
 npx @fiodos/cli analyze . --publish --api-key fyd_xxx --api-url http://localhost:8000
 ```
 
+### Tras publicar: que el orbe NO falle en silencio
+
+El error más común es publicar con una key/URL y correr la app con OTRA: el orbe
+pide su manifest al sitio equivocado, no lo encuentra y se renderiza invisible.
+Para evitarlo, tras `--publish` el CLI:
+
+1. **Re-lee el manifest** con la MISMA key+URL con la que publicó y confirma que
+   el orbe lo encontrará, imprimiendo la key+URL exactas que tu app debe usar.
+2. En web, **ofrece escribir esa key+URL en tu `.env`** (`.env.local` en Next,
+   `.env` en Vite) para que runtime y publicación coincidan. Nunca sobrescribe
+   un valor distinto en silencio: avisa y pregunta. Desactívalo con
+   `--no-write-env`.
+
+Y en **desarrollo**, si aun así el orbe no puede montarse (key rechazada, sin
+manifest, backend inalcanzable), el SDK pinta un aviso visible con el motivo
+exacto donde iría el orbe (en producción sigue invisible).
+
 > Alternativa SIN IA — instalación manual: el flujo base de cualquier SDK
 > siempre funciona y no requiere IA ni clave de proveedor:
 > `npm install @fiodos/react @fiodos/core` y montar `<FiodosAgent/>` (el

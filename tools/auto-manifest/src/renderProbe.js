@@ -43,6 +43,39 @@ function loadJsdom() {
   try { return require('jsdom'); } catch { return null; }
 }
 
+/** Detailed technical output (jsdom/React internals) only when asked. */
+function isVerboseProbe() {
+  return process.argv.includes('--verbose') || process.argv.includes('-v') || process.argv.includes('--debug');
+}
+
+/**
+ * Capture (swallow) noisy global console output during a probe — React error
+ * boundary logs ("The above error occurred in <X>", "Consider adding an error
+ * boundary…"), uncaught-error dumps, etc. These come from rendering the user's
+ * real pages in a bare jsdom (no router/providers) and are internal noise, not
+ * actionable user information. The captured lines are returned for diagnostics.
+ *
+ * No-op under --verbose/--debug so power users can still see the raw detail.
+ */
+function captureConsole() {
+  if (isVerboseProbe()) return { captured: [], restore() {} };
+  const captured = [];
+  const saved = {
+    log: console.log, error: console.error, warn: console.warn, info: console.info, debug: console.debug,
+  };
+  const sink = (...a) => {
+    try { captured.push(a.map((x) => (typeof x === 'string' ? x : String(x))).join(' ')); } catch { /* ignore */ }
+  };
+  console.log = sink; console.error = sink; console.warn = sink; console.info = sink; console.debug = sink;
+  return {
+    captured,
+    restore() {
+      console.log = saved.log; console.error = saved.error; console.warn = saved.warn;
+      console.info = saved.info; console.debug = saved.debug;
+    },
+  };
+}
+
 /** esbuild plugin that empties style/asset imports (works on old esbuild that
  *  lacks the 'empty' loader). Side-effect CSS imports become no-ops. */
 function emptyAssetsPlugin() {
@@ -100,7 +133,7 @@ async function probeReactEffect(appRoot, entry, ctx) {
   const esbuild = loadEsbuild(appRoot);
   const jsdomMod = loadJsdom();
   if (!esbuild || !jsdomMod) {
-    return { status: 'unverifiable', detail: `no se pudo montar el render headless (${!esbuild ? 'esbuild' : 'jsdom'} no disponible); cableado aplicado, efecto real no verificable automáticamente — probar a mano` };
+    return { status: 'unverifiable', detail: `could not set up the headless render (${!esbuild ? 'esbuild' : 'jsdom'} not available); wiring applied, real effect not automatically verifiable — test by hand` };
   }
   const fyodosDirAbs = path.join(appRoot, ctx.fyodosDirRel);
   const componentAbs = path.join(appRoot, entry.bridge.file);
@@ -118,6 +151,7 @@ async function probeReactEffect(appRoot, entry, ctx) {
     `export const probe = { React: ReactNS.default || ReactNS, createRoot, flushSync, Comp, registry: fyodosGeneratedRegistries };\n`;
 
   let restore = () => {};
+  let cap = { restore() {} };
   try {
     fs.writeFileSync(harnessAbs, harness);
     await esbuild.build({
@@ -134,12 +168,14 @@ async function probeReactEffect(appRoot, entry, ctx) {
       absWorkingDir: fyodosDirAbs,
     });
 
+    // Silence React/jsdom render noise from here through unmount (see captureConsole).
+    cap = captureConsole();
     restore = installDom(jsdomMod, { storageKeys: ctx.storageKeys, kind: ctx.kind });
     delete require.cache[outAbs];
     const mod = require(outAbs);
     const { React, createRoot, flushSync, Comp, registry } = mod.probe;
     const Component = pickComponent(Comp);
-    if (!Component) return { status: 'unverifiable', detail: `no encontré un componente React montable exportado por '${entry.bridge.file}' — efecto real no verificable a mano` };
+    if (!Component) return { status: 'unverifiable', detail: `did not find a mountable React component exported by '${entry.bridge.file}' — real effect not verifiable, test by hand` };
 
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -150,7 +186,7 @@ async function probeReactEffect(appRoot, entry, ctx) {
       await settle();
       flushSync(() => {});
     } catch (err) {
-      return { status: 'unverifiable', detail: `el componente no se pudo renderizar en aislamiento (${short(err)}); efecto real no verificable automáticamente — probar a mano` };
+      return { status: 'unverifiable', detail: `the component could not be rendered in isolation (${short(err)}); real effect not automatically verifiable — test by hand` };
     }
 
     const beforeHTML = captureSnapshot(container);
@@ -162,22 +198,23 @@ async function probeReactEffect(appRoot, entry, ctx) {
       // Do NOT fire the effect; we proved it mounts and the handler resolves to a
       // live bridge function. Verify the bridge has the method, nothing more.
       try { root.unmount(); } catch {}
-      return { status: 'unverifiable', detail: 'acción con confirmación: no se dispara su efecto en el render de prueba (seguridad); cableado verificado hasta el punto de confirmación' };
+      return { status: 'unverifiable', detail: 'confirmation action: its effect is not fired in the test render (security); wiring verified up to the confirmation point' };
     }
 
     let invokeErr = null;
     try { await handler(ctx.params); } catch (e) { invokeErr = e; }
     await settle();
     try { flushSync(() => {}); } catch {}
-    if (invokeErr) { try { root.unmount(); } catch {} return { status: 'fail', detail: `al invocar el handler la app real lanzó: ${short(invokeErr)}` }; }
+    if (invokeErr) { try { root.unmount(); } catch {} return { status: 'fail', detail: `invoking the handler, the real app threw: ${short(invokeErr)}` }; }
 
     const afterHTML = captureSnapshot(container);
     const afterText = container.textContent || '';
     try { root.unmount(); } catch {}
     return decide(ctx.kind, { beforeHTML, beforeText, afterHTML, afterText });
   } catch (err) {
-    return { status: 'unverifiable', detail: `no se pudo preparar el render de prueba (${short(err)}); efecto real no verificable automáticamente — probar a mano` };
+    return { status: 'unverifiable', detail: `could not prepare the test render (${short(err)}); real effect not automatically verifiable — test by hand` };
   } finally {
+    try { cap.restore(); } catch {}
     try { fs.existsSync(harnessAbs) && fs.rmSync(harnessAbs); } catch {}
     try { fs.existsSync(outAbs) && fs.rmSync(outAbs); } catch {}
     try { restore(); } catch {}
@@ -212,22 +249,22 @@ function decide(kind, snap) {
   const sentinelDisappeared = beforeText.includes(SENTINEL) && !afterText.includes(SENTINEL);
 
   if (kind === 'add') {
-    if (sentinelAppeared) return { status: 'effect-pass', detail: `tras invocar la acción, "${SENTINEL}" aparece en la UI renderizada (el item se añadió de verdad)` };
-    if (htmlChanged) return { status: 'effect-pass', detail: 'la UI cambió tras invocar la acción (efecto observado en el render)' };
-    return { status: 'fail', detail: 'la acción se invocó pero la UI no cambió ni apareció el valor enviado (no produce su efecto)' };
+    if (sentinelAppeared) return { status: 'effect-pass', detail: `after invoking the action, "${SENTINEL}" appears in the rendered UI (the item was really added)` };
+    if (htmlChanged) return { status: 'effect-pass', detail: 'the UI changed after invoking the action (effect observed in the render)' };
+    return { status: 'fail', detail: 'the action was invoked but the UI did not change nor did the sent value appear (it produces no effect)' };
   }
   if (kind === 'delete') {
-    if (sentinelDisappeared) return { status: 'effect-pass', detail: 'el item sembrado desapareció de la UI tras invocar la acción (se borró de verdad)' };
-    if (htmlChanged) return { status: 'effect-pass', detail: 'la UI cambió tras invocar la acción de borrado' };
-    return { status: 'unverifiable', detail: 'no se observó cambio al borrar (quizá no había item sembrado en aislamiento); cableado aplicado, efecto no confirmado — probar a mano' };
+    if (sentinelDisappeared) return { status: 'effect-pass', detail: 'the seeded item disappeared from the UI after invoking the action (it was really deleted)' };
+    if (htmlChanged) return { status: 'effect-pass', detail: 'the UI changed after invoking the delete action' };
+    return { status: 'unverifiable', detail: 'no change observed on delete (maybe there was no seeded item in isolation); wiring applied, effect not confirmed — test by hand' };
   }
   if (kind === 'toggle') {
-    if (htmlChanged) return { status: 'effect-pass', detail: 'la UI cambió tras invocar la acción (estado del item alternado)' };
-    return { status: 'unverifiable', detail: 'no se observó cambio al alternar (quizá sin item sembrado en aislamiento); cableado aplicado, efecto no confirmado — probar a mano' };
+    if (htmlChanged) return { status: 'effect-pass', detail: 'the UI changed after invoking the action (item state toggled)' };
+    return { status: 'unverifiable', detail: 'no change observed on toggle (maybe no seeded item in isolation); wiring applied, effect not confirmed — test by hand' };
   }
   // ui / other
-  if (htmlChanged) return { status: 'effect-pass', detail: 'la UI del componente cambió tras invocar la acción' };
-  return { status: 'unverifiable', detail: 'la acción no produjo un cambio observable en el render aislado; cableado aplicado, efecto no confirmado — probar a mano' };
+  if (htmlChanged) return { status: 'effect-pass', detail: 'the component UI changed after invoking the action' };
+  return { status: 'unverifiable', detail: 'the action produced no observable change in the isolated render; wiring applied, effect not confirmed — test by hand' };
 }
 
 function short(err) {
@@ -240,8 +277,17 @@ function short(err) {
  * toggle actions have something to act on.
  */
 function installDom(jsdomMod, { storageKeys = [], kind } = {}) {
-  const { JSDOM } = jsdomMod;
-  const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost/', pretendToBeVisual: true });
+  const { JSDOM, VirtualConsole } = jsdomMod;
+  // A VirtualConsole that does NOT forward to the real console: jsdom's default
+  // pipes page errors (uncaught exceptions → "reportException", long stack
+  // traces) to our stderr. That is internal noise from rendering the user's
+  // pages in a bare DOM. We swallow it (or forward only under --verbose).
+  let virtualConsole;
+  try {
+    virtualConsole = new VirtualConsole();
+    if (isVerboseProbe()) virtualConsole.sendTo(console);
+  } catch { virtualConsole = undefined; }
+  const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost/', pretendToBeVisual: true, virtualConsole });
   const { window } = dom;
   // Seed storage BEFORE the component hydrates (only useful for delete/toggle).
   if (kind === 'delete' || kind === 'toggle') {
@@ -319,15 +365,15 @@ async function probeComponentEffect(appRoot, entry, opts = {}) {
 
   const withTimeout = (p) => Promise.race([
     p,
-    new Promise((resolve) => setTimeout(() => resolve({ status: 'unverifiable', detail: 'el render de prueba excedió el tiempo límite (posible bucle/timer en el componente); efecto real no verificable automáticamente — probar a mano' }), opts.timeoutMs || 25000)),
+    new Promise((resolve) => setTimeout(() => resolve({ status: 'unverifiable', detail: 'the test render exceeded the time limit (possible loop/timer in the component); real effect not automatically verifiable — test by hand' }), opts.timeoutMs || 25000)),
   ]);
 
   if (framework.includes('react')) return withTimeout(probeReactEffect(appRoot, entry, ctx));
   if (framework.includes('vue')) return withTimeout(require('./renderProbeVue').probeVueEffect(appRoot, entry, ctx));
   if (framework.includes('angular')) {
-    return { status: 'unverifiable', detail: 'Angular: el render headless de componentes con TestBed no es fiable fuera de ng test; cableado aplicado y verificado por compilación, efecto real no verificable automáticamente aquí — probar con `ng test` o a mano' };
+    return { status: 'unverifiable', detail: 'Angular: headless component rendering with TestBed is not reliable outside ng test; wiring applied and verified by compilation, real effect not automatically verifiable here — test with `ng test` or by hand' };
   }
-  return { status: 'unverifiable', detail: `framework '${framework}' sin render-probe; efecto real no verificable automáticamente` };
+  return { status: 'unverifiable', detail: `framework '${framework}' has no render-probe; real effect not automatically verifiable` };
 }
 
-module.exports = { probeComponentEffect, actionKind, decide, SENTINEL, SEED_ID, installDom, pickComponent, detectStorageKeys, probeParams, captureSnapshot, short, loadEsbuild, loadJsdom, reqFrom, emptyAssetsPlugin };
+module.exports = { probeComponentEffect, actionKind, decide, SENTINEL, SEED_ID, installDom, pickComponent, detectStorageKeys, probeParams, captureSnapshot, short, loadEsbuild, loadJsdom, reqFrom, emptyAssetsPlugin, captureConsole, isVerboseProbe };

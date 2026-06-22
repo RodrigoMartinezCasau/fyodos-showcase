@@ -315,7 +315,7 @@ function mapParams(targetParams, manifestParams) {
     if (mp.required && !targetNames.has(mp.name)) {
       return {
         ok: false,
-        reason: `el parámetro requerido '${mp.name}' del manifiesto no existe en la firma de la función`,
+        reason: `required parameter '${mp.name}' from the manifest does not exist in the function signature`,
       };
     }
   }
@@ -329,7 +329,7 @@ function mapParams(targetParams, manifestParams) {
       }
       return {
         ok: false,
-        reason: 'la función usa desestructuración o un parámetro rest que no se puede mapear con seguridad',
+        reason: 'the function uses destructuring or a rest parameter that cannot be mapped safely',
       };
     }
     if (manifestNames.has(tp.name)) {
@@ -339,7 +339,7 @@ function mapParams(targetParams, manifestParams) {
     } else {
       return {
         ok: false,
-        reason: `el parámetro '${tp.name}' de la función no tiene un equivalente en el manifiesto`,
+        reason: `function parameter '${tp.name}' has no equivalent in the manifest`,
       };
     }
   }
@@ -364,16 +364,16 @@ function relImport(fromDirRel, toFileRel) {
  * and every identifier the call reads is either imported or a safe global.
  */
 function buildAiEntry({ appRoot, fyodosDirRel, base, aiW, manifestParams }) {
-  if (!aiW || typeof aiW !== 'object') return { reason: 'la IA no propuso cableado para esta acción' };
+  if (!aiW || typeof aiW !== 'object') return { reason: 'the AI proposed no wiring for this action' };
   if (aiW.strategy === 'bridge') {
     return buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW });
   }
   if (aiW.strategy && aiW.strategy !== 'module') {
-    return { reason: `estrategia de cableado desconocida: '${aiW.strategy}'` };
+    return { reason: `unknown wiring strategy: '${aiW.strategy}'` };
   }
 
   const call = String(aiW.call || '').trim();
-  if (!call) return { reason: 'la IA no aportó una expresión de llamada (call) verificable' };
+  if (!call) return { reason: 'the AI did not provide a verifiable call expression' };
 
   const rawImports = Array.isArray(aiW.imports) ? aiW.imports : [];
   // 1) Every required symbol must really exist where the AI says it does.
@@ -381,7 +381,7 @@ function buildAiEntry({ appRoot, fyodosDirRel, base, aiW, manifestParams }) {
   for (const r of required) {
     if (!fileHasSymbol(appRoot, r && r.file, r && r.name)) {
       return {
-        reason: `el verificador no encontró el símbolo '${r && r.name}' en '${normRel(r && r.file)}' (la IA lo propuso pero no existe en el código)`,
+        reason: `the verifier did not find symbol '${r && r.name}' in '${normRel(r && r.file)}' (the AI proposed it but it does not exist in the code)`,
       };
     }
   }
@@ -393,14 +393,14 @@ function buildAiEntry({ appRoot, fyodosDirRel, base, aiW, manifestParams }) {
     const name = String((imp && imp.name) || '').trim();
     const from = normRel(imp && imp.from);
     const kind = (imp && imp.kind) || 'named';
-    if (!name || !from) return { reason: 'un import propuesto por la IA está incompleto (falta name/from)' };
+    if (!name || !from) return { reason: 'an import proposed by the AI is incomplete (missing name/from)' };
     if (!fs.existsSync(path.join(appRoot, from))) {
-      return { reason: `el import propuesto apunta a un archivo inexistente: '${from}'` };
+      return { reason: `the proposed import points to a non-existent file: '${from}'` };
     }
     // For named imports the symbol must be present in that file; default/namespace
     // bind the module's default/whole export so only file existence is checked.
     if (kind === 'named' && !fileHasSymbol(appRoot, from, name)) {
-      return { reason: `el import nombrado '${name}' no existe en '${from}'` };
+      return { reason: `named import '${name}' does not exist in '${from}'` };
     }
     imports.push({ kind, name, importPath: relImport(fyodosDirRel, from) });
     importedNames.add(name);
@@ -411,10 +411,10 @@ function buildAiEntry({ appRoot, fyodosDirRel, base, aiW, manifestParams }) {
   if (detached) {
     return {
       reason:
-        `la expresión instancia '${detached}' con 'new' y la usa como receptor; ` +
-        'si es un servicio/estado inyectado (DI) o un singleton, esa instancia nueva ' +
-        'queda desconectada de la que ve la UI y la acción no tendría efecto observable. ' +
-        'Necesita un puente al singleton real en vez de instanciarlo.',
+        `the expression instantiates '${detached}' with 'new' and uses it as the receiver; ` +
+        'if it is an injected service/state (DI) or a singleton, that new instance ' +
+        'is disconnected from the one the UI sees and the action would have no observable effect. ' +
+        'It needs a bridge to the real singleton instead of instantiating it.',
     };
   }
 
@@ -424,7 +424,7 @@ function buildAiEntry({ appRoot, fyodosDirRel, base, aiW, manifestParams }) {
   for (const id of freeIdentifiers(call)) {
     if (JS_KEYWORDS.has(id) || importedNames.has(id) || SAFE_GLOBALS.has(id) || locals.has(id)) continue;
     return {
-      reason: `la expresión de la IA referencia '${id}', que no se importa ni es un global/variable local conocido; no se cablea para no llamar a algo inexistente`,
+      reason: `the AI's expression references '${id}', which is neither imported nor a known global/local variable; not wired to avoid calling something that doesn't exist`,
     };
   }
 
@@ -459,21 +459,21 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
   const invoke = String(b.invoke || '').trim();
   const why = aiW.bridgeReason ? ` (${aiW.bridgeReason})` : '';
 
-  if (!file) return { reason: `la IA marcó puente pero no indicó el archivo del componente${why}` };
+  if (!file) return { reason: `the AI marked a bridge but did not indicate the component file${why}` };
   const content = readFileSafe(appRoot, file);
-  if (content == null) return { reason: `no se pudo leer el componente '${file}' para aplicar el puente` };
-  if (!invoke) return { reason: `la IA no aportó la expresión 'invoke' del puente para '${file}'` };
-  if (!anchor) return { reason: `la IA no aportó un ancla de inserción en '${file}'` };
+  if (content == null) return { reason: `could not read the component '${file}' to apply the bridge` };
+  if (!invoke) return { reason: `the AI did not provide the bridge 'invoke' expression for '${file}'` };
+  if (!anchor) return { reason: `the AI did not provide an insertion anchor in '${file}'` };
 
   const occ = countOccurrences(content, anchor);
-  if (occ === 0) return { reason: `el ancla de inserción no aparece en '${file}'; no se puede ubicar el puente con seguridad` };
-  if (occ > 1) return { reason: `el ancla de inserción aparece ${occ} veces en '${file}'; es ambigua, no se inserta a ciegas` };
+  if (occ === 0) return { reason: `the insertion anchor does not appear in '${file}'; cannot place the bridge safely` };
+  if (occ > 1) return { reason: `the insertion anchor appears ${occ} times in '${file}'; it is ambiguous, not inserted blindly` };
 
   // requiredSymbols must really exist.
   const required = Array.isArray(aiW.requiredSymbols) ? aiW.requiredSymbols : [];
   for (const r of required) {
     if (!fileHasSymbol(appRoot, r && r.file, r && r.name)) {
-      return { reason: `el verificador no encontró el símbolo '${r && r.name}' en '${normRel(r && r.file)}' (puente no verificable)` };
+      return { reason: `the verifier did not find symbol '${r && r.name}' in '${normRel(r && r.file)}' (bridge not verifiable)` };
     }
   }
 
@@ -482,8 +482,8 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
   if (detached) {
     return {
       reason:
-        `el puente instancia '${detached}' con 'new' y la usa como receptor; eso crea una ` +
-        'instancia desconectada de la que ve la UI. Debe usar la instancia real (p. ej. this.<servicio>), no instanciarla.',
+        `the bridge instantiates '${detached}' with 'new' and uses it as the receiver; that creates an ` +
+        'instance disconnected from the one the UI sees. It must use the real instance (e.g. this.<service>), not instantiate it.',
     };
   }
 
@@ -494,9 +494,9 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
     const name = String((imp && imp.name) || '').trim();
     const from = normRel(imp && imp.from);
     const kind = (imp && imp.kind) || 'named';
-    if (!name || !from) return { reason: 'un import del puente está incompleto (falta name/from)' };
-    if (!fs.existsSync(path.join(appRoot, from))) return { reason: `el import del puente apunta a un archivo inexistente: '${from}'` };
-    if (kind === 'named' && !fileHasSymbol(appRoot, from, name)) return { reason: `el import nombrado '${name}' no existe en '${from}'` };
+    if (!name || !from) return { reason: 'a bridge import is incomplete (missing name/from)' };
+    if (!fs.existsSync(path.join(appRoot, from))) return { reason: `the bridge import points to a non-existent file: '${from}'` };
+    if (kind === 'named' && !fileHasSymbol(appRoot, from, name)) return { reason: `named import '${name}' does not exist in '${from}'` };
     imports.push({ kind, name, importPath: relImport(path.dirname(file), from) });
     importedNames.add(name);
   }
@@ -509,7 +509,7 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
     if (id === 'args' || JS_KEYWORDS.has(id) || SAFE_GLOBALS.has(id) || locals.has(id) || importedNames.has(id)) continue;
     if (fileHasSymbol(appRoot, file, id)) continue;
     return {
-      reason: `el puente referencia '${id}', que no está en el ámbito del componente '${file}' ni se importa; no se cablea para no romper el código`,
+      reason: `the bridge references '${id}', which is not in the component '${file}' scope and is not imported; not wired to avoid breaking the code`,
     };
   }
 
@@ -541,7 +541,7 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
  */
 function buildMechanicalEntry({ appRoot, fyodosDirRel, base, manifestParams }) {
   const { file: evFile, handler } = base;
-  if (!evFile) return { reason: 'el análisis no aportó un archivo de evidencia para esta acción' };
+  if (!evFile) return { reason: 'the analysis did not provide an evidence file for this action' };
   const absFile = path.join(appRoot, evFile);
   let content = null;
   if (fs.existsSync(absFile)) {
@@ -551,21 +551,21 @@ function buildMechanicalEntry({ appRoot, fyodosDirRel, base, manifestParams }) {
       content = null;
     }
   }
-  if (!content) return { reason: `no se pudo leer el archivo de evidencia '${evFile}'` };
+  if (!content) return { reason: `could not read the evidence file '${evFile}'` };
 
   const exported = findExportedFunction(content, handler);
   const store = exported ? null : findStoreMethod(content, handler);
   if (!exported && !store) {
     return {
       reason:
-        `no se encontró '${handler}' como función exportada ni como método de store en '${evFile}'. ` +
-        'Puede vivir en un componente, una clase o un hook/contexto. No se cablea a ciegas.',
+        `'${handler}' was not found as an exported function or a store method in '${evFile}'. ` +
+        'It may live in a component, a class or a hook/context. Not wired blindly.',
     };
   }
 
   const targetParams = (exported || store).params;
   const mapped = mapParams(targetParams, manifestParams);
-  if (!mapped.ok) return { reason: `firma no mapeable con seguridad: ${mapped.reason}` };
+  if (!mapped.ok) return { reason: `signature not safely mappable: ${mapped.reason}` };
 
   const importPath = relImport(fyodosDirRel, evFile);
   if (exported) {
@@ -724,7 +724,7 @@ function buildRegistryModule(plan, opts = {}) {
     const takesParams = e.usesParams != null ? e.usesParams : /\bparams\b/.test(e.callExpr);
     const arg = takesParams ? `params${paramsType}` : `_params${paramsType}`;
     const confNote = e.requireConfirmation
-      ? '\n      // Acción con confirmación: el motor de Fiodos ya pidió confirmación ANTES de llamar aquí.'
+      ? '\n      // Confirmation action: the Fiodos engine already asked for confirmation BEFORE calling here.'
       : '';
     // `: unknown` lets the truthiness test below be legal even when the wired
     // call returns void (e.g. db.delete(...)) — otherwise TS errors on `result &&`.
@@ -751,13 +751,12 @@ function buildRegistryModule(plan, opts = {}) {
   const header =
     `/**\n` +
     ` * ${GENERATED_MARKER}.\n` +
-    ` * No edites a mano: re-ejecuta el instalador de Fiodos para regenerarlo.\n` +
-    ` * Lee ${DOC_BASENAME} (misma carpeta) para saber qué cablea y por qué.\n` +
+    ` * Do not edit by hand: re-run the Fiodos installer to regenerate it.\n` +
+    ` * Read ${DOC_BASENAME} (same folder) to see what it wires and why.\n` +
     ` *\n` +
-    ` * SEGURIDAD: este archivo solo LLAMA a tus funciones. Nunca decide si una\n` +
-    ` * acción sensible se ejecuta — el motor de Fiodos aplica las confirmaciones\n` +
-    ` * del manifiesto (requireConfirmation / voiceConfirmation) ANTES de invocar\n` +
-    ` * cualquier handler de aquí.\n` +
+    ` * SECURITY: this file only CALLS your functions. It never decides whether a\n` +
+    ` * sensitive action runs — the Fiodos engine applies the manifest confirmations\n` +
+    ` * (requireConfirmation / voiceConfirmation) BEFORE invoking any handler here.\n` +
     ` */\n`;
 
   const decl = esm
@@ -773,8 +772,8 @@ function buildRegistryModule(plan, opts = {}) {
     `${handlerText}\n` +
     (manualNotes.length ? `${manualNotes.join('\n')}\n` : '') +
     `  },\n` +
-    `  // Los idempotency checkers leen el estado de tu app; impleméntalos a mano si\n` +
-    `  // alguna acción declara idempotencyCheck (ver ${DOC_BASENAME}).\n` +
+    `  // Idempotency checkers read your app state; implement them by hand if\n` +
+    `  // an action declares idempotencyCheck (see ${DOC_BASENAME}).\n` +
     `  idempotencyCheckers: {},\n` +
     `};\n` +
     (esm ? '' : `\nmodule.exports = { ${REGISTRY_EXPORT} };\n`);
@@ -794,9 +793,9 @@ function buildBridgeModule(opts = {}) {
   const header =
     `/**\n` +
     ` * ${GENERATED_MARKER} (bridge holder).\n` +
-    ` * No edites a mano. Tu componente registra aquí sus funciones reales y los\n` +
-    ` * handlers generados las invocan. Es lo que conecta el agente con el estado\n` +
-    ` * que vive dentro de tus componentes, sin crear instancias desconectadas.\n` +
+    ` * Do not edit by hand. Your component registers its real functions here and the\n` +
+    ` * generated handlers invoke them. This is what connects the agent to the state\n` +
+    ` * living inside your components, without creating disconnected instances.\n` +
     ` */\n`;
   if (ts) {
     return (
@@ -916,130 +915,130 @@ function planComponentEdits(appRoot, plan, opts = {}) {
 // ── Document codegen ───────────────────────────────────────────────────────────
 
 function confLabel(e) {
-  if (!e.requireConfirmation) return 'no requiere confirmación';
-  const mode = e.voiceConfirmation ? ` (voz: ${e.voiceConfirmation})` : '';
-  return `requiere confirmación${mode}`;
+  if (!e.requireConfirmation) return 'no confirmation required';
+  const mode = e.voiceConfirmation ? ` (voice: ${e.voiceConfirmation})` : '';
+  return `requires confirmation${mode}`;
 }
 
 function buildHandlerDoc(plan, ctx = {}) {
   const {
-    appName = 'tu app', framework = 'web', registryRel = '', mountSnippet = '',
+    appName = 'your app', framework = 'web', registryRel = '', mountSnippet = '',
     bridgeRel = '', edits = [], verification = null,
   } = ctx;
   const L = [];
-  L.push('# Cableado de acciones de Fiodos (handler wiring)');
+  L.push('# Fiodos action wiring (handler wiring)');
   L.push('');
   L.push(
-    'Este documento describe **exactamente** qué hará Fiodos para conectar las ' +
-      'acciones detectadas en tu app con las funciones reales que las ejecutan. ' +
-      '**Nada se aplica hasta que aceptes en el terminal.**',
+    'This document describes **exactly** what Fiodos will do to connect the ' +
+      'actions detected in your app with the real functions that run them. ' +
+      '**Nothing is applied until you accept in the terminal.**',
   );
   L.push('');
   const review = plan.review || plan.manual || [];
   const aiCount = plan.auto.filter((e) => e.source === 'ai').length;
   L.push(`- App: **${appName}**`);
-  L.push(`- Framework detectado: **${framework}**`);
-  L.push(`- Acciones que se cablearán automáticamente: **${plan.auto.length}** ` +
-    `(${aiCount} cableadas por la IA, ${plan.auto.length - aiCount} por el detector mecánico de respaldo)`);
-  L.push(`- Acciones que necesitan revisión: **${review.length}**`);
+  L.push(`- Detected framework: **${framework}**`);
+  L.push(`- Actions that will be wired automatically: **${plan.auto.length}** ` +
+    `(${aiCount} wired by the AI, ${plan.auto.length - aiCount} by the mechanical fallback detector)`);
+  L.push(`- Actions that need review: **${review.length}**`);
   L.push('');
-  L.push('## ¿Cómo se genera este cableado?');
+  L.push('## How is this wiring generated?');
   L.push('');
   L.push(
-    'La **misma IA** que analizó tu código para detectar las acciones también propuso ' +
-      'cómo ejecutarlas: qué función/módulo real llamar y cómo mapear los parámetros. ' +
-      'Después, un **verificador mecánico** comprueba que cada símbolo referenciado ' +
-      'existe de verdad en tu código antes de escribir nada. Si la IA propone algo que ' +
-      'el verificador no encuentra, esa acción queda **para revisión**, nunca se cablea a ciegas.',
+    'The **same AI** that analyzed your code to detect the actions also proposed ' +
+      'how to run them: which real function/module to call and how to map the parameters. ' +
+      'Then a **mechanical verifier** checks that every referenced symbol ' +
+      'really exists in your code before writing anything. If the AI proposes something ' +
+      'the verifier cannot find, that action is left **for review**, never wired blindly.',
   );
   L.push('');
   if (Array.isArray(verification) && verification.length) {
-    L.push('## Verificación automática (efecto real + reintentos)');
+    L.push('## Automatic verification (real effect + retries)');
     L.push('');
     L.push(
-      'Tras tu "yes", la instalación **no se fía** de que el cableado compile: por cada ' +
-        'acción ejecuta un bucle **cablear → verificar → diagnosticar → corregir** sin ' +
-        'intervención humana. La verificación comprueba (1) que el proyecto **sigue ' +
-        'compilando** con esa acción cableada y, cuando es seguro simularlo, (2) que al ' +
-        'invocar el handler **el estado real cambia** (la tarea se añade, etc.). Si una ' +
-        'acción falla, la IA recibe el **error concreto** y reintenta con un cableado ' +
-        'corregido (hasta varios intentos). Una acción solo se marca **lista** cuando pasa ' +
-        'la verificación; si tras los reintentos no se logra, se **revierte solo esa ' +
-        'acción** y se marca abajo como "no se pudo cablear" — nunca se deja fingiendo.',
+      'After your "yes", the install **does not trust** that the wiring compiles: for each ' +
+        'action it runs a **wire → verify → diagnose → correct** loop with no ' +
+        'human intervention. Verification checks (1) that the project **still ' +
+        'builds** with that action wired and, when it is safe to simulate, (2) that ' +
+        'invoking the handler **changes the real state** (the task is added, etc.). If an ' +
+        'action fails, the AI receives the **concrete error** and retries with corrected ' +
+        'wiring (up to several attempts). An action is only marked **ready** when it passes ' +
+        'verification; if it is not achieved after the retries, **only that action is ' +
+        'reverted** and marked below as "could not be wired" — never left faking it.',
     );
     L.push('');
-    L.push('| Acción (intent) | Resultado | Intentos | Verificación | Detalle |');
+    L.push('| Action (intent) | Result | Attempts | Verification | Detail |');
     L.push('| --- | --- | --- | --- | --- |');
     for (const v of verification) {
-      const res = v.status === 'ready' ? '✅ lista' : '❌ no se pudo';
+      const res = v.status === 'ready' ? '✅ ready' : '❌ could not';
       let lvl = '—';
       if (v.status === 'ready') {
-        lvl = v.level === 'effect' ? 'efecto real (UI)'
-          : v.level === 'unverifiable' ? '⚠️ efecto NO verificable (revisar a mano)'
-            : 'compilación';
+        lvl = v.level === 'effect' ? 'real effect (UI)'
+          : v.level === 'unverifiable' ? '⚠️ effect NOT verifiable (review by hand)'
+            : 'compilation';
       }
       const detail = String(v.detail || v.error || '').replace(/\|/g, '\\|').slice(0, 160);
       L.push(`| \`${v.intent}\` | ${res} | ${v.attempts} | ${lvl} | ${detail} |`);
     }
     L.push('');
-    L.push('_"efecto real (UI)" = se montó el componente real en un DOM de prueba (jsdom) con ' +
-      'la herramienta estándar del framework (React: react-dom; Vue: vue + @vue/compiler-sfc), ' +
-      'se invocó el handler cableado y se **observó el cambio en la UI/estado** (la tarea aparece, ' +
-      'el item se alterna, etc.). Para la capa de datos (Dexie/store) el efecto se observa ejecutando ' +
-      'la acción contra una instancia real. "compilación" = compila y el símbolo real existe y se ' +
-      'invoca, pero el efecto no pudo simularse de forma segura aquí. "⚠️ efecto NO verificable" = ' +
-      'el cableado se aplicó pero el efecto real no se pudo confirmar automáticamente (componente no ' +
-      'montable en aislamiento, o acción sensible que no se dispara) — **revisar/probar a mano**. Las ' +
-      'acciones sensibles (con confirmación) **nunca** se disparan en la prueba._');
+    L.push('_"real effect (UI)" = the real component was mounted in a test DOM (jsdom) with ' +
+      'the framework\'s standard tooling (React: react-dom; Vue: vue + @vue/compiler-sfc), ' +
+      'the wired handler was invoked and the **change in the UI/state was observed** (the task appears, ' +
+      'the item toggles, etc.). For the data layer (Dexie/store) the effect is observed by running ' +
+      'the action against a real instance. "compilation" = it compiles and the real symbol exists and is ' +
+      'invoked, but the effect could not be safely simulated here. "⚠️ effect NOT verifiable" = ' +
+      'the wiring was applied but the real effect could not be confirmed automatically (component not ' +
+      'mountable in isolation, or a sensitive action that is not fired) — **review/test by hand**. ' +
+      'Sensitive actions (with confirmation) are **never** fired in the test._');
     L.push('');
   }
 
-  L.push('## ¿Por qué es necesario?');
+  L.push('## Why is it needed?');
   L.push('');
   L.push(
-    'El orbe ya está montado, pero el agente no puede **ejecutar** acciones hasta ' +
-      'que cada acción del manifiesto esté conectada a la función real de tu app. ' +
-      'Este cableado es ese puente: traduce cada acción (p. ej. `addToCart`) en una ' +
-      'llamada a tu función (p. ej. `useShop.getState().addToCart(...)`).',
+    'The orb is already mounted, but the agent cannot **run** actions until ' +
+      'each manifest action is connected to your app\'s real function. ' +
+      'This wiring is that bridge: it translates each action (e.g. `addToCart`) into a ' +
+      'call to your function (e.g. `useShop.getState().addToCart(...)`).',
   );
   L.push('');
   const bridgeEntries = plan.auto.filter((e) => e.kind === 'bridge');
-  L.push('## Qué archivos se crean / editan');
+  L.push('## Which files are created / edited');
   L.push('');
-  L.push(`- **CREA** \`${registryRel}\` — el registro de handlers generado.`);
+  L.push(`- **CREATES** \`${registryRel}\` — the generated handler registry.`);
   if (bridgeEntries.length && bridgeRel) {
-    L.push(`- **CREA** \`${bridgeRel}\` — el "puente" donde tu componente registra sus funciones reales.`);
+    L.push(`- **CREATES** \`${bridgeRel}\` — the "bridge" where your component registers its real functions.`);
   }
   if (edits.length) {
-    L.push('- **EDITA los siguientes archivos TUYOS** (solo añade líneas marcadas con ' +
-      '`FYODOS:BRIDGE`, reversibles):');
-    for (const ed of edits) L.push(`  - \`${ed.file}\` — registra: ${ed.intents.map((i) => `\`${i}\``).join(', ')}`);
+    L.push('- **EDITS the following files OF YOURS** (only adds lines marked with ' +
+      '`FYODOS:BRIDGE`, reversible):');
+    for (const ed of edits) L.push(`  - \`${ed.file}\` — registers: ${ed.intents.map((i) => `\`${i}\``).join(', ')}`);
   } else {
-    L.push('- **No se edita ningún archivo existente tuyo** (todas las acciones eran ' +
-      'alcanzables desde un módulo).');
+    L.push('- **No existing file of yours is edited** (all actions were ' +
+      'reachable from a module).');
   }
-  L.push('- Para activarlo, pasa el registro generado a `<FiodosAgent/>` (ver "Cómo activarlo").');
+  L.push('- To enable it, pass the generated registry to `<FiodosAgent/>` (see "How to enable it").');
   L.push('');
 
   if (edits.length) {
-    L.push('## Cambios EXACTOS dentro de tus componentes');
+    L.push('## EXACT changes inside your components');
     L.push('');
-    L.push('Estas son las líneas que Fiodos añadirá a tus archivos (cada bloque va entre ' +
-      'marcas `FYODOS:BRIDGE:START` / `END`, así puedes quitarlas o revertirlas sin tocar ' +
-      'tu propio código):');
+    L.push('These are the lines Fiodos will add to your files (each block sits between ' +
+      '`FYODOS:BRIDGE:START` / `END` markers, so you can remove or revert them without touching ' +
+      'your own code):');
     L.push('');
     for (const ed of edits) {
       L.push(`### \`${ed.file}\``);
       L.push('');
-      L.push('Tras la última línea `import`, se añade:');
+      L.push('After the last `import` line, this is added:');
       L.push('');
       L.push('```ts');
       L.push(ed.importBlock);
       L.push('```');
       L.push('');
       L.push(ed.file.endsWith('.vue')
-        ? 'Justo antes de `</script>`, se añade:'
-        : `Junto al ancla \`${(ed.anchor || '').trim().slice(0, 80)}\`, se añade:`);
+        ? 'Right before `</script>`, this is added:'
+        : `Next to the anchor \`${(ed.anchor || '').trim().slice(0, 80)}\`, this is added:`);
       L.push('');
       L.push('```ts');
       L.push(ed.registerBlock.replace(/^\s+/gm, (s) => s)); // keep as-is
@@ -1049,9 +1048,9 @@ function buildHandlerDoc(plan, ctx = {}) {
   }
 
   if (plan.auto.length) {
-    L.push(`## Acciones que se cablearán automáticamente (${plan.auto.length})`);
+    L.push(`## Actions that will be wired automatically (${plan.auto.length})`);
     L.push('');
-    L.push('| Acción (intent) | Cómo se ejecuta | Dónde | Parámetros | Tipo | Seguridad |');
+    L.push('| Action (intent) | How it runs | Where | Parameters | Type | Security |');
     L.push('| --- | --- | --- | --- | --- | --- |');
     for (const e of plan.auto) {
       const expr = e.kind === 'bridge' ? e.bridge.invoke : e.callExpr;
@@ -1061,81 +1060,81 @@ function buildHandlerDoc(plan, ctx = {}) {
         ? e.manifestParams.map((p) => `${p.name}${p.required ? '*' : ''}`).join(', ')
         : '—';
       const kind = e.kind === 'bridge'
-        ? 'puente (edita tu componente)'
-        : (e.source === 'ai' ? 'módulo (IA)' : 'módulo (mecánico)');
+        ? 'bridge (edits your component)'
+        : (e.source === 'ai' ? 'module (AI)' : 'module (mechanical)');
       L.push(`| \`${e.intent}\` | ${call} | ${where} | ${params} | ${kind} | ${confLabel(e)} |`);
     }
     L.push('');
-    L.push('_`*` = parámetro requerido. Cada llamada fue propuesta por la IA leyendo tu ' +
-      'código y **confirmada por el verificador** (los símbolos existen). Los parámetros ' +
-      'se mapean **por nombre**, nunca por posición._');
+    L.push('_`*` = required parameter. Each call was proposed by the AI reading your ' +
+      'code and **confirmed by the verifier** (the symbols exist). Parameters ' +
+      'are mapped **by name**, never by position._');
     L.push('');
   }
 
   if (review.length) {
-    L.push(`## Acciones que necesitan REVISIÓN (${review.length})`);
+    L.push(`## Actions that need REVIEW (${review.length})`);
     L.push('');
     L.push(
-      'Para estas acciones, ni la IA propuso un cableado **verificable** ni el detector ' +
-        'mecánico de respaldo encontró la función con seguridad. Cablearlas mal sería ' +
-        'peor que dejarlas sin cablear, así que se marcan para revisión y te explicamos por qué:',
+      'For these actions, neither did the AI propose **verifiable** wiring nor did the ' +
+        'mechanical fallback detector find the function safely. Wiring them wrong would be ' +
+        'worse than leaving them unwired, so they are marked for review and we explain why:',
     );
     L.push('');
     for (const e of review) {
       L.push(`### \`${e.intent}\` — ${e.label}`);
       L.push('');
-      L.push(`- Handler esperado: \`${e.handler}\``);
-      if (e.file) L.push(`- Archivo de evidencia: \`${e.file}\``);
-      L.push(`- Motivo: ${e.reason}`);
+      L.push(`- Expected handler: \`${e.handler}\``);
+      if (e.file) L.push(`- Evidence file: \`${e.file}\``);
+      L.push(`- Reason: ${e.reason}`);
       L.push(
-        `- Qué hacer: añade un handler \`${e.handler}\` en \`${registryRel}\` (o en tu ` +
-          'propio registro) que llame a la función real y devuelva ' +
-          '`{ success: true }` (o `{ success: false, message }`).',
+        `- What to do: add a handler \`${e.handler}\` in \`${registryRel}\` (or in your ` +
+          'own registry) that calls the real function and returns ' +
+          '`{ success: true }` (or `{ success: false, message }`).',
       );
       L.push('');
     }
   }
 
   const confirmed = plan.entries.filter((e) => e.requireConfirmation);
-  L.push('## Seguridad');
+  L.push('## Security');
   L.push('');
   L.push(
-    '- El cableado generado **solo llama** a tus funciones. **Nunca** decide si una ' +
-      'acción sensible se ejecuta: el motor de Fiodos aplica las confirmaciones del ' +
-      'manifiesto (`requireConfirmation` / `voiceConfirmation`) **antes** de invocar ' +
-      'el handler. Es imposible que el auto-cableado salte una confirmación.',
+    '- The generated wiring **only calls** your functions. It **never** decides whether a ' +
+      'sensitive action runs: the Fiodos engine applies the manifest confirmations ' +
+      '(`requireConfirmation` / `voiceConfirmation`) **before** invoking ' +
+      'the handler. It is impossible for the auto-wiring to skip a confirmation.',
   );
   if (confirmed.length) {
-    L.push('- Acciones protegidas por confirmación (el agente pedirá confirmar antes de ejecutarlas):');
+    L.push('- Actions protected by confirmation (the agent will ask to confirm before running them):');
     for (const e of confirmed) {
       L.push(`  - \`${e.intent}\` — ${confLabel(e)}.`);
     }
   } else {
-    L.push('- Ninguna de las acciones detectadas requiere confirmación en el manifiesto.');
+    L.push('- None of the detected actions require confirmation in the manifest.');
   }
-  L.push('- El cableado no lee, incrusta ni expone secretos; solo referencia nombres de');
-  L.push('  función y los parámetros que el manifiesto ya declara.');
+  L.push('- The wiring does not read, embed or expose secrets; it only references function');
+  L.push('  names and the parameters the manifest already declares.');
   L.push('');
 
-  L.push('## Cómo activarlo');
+  L.push('## How to enable it');
   L.push('');
   if (mountSnippet) {
-    L.push('Pasa el registro generado a tu `<FiodosAgent/>`:');
+    L.push('Pass the generated registry to your `<FiodosAgent/>`:');
     L.push('');
     L.push('```tsx');
     L.push(mountSnippet);
     L.push('```');
   } else {
-    L.push('Importa `' + REGISTRY_EXPORT + '` desde el archivo generado y pásalo como ' +
-      '`registries` a tu `<FiodosAgent/>`.');
+    L.push('Import `' + REGISTRY_EXPORT + '` from the generated file and pass it as ' +
+      '`registries` to your `<FiodosAgent/>`.');
   }
   L.push('');
-  L.push('## Si dijiste "no"');
+  L.push('## If you said "no"');
   L.push('');
   L.push(
-    'No se ha tocado tu código. Puedes implementar el cableado tú mismo siguiendo ' +
-      'este documento, o volver a ejecutar el instalador para aceptar el auto-cableado ' +
-      '(`--wire-yes` para aceptarlo sin preguntar).',
+    'Your code was not touched. You can implement the wiring yourself following ' +
+      'this document, or re-run the installer to accept the auto-wiring ' +
+      '(`--wire-yes` to accept without prompting).',
   );
   L.push('');
   return L.join('\n');
@@ -1365,7 +1364,7 @@ async function runAutoCorrectionLoop(ctx) {
   } = ctx;
 
   const log = (m) => console.error(`${tag} · ${dim || ''}${m}${reset || ''}`);
-  log('verificando y auto-corrigiendo cada acción (puede tardar)…');
+  log('Verifying and auto-correcting each action (may take a while)…');
   const baseline = await testRunner(appRoot, { framework });
 
   const ready = [];
@@ -1384,7 +1383,7 @@ async function runAutoCorrectionLoop(ctx) {
       const { entry, review } = planOneAction({ appRoot, manifest, evidence, candidate: wiringMap[intent], intent, fyodosDirRel });
 
       if (!entry) {
-        lastError = (review && review.reason) || 'no verificable mecánicamente';
+        lastError = (review && review.reason) || 'not mechanically verifiable';
         history.push({ attempt, stage: 'mechanical', ok: false, error: lastError });
       } else {
         const iso = writeIsolated({ appRoot, fyodosDirAbs, entry, ts, esm, ext });
@@ -1393,10 +1392,10 @@ async function runAutoCorrectionLoop(ctx) {
         try {
           const after = await testRunner(appRoot, { framework });
           const reg = compileRegressed(baseline.output, after.output, iso.touched);
-          if (!reg.ok) { ok = false; lastError = `compilación: ${reg.newErrors.join(' | ').slice(0, 600)}`; }
+          if (!reg.ok) { ok = false; lastError = `compilation: ${reg.newErrors.join(' | ').slice(0, 600)}`; }
           if (ok) {
             const eff = await probeEffect(appRoot, entry, { fyodosDirRel, framework, sources: files, sensitive: entry.requireConfirmation });
-            if (eff.status === 'fail') { ok = false; stage = 'effect'; lastError = `efecto: ${eff.detail}`; }
+            if (eff.status === 'fail') { ok = false; stage = 'effect'; lastError = `effect: ${eff.detail}`; }
             else {
               const level = eff.status === 'effect-pass' ? 'effect'
                 : eff.status === 'unverifiable' ? 'unverifiable'
@@ -1405,7 +1404,7 @@ async function runAutoCorrectionLoop(ctx) {
             }
           }
         } catch (err) {
-          ok = false; lastError = `verificación lanzó: ${err && err.message}`;
+          ok = false; lastError = `verification threw: ${err && err.message}`;
         } finally {
           revertAll(iso.backups, iso.generated);
         }
@@ -1414,14 +1413,14 @@ async function runAutoCorrectionLoop(ctx) {
       }
 
       if (attempt >= maxAttempts || typeof corrector !== 'function') break;
-      log(`acción '${intent}' falló (intento ${attempt}): ${lastError.slice(0, 120)} → pidiendo corrección a la IA…`);
+      log(`Action '${intent}' failed (attempt ${attempt}): ${lastError.slice(0, 120)} → asking the AI to correct it…`);
       try {
         const relevantFiles = pickRelevantFiles(files, evidence, wiringMap[intent], intent);
         const corrected = await corrector({ action, intent, evidence: (evidence && evidence.actions) || {}, relevantFiles, prevWiring: wiringMap[intent], errorText: lastError, attempt });
         if (corrected && corrected[intent]) wiringMap[intent] = corrected[intent];
-        else { history.push({ attempt, stage: 'correct', ok: false, error: 'la IA no devolvió cableado corregido' }); break; }
+        else { history.push({ attempt, stage: 'correct', ok: false, error: 'the AI did not return corrected wiring' }); break; }
       } catch (err) {
-        history.push({ attempt, stage: 'correct', ok: false, error: `corrector falló: ${err && err.message}` });
+        history.push({ attempt, stage: 'correct', ok: false, error: `corrector failed: ${err && err.message}` });
         break;
       }
     }
@@ -1429,11 +1428,11 @@ async function runAutoCorrectionLoop(ctx) {
     if (resolved) {
       ready.push(resolved.entry);
       attemptsLog.push({ intent, attempts: attempt, status: 'ready', level: resolved.level, detail: resolved.detail, history });
-      log(`✓ '${intent}' verificada en ${attempt} intento(s) [${resolved.level === 'effect' ? 'efecto real' : 'compilación'}].`);
+      log(`✓ '${intent}' verified in ${attempt} attempt(s) [${resolved.level === 'effect' ? 'real effect' : 'compilation'}].`);
     } else {
       dropped.push({ ...action, intent, reason: lastError, attempts: attempt, handler: action.handler || intent, label: action.label || intent, manifestParams: Object.entries(action.parameters || {}).map(([name, spec]) => ({ name, required: spec && spec.required === true })) });
       attemptsLog.push({ intent, attempts: attempt, status: 'dropped', error: lastError, history });
-      log(`✗ '${intent}' no se pudo cablear tras ${attempt} intento(s): ${lastError.slice(0, 140)}`);
+      log(`✗ '${intent}' could not be wired after ${attempt} attempt(s): ${lastError.slice(0, 140)}`);
     }
   }
 
@@ -1518,31 +1517,31 @@ async function wireHandlers(appRoot, opts = {}) {
   const loopEnabled = typeof corrector === 'function' && runTest && testRunner;
   if (!plan.auto.length && !loopEnabled) {
     console.error(
-      `\n${tag} · ${dim || ''}preparé el cableado de acciones, pero ninguna de las ` +
-        `${plan.manual.length} acción(es) se puede conectar con confianza.${reset || ''}`,
+      `\n${tag} · ${dim || ''}Prepared the action wiring, but none of the ` +
+        `${plan.manual.length} action(s) can be connected with confidence.${reset || ''}`,
     );
     console.error(
-      `${tag} · revisa qué hace falta y cómo hacerlo a mano en: ${docRel}`,
+      `${tag} · See what is needed and how to do it by hand in: ${docRel}`,
     );
     return { status: 'manual-only', docPath: docAbs, autoCount: 0, manualCount: plan.manual.length, plan };
   }
 
   // 3) Second, separate confirmation (after the orb's), referencing the doc.
   const touchNote = componentEdits.length
-    ? ` Se editarán ${componentEdits.length} archivo(s) TUYO(s) (con marcas reversibles).`
+    ? ` ${componentEdits.length} file(s) of YOURS will be edited (with reversible markers).`
     : '';
   const prompt =
-    `\n${tag} · El cableado de acciones necesario para que el agente ejecute funciones ` +
-    `está listo (${plan.auto.length} automática(s), ${plan.manual.length} en revisión).${touchNote}\n` +
-    `${tag} · Puedes revisar exactamente qué cambios se harán en tu código en este archivo:\n` +
+    `\n${tag} · The action wiring that lets the agent run your functions is ` +
+    `ready (${plan.auto.length} automatic, ${plan.manual.length} for review).${touchNote}\n` +
+    `${tag} · Review the exact changes that will be made to your code in:\n` +
     `         ${docRel}\n` +
-    `${tag} · ¿Aceptas aplicar estos cambios después de revisarlo? [yes/no] `;
+    `${tag} · Apply these changes after reviewing? [yes/no] `;
 
   if (!assumeYes && !process.stdin.isTTY) {
     console.error(prompt.trimEnd());
     console.error(
-      `${tag} · ${dim || ''}terminal no interactivo: no toco tu código. El documento ` +
-        `queda en ${docRel}. Re-ejecuta con --wire-yes para aplicarlo.${reset || ''}`,
+      `${tag} · ${dim || ''}Non-interactive terminal: leaving your code untouched. The document ` +
+        `is at ${docRel}. Re-run with --wire-yes to apply it.${reset || ''}`,
     );
     return { status: 'declined-noninteractive', docPath: docAbs, autoCount: plan.auto.length, manualCount: plan.manual.length, plan };
   }
@@ -1550,8 +1549,8 @@ async function wireHandlers(appRoot, opts = {}) {
   const yes = assumeYes || (await askYesNo(prompt));
   if (!yes) {
     console.error(
-      `${tag} · ${dim || ''}no modifico tu código. El documento queda en ${docRel} ` +
-        `por si quieres cablearlo a mano o re-ejecutar con --wire-yes.${reset || ''}`,
+      `${tag} · ${dim || ''}Leaving your code untouched. The document stays at ${docRel} ` +
+        `in case you want to wire it by hand or re-run with --wire-yes.${reset || ''}`,
     );
     return { status: 'declined', docPath: docAbs, autoCount: plan.auto.length, manualCount: plan.manual.length, plan };
   }
@@ -1561,7 +1560,7 @@ async function wireHandlers(appRoot, opts = {}) {
   //    (don't revert a good wiring over a pre-existing failure).
   let baseline = null;
   if (runTest && testRunner) {
-    console.error(`${tag} · ${dim || ''}comprobando el estado del build ANTES de cablear (baseline)…${reset || ''}`);
+    console.error(`${tag} · ${dim || ''}Checking the build baseline BEFORE wiring…${reset || ''}`);
     try {
       baseline = await testRunner(appRoot, { framework });
     } catch (err) {
@@ -1587,7 +1586,7 @@ async function wireHandlers(appRoot, opts = {}) {
     const droppedReview = loop.dropped.map((d) => ({
       ...d,
       confidence: 'review',
-      reason: `no se pudo cablear automáticamente tras ${d.attempts} intento(s): ${d.reason}`,
+      reason: `could not be wired automatically after ${d.attempts} attempt(s): ${d.reason}`,
     }));
     const finalPlan = {
       auto: finalAuto, review: droppedReview, manual: droppedReview,
@@ -1693,7 +1692,7 @@ async function wireHandlers(appRoot, opts = {}) {
     if (baseline && baseline.ok === false && baseline.stage !== 'skipped-no-deps') {
       return { status: 'applied-untested', ...baseResult, test: baseline, preexistingFailure: true };
     }
-    console.error(`${tag} · ${dim || ''}probando que la app sigue compilando tras el cableado…${reset || ''}`);
+    console.error(`${tag} · ${dim || ''}Checking the app still builds after wiring…${reset || ''}`);
     let test;
     try {
       test = await testRunner(appRoot, { framework });
@@ -1719,45 +1718,45 @@ function reportHandlerResult(result, colors = {}) {
     case 'applied':
     case 'applied-untested': {
       const rel = result.registryRel || result.registryFile;
-      console.error(`${tag} · ✓ cableado de handlers aplicado → ${rel} (${result.autoCount} acción(es)).`);
+      console.error(`${tag} · ✓ Handler wiring applied → ${rel} (${result.autoCount} action(s)).`);
       if (Array.isArray(result.verification) && result.verification.length) {
         const ready = result.verification.filter((v) => v.status === 'ready');
         const corrected = ready.filter((v) => v.attempts > 1).length;
         const firstTry = ready.length - corrected;
         const eff = ready.filter((v) => v.level === 'effect').length;
-        console.error(`${tag} · ${dim || ''}verificación: ${ready.length} acción(es) listas (${firstTry} a la primera, ${corrected} tras auto-corrección, ${eff} con efecto real comprobado).${reset || ''}`);
+        console.error(`${tag} · ${dim || ''}Verification: ${ready.length} action(s) ready (${firstTry} on first try, ${corrected} after auto-correction, ${eff} with real effect confirmed).${reset || ''}`);
       }
       if (result.editedFiles && result.editedFiles.length) {
-        console.error(`${tag} · ${dim || ''}puentes añadidos (reversibles) en: ${result.editedFiles.join(', ')}.${reset || ''}`);
+        console.error(`${tag} · ${dim || ''}Bridges added (reversible) in: ${result.editedFiles.join(', ')}.${reset || ''}`);
       }
       if (Array.isArray(result.dropped) && result.dropped.length) {
-        console.error(`${tag} · ${dim || ''}${result.dropped.length} acción(es) NO se pudieron cablear tras los reintentos (revertidas, ver documento): ${result.dropped.map((d) => d.intent).join(', ')}.${reset || ''}`);
+        console.error(`${tag} · ${dim || ''}${result.dropped.length} action(s) could NOT be wired after retries (reverted, see the document): ${result.dropped.map((d) => d.intent).join(', ')}.${reset || ''}`);
       } else if (result.manualCount) {
-        console.error(`${tag} · ${dim || ''}${result.manualCount} acción(es) quedaron para revisión (ver el documento).${reset || ''}`);
+        console.error(`${tag} · ${dim || ''}${result.manualCount} action(s) left for review (see the document).${reset || ''}`);
       }
       if (result.test && result.test.ok) {
-        console.error(`${tag} · ✓ test post-cableado OK (${result.test.stage}).`);
+        console.error(`${tag} · ✓ Post-wiring build check OK (${result.test.stage}).`);
       } else if (result.preexistingFailure) {
-        console.error(`${tag} · ${dim || ''}aviso: tu app YA no compilaba ANTES del cableado (${result.test && result.test.stage}); no es por Fiodos, así que conservo el cableado pero no puedo verificarlo por build.${reset || ''}`);
+        console.error(`${tag} · ${dim || ''}Note: your app was ALREADY not building BEFORE wiring (${result.test && result.test.stage}); not caused by Fiodos, so the wiring is kept but cannot be build-verified.${reset || ''}`);
       } else if (result.status === 'applied-untested') {
-        console.error(`${tag} · ${dim || ''}aviso: no pude verificar el build (${result.test && result.test.stage}); revísalo.${reset || ''}`);
+        console.error(`${tag} · ${dim || ''}Note: could not verify the build (${result.test && result.test.stage}); please check it.${reset || ''}`);
       }
-      console.error(`${tag} · ${dim || ''}actívalo pasando registries={fyodosGeneratedRegistries} a <FiodosAgent/> (snippet en el documento).${reset || ''}`);
+      console.error(`${tag} · ${dim || ''}Enable it by passing registries={fyodosGeneratedRegistries} to <FiodosAgent/> (snippet in the document).${reset || ''}`);
       break;
     }
     case 'reverted':
-      console.error(`${tag} · ✗ el test post-cableado falló (${result.test && result.test.stage}); REVERTÍ todos los cambios para no dejar tu app rota.`);
-      console.error(`${tag} · ${dim || ''}detalle en el documento; nada quedó modificado en tu código.${reset || ''}`);
+      console.error(`${tag} · ✗ Post-wiring build check failed (${result.test && result.test.stage}) — reverted all changes, your app is untouched.`);
+      console.error(`${tag} · ${dim || ''}Details in the document; nothing was modified in your code.${reset || ''}`);
       break;
     case 'manual-only':
-      console.error(`${tag} · ${dim || ''}cableado documentado; aplícalo a mano siguiendo ${result.docPath}.${reset || ''}`);
+      console.error(`${tag} · ${dim || ''}Wiring documented; apply it by hand following ${result.docPath}.${reset || ''}`);
       break;
     case 'declined':
     case 'declined-noninteractive':
       // already reported inline
       break;
     case 'failed':
-      console.error(`${tag} · ✗ no se pudo escribir el registro de handlers: ${result.error && result.error.message}`);
+      console.error(`${tag} · ✗ Could not write the handler registry: ${result.error && result.error.message}`);
       break;
     case 'no-actions':
     case 'skipped':

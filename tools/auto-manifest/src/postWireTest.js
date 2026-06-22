@@ -61,13 +61,13 @@ async function runPostWireTest(appRoot, opts = {}) {
       ok: true,
       stage: 'skipped-no-deps',
       command: '(none)',
-      output: 'node_modules ausente: no se pudo ejecutar el build (instala dependencias para verificarlo).',
+      output: 'node_modules missing: could not run the build (install dependencies to verify it).',
     };
   }
   const pkg = readPkg(appRoot);
   const chosen = chooseCommand(appRoot, pkg);
   if (!chosen) {
-    return { ok: true, stage: 'skipped-no-deps', command: '(none)', output: 'no hay script de build/typecheck.' };
+    return { ok: true, stage: 'skipped-no-deps', command: '(none)', output: 'no build/typecheck script.' };
   }
 
   const res = spawnSync('npm', chosen.args, {
@@ -79,7 +79,7 @@ async function runPostWireTest(appRoot, opts = {}) {
   });
 
   if (res.error && res.error.code === 'ETIMEDOUT') {
-    return { ok: false, stage: 'timeout', command: chosen.label, output: `build excedió ${Math.round(timeoutMs / 1000)}s` };
+    return { ok: false, stage: 'timeout', command: chosen.label, output: `build exceeded ${Math.round(timeoutMs / 1000)}s` };
   }
   if (res.error) {
     return { ok: false, stage: 'error', command: chosen.label, output: String(res.error.message || res.error) };

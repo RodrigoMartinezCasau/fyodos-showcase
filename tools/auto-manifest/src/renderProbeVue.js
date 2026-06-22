@@ -17,7 +17,7 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 
-const { decide, installDom, captureSnapshot, short, loadEsbuild, loadJsdom, reqFrom, emptyAssetsPlugin } = require('./renderProbe');
+const { decide, installDom, captureSnapshot, short, loadEsbuild, loadJsdom, reqFrom, emptyAssetsPlugin, captureConsole } = require('./renderProbe');
 
 function vuePlugin(compilerSfc) {
   return {
@@ -52,7 +52,7 @@ async function probeVueEffect(appRoot, entry, ctx) {
   const compilerSfc = reqFrom(appRoot, '@vue/compiler-sfc');
   if (!esbuild || !jsdomMod || !compilerSfc) {
     const miss = !esbuild ? 'esbuild' : !jsdomMod ? 'jsdom' : '@vue/compiler-sfc';
-    return { status: 'unverifiable', detail: `no se pudo montar el render headless de Vue (${miss} no disponible); cableado aplicado, efecto real no verificable automáticamente — probar a mano` };
+    return { status: 'unverifiable', detail: `could not set up the Vue headless render (${miss} not available); wiring applied, real effect not automatically verifiable — test by hand` };
   }
   const fyodosDirAbs = path.join(appRoot, ctx.fyodosDirRel);
   const componentAbs = path.join(appRoot, entry.bridge.file);
@@ -66,6 +66,7 @@ async function probeVueEffect(appRoot, entry, ctx) {
     `export const probe = { createApp, nextTick, Component, registry: fyodosGeneratedRegistries };\n`;
 
   let restore = () => {};
+  let cap = { restore() {} };
   try {
     fs.writeFileSync(harnessAbs, harness);
     await esbuild.build({
@@ -86,11 +87,13 @@ async function probeVueEffect(appRoot, entry, ctx) {
       absWorkingDir: fyodosDirAbs,
     });
 
+    // Silence Vue/jsdom render noise from here through unmount.
+    cap = captureConsole();
     restore = installDom(jsdomMod, { storageKeys: ctx.storageKeys, kind: ctx.kind });
     delete require.cache[outAbs];
     const mod = require(outAbs);
     const { createApp, nextTick, Component, registry } = mod.probe;
-    if (!Component) return { status: 'unverifiable', detail: `'${entry.bridge.file}' no exporta un componente Vue montable — efecto real no verificable a mano` };
+    if (!Component) return { status: 'unverifiable', detail: `'${entry.bridge.file}' does not export a mountable Vue component — real effect not verifiable, test by hand` };
 
     const container = document.createElement('div');
     document.body.appendChild(container);
@@ -102,31 +105,32 @@ async function probeVueEffect(appRoot, entry, ctx) {
       await nextTick();
     } catch (err) {
       try { app && app.unmount(); } catch {}
-      return { status: 'unverifiable', detail: `el componente Vue no se pudo montar en aislamiento (${short(err)}); efecto real no verificable automáticamente — probar a mano` };
+      return { status: 'unverifiable', detail: `the Vue component could not be mounted in isolation (${short(err)}); real effect not automatically verifiable — test by hand` };
     }
 
     const beforeHTML = captureSnapshot(container);
     const beforeText = container.textContent || '';
     const handler = registry.handlers[entry.handler];
-    if (typeof handler !== 'function') { try { app.unmount(); } catch {} return { status: 'fail', detail: `el registro no expone el handler '${entry.handler}'` }; }
+    if (typeof handler !== 'function') { try { app.unmount(); } catch {} return { status: 'fail', detail: `the registry does not expose the handler '${entry.handler}'` }; }
 
     if (ctx.sensitive) {
       try { app.unmount(); } catch {}
-      return { status: 'unverifiable', detail: 'acción con confirmación: no se dispara su efecto en el render de prueba (seguridad); cableado verificado hasta el punto de confirmación' };
+      return { status: 'unverifiable', detail: 'confirmation action: its effect is not fired in the test render (security); wiring verified up to the confirmation point' };
     }
 
     let invokeErr = null;
     try { await handler(ctx.params); } catch (e) { invokeErr = e; }
     await nextTick();
-    if (invokeErr) { try { app.unmount(); } catch {} return { status: 'fail', detail: `al invocar el handler la app real lanzó: ${short(invokeErr)}` }; }
+    if (invokeErr) { try { app.unmount(); } catch {} return { status: 'fail', detail: `invoking the handler, the real app threw: ${short(invokeErr)}` }; }
 
     const afterHTML = captureSnapshot(container);
     const afterText = container.textContent || '';
     try { app.unmount(); } catch {}
     return decide(ctx.kind, { beforeHTML, beforeText, afterHTML, afterText });
   } catch (err) {
-    return { status: 'unverifiable', detail: `no se pudo preparar el render de prueba de Vue (${short(err)}); efecto real no verificable automáticamente — probar a mano` };
+    return { status: 'unverifiable', detail: `could not prepare the Vue test render (${short(err)}); real effect not automatically verifiable — test by hand` };
   } finally {
+    try { cap.restore(); } catch {}
     try { fs.existsSync(harnessAbs) && fs.rmSync(harnessAbs); } catch {}
     try { fs.existsSync(outAbs) && fs.rmSync(outAbs); } catch {}
     try { restore(); } catch {}
