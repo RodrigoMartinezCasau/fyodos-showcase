@@ -396,6 +396,7 @@ async function main() {
         colors: fyodosTermColors(),
         assumeYes,
         noWire,
+        runTest: !process.argv.includes('--no-wire-test'),
       });
       reportWireResult(result, fyodosTermColors());
     }

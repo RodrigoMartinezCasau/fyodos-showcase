@@ -206,7 +206,7 @@ function printMountPreview(plan, colors) {
 }
 
 async function wireWebOrb(appRoot, opts = {}) {
-  const { colors = {}, assumeYes = false, noWire = false } = opts;
+  const { colors = {}, assumeYes = false, noWire = false, runTest = true } = opts;
   if (noWire) return { status: 'skipped' };
 
   const framework = detectFramework(appRoot);
@@ -232,20 +232,53 @@ async function wireWebOrb(appRoot, opts = {}) {
     return { status: 'declined', file: plan.rel };
   }
 
+  const build = async () => {
+    try {
+      return await runPostWireTest(appRoot, { timeoutMs: 180000 });
+    } catch (e) {
+      return { ok: false, stage: 'runner', command: '(runner)', output: String((e && e.message) || e) };
+    }
+  };
+
   const backups = backupFiles(plan.files);
   try {
     applyMount(plan);
     if (!verifyMounted(plan)) {
-      throw new Error('post-edit verification failed — FiodosAgent not found in edited files');
-    }
-    const test = await runPostWireTest(appRoot, { timeoutMs: 180000 });
-    if (!test.ok && test.stage !== 'skipped-no-deps') {
       revertFiles(backups);
-      printSnippet(target, framework, colors, appRoot, `build/typecheck failed after mount — reverted (${test.command})`);
-      return { status: 'reverted', file: plan.rel, test, reason: test.output };
+      printSnippet(target, framework, colors, appRoot, 'post-edit verification failed — FiodosAgent not found in edited files');
+      return { status: 'failed', file: plan.rel };
     }
+
+    // The orb is a single, trivial component mount — it must APPEAR. We therefore
+    // only revert when WE are demonstrably the cause: the app built fine on its
+    // own but breaks once the orb is mounted (e.g. the SDK package isn't installed
+    // yet). A pre-existing build failure, a timeout, or a missing toolchain must
+    // NOT make the orb vanish — that was the silent "orb never shows up" bug.
+    // Fast path: one build. Only when it fails do we spend a second build (on the
+    // reverted original) to tell "we broke it" from "it was already broken".
+    if (runTest) {
+      const test = await build();
+      if (test.ok || test.stage === 'skipped-no-deps') {
+        writeConsentDoc(appRoot, plan);
+        return { status: 'added', file: plan.rel, test };
+      }
+      // Build failed with the orb mounted — was the app building WITHOUT it?
+      revertFiles(backups);
+      const baseline = await build();
+      if (baseline.ok) {
+        // Built before, fails now → the mount is the regression. Keep it reverted.
+        printSnippet(target, framework, colors, appRoot, `mount caused a build regression — reverted (${test.command})`);
+        return { status: 'reverted', file: plan.rel, test, reason: test.output };
+      }
+      // It was already not building (or not verifiable) before us → keep the orb.
+      applyMount(plan);
+      verifyMounted(plan);
+      writeConsentDoc(appRoot, plan);
+      return { status: 'added', file: plan.rel, test, preexistingFailure: true };
+    }
+
     writeConsentDoc(appRoot, plan);
-    return { status: 'added', file: plan.rel, test };
+    return { status: 'added', file: plan.rel };
   } catch (err) {
     revertFiles(backups);
     printSnippet(target, framework, colors, appRoot, err.message || String(err));
@@ -259,7 +292,9 @@ function reportWireResult(result, colors = {}) {
   switch (result.status) {
     case 'added':
       console.error(`${tag} · ✓ orb added to ${result.file}. Start your web app (e.g. \`npm run dev\`) to see it.`);
-      if (result.test && result.test.stage === 'skipped-no-deps') {
+      if (result.preexistingFailure) {
+        console.error(`${tag} · ${dim || ''}Note: your app was ALREADY not building before the orb was added (${result.test && result.test.stage}); not caused by Fiodos — the orb is kept so it appears once your build is fixed.${reset || ''}`);
+      } else if (result.test && result.test.stage === 'skipped-no-deps') {
         console.error(`${tag} · ${dim || ''}build not verified (no node_modules) — run npm install && npm run build locally.${reset || ''}`);
       } else if (result.test && result.test.ok) {
         console.error(`${tag} · ✓ ${result.test.command} passed after mount.`);

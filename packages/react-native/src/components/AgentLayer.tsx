@@ -56,6 +56,12 @@ export function AgentLayer({
   const { config } = useFiodosRuntime();
   const { width, height } = useWindowDimensions();
   const [keyboardOpen, setKeyboardOpen] = useState(false);
+  // Dashboard master switch (`orbEnabled`), polled from GET /v1/client/config.
+  // Defaults to true (visible) while loading / on error / when nothing is
+  // published, so the orb is never hidden by accident. When the developer turns
+  // it off in the dashboard, the orb disappears here on the next poll — no host
+  // code change — and reappears when switched back on.
+  const remoteEnabled = useRemoteOrbEnabled();
 
   // When the dashboard position is provided, the SDK self-resolves precise insets
   // (normalized → pixels for this exact screen) so "where the developer placed it"
@@ -94,7 +100,7 @@ export function AgentLayer({
   }, [hideWhenKeyboardOpen]);
 
   const effectiveVisible =
-    visible && (!hideWhenKeyboardOpen || !keyboardOpen || textPanelOpen);
+    visible && remoteEnabled && (!hideWhenKeyboardOpen || !keyboardOpen || textPanelOpen);
 
   useEffect(() => {
     if (!effectiveVisible || !warmUpOnVisible) return;
@@ -132,3 +138,38 @@ const styles = StyleSheet.create({
     zIndex: 120,
   },
 });
+
+/**
+ * Polls the dashboard-published config (GET /v1/client/config) for the master
+ * visibility switch `orbEnabled`, the SAME channel used for orb appearance on
+ * web/Flutter/Android. Returns false ONLY when the developer explicitly turned
+ * the orb off; true while loading, on error, or when nothing is published.
+ */
+function useRemoteOrbEnabled(pollMs = 12_000): boolean {
+  const { config } = useFiodosRuntime();
+  const [enabled, setEnabled] = useState(true);
+
+  useEffect(() => {
+    const fetcher = config.backend.fetchPublishedConfig;
+    if (!fetcher) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const res = await fetcher.call(config.backend);
+        if (!cancelled) {
+          setEnabled(res.published ? res.published.orbEnabled !== false : true);
+        }
+      } catch {
+        if (!cancelled) setEnabled(true);
+      }
+    };
+    void load();
+    const id = setInterval(() => void load(), pollMs);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [config.backend, pollMs]);
+
+  return enabled;
+}
