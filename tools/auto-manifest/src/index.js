@@ -96,6 +96,7 @@ const { verifyManifest } = require('./verify');
 const { wireWebOrb, reportWireResult } = require('./wireWeb');
 const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
 const { offerWriteEnv, printEnvManualReminder } = require('./writeEnv');
+const { scoreSurface } = require('./scoreSurface');
 
 function arg(flag, fallback) {
   const i = process.argv.indexOf(flag);
@@ -161,24 +162,49 @@ async function withSpinner(label, work) {
   const orbFrames = ['◴', '◷', '◶', '◵'];
   const brailleFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   const { blue, cyan, dim, reset } = fyodosTermColors();
+  let currentLabel = label;
   let frame = 0;
+  let id = null;
   const start = Date.now();
-  const tick = () => {
+
+  const render = () => {
     const sec = Math.floor((Date.now() - start) / 1000);
     const orb = orbFrames[frame % orbFrames.length];
     const tail = brailleFrames[frame % brailleFrames.length];
     const line =
-      `${cyan}${orb}${reset} ${blue}Fiodos${reset} ${dim}${tail}${reset}  ${label}… ${dim}${sec}s${reset}`;
+      `${cyan}${orb}${reset} ${blue}Fiodos${reset} ${dim}${tail}${reset}  ${currentLabel}… ${dim}${sec}s${reset}`;
     process.stderr.write(`\r\x1b[K${line}`);
     frame += 1;
   };
-  tick();
-  const id = setInterval(tick, 140);
+
+  const clearLine = () => process.stderr.write('\r\x1b[K');
+
+  const startSpinner = () => {
+    render();
+    id = setInterval(render, 140);
+  };
+
+  const pause = () => {
+    if (id) {
+      clearInterval(id);
+      id = null;
+      clearLine();
+    }
+  };
+
+  const resume = () => {
+    if (!id) startSpinner();
+  };
+
+  const setLabel = (next) => {
+    currentLabel = next;
+  };
+
+  startSpinner();
   try {
-    return await work();
+    return await work({ setLabel, pause, resume });
   } finally {
-    clearInterval(id);
-    process.stderr.write('\r\x1b[K');
+    pause();
   }
 }
 
@@ -297,10 +323,9 @@ async function main() {
     }
 
     // ── 3. AI reads the code ────────────────────────────────────────────────
-    logUser('Analyzing your project — may take 1–2 min');
     const { parsed, usage, costUSD, elapsedMs, promptChars, model: usedModel, analysisToken: token } =
       await withSpinner(
-        'Analyzing your project with AI',
+        'Analyzing your project — may take 1–2 min',
         () => analyzeWithAI({
           appMeta, files: included, omitted, staticRoutes: routes, model, platform,
           useProxy, apiKey, apiUrl,
@@ -355,6 +380,34 @@ async function main() {
   // the rest 'allow'. Closed-by-default still applies regardless of this hint.
   annotateExternalAgentRecommendations(manifest);
 
+  // ── 4c. Product-surface scoring (conservative, default-OFF for clear noise).
+  // Existence is already proven; this asks the SEPARATE question "is this part
+  // of the live product surface the orb should expose by default?". Routes/
+  // actions whose screens are UNREACHABLE by navigation from the deployed entry
+  // (orphans / dead code / a secondary app mirrored in the repo) AND not behind
+  // auth are annotated low-confidence and published DISABLED-by-default — never
+  // dropped (no new hallucination risk) and never empties an auth-gated app.
+  // Anything uncertain stays ACTIVE (fail towards including). The on/off lives
+  // in the workspace's disabled-intent sets (reused infra); the developer flips
+  // it in the dashboard. Web-first; other platforms are not scored yet.
+  let surface = { disabledRouteIntents: [], disabledActionIntents: [], stats: { applied: false } };
+  try {
+    surface = scoreSurface({ manifest, evidence, included, analysisRoot, platform });
+    for (const r of manifest.routes) {
+      const s = surface.routes && surface.routes[r.intent];
+      if (s) { r.surfaceConfidence = s.confidence; r.surfaceReason = s.reason; }
+    }
+    for (const a of manifest.actions) {
+      const s = surface.actions && surface.actions[a.intent];
+      if (s) { a.surfaceConfidence = s.confidence; a.surfaceReason = s.reason; }
+    }
+    logDev(`[surface] ${JSON.stringify(surface.stats)}`);
+  } catch (e) {
+    // Scoring is best-effort: a failure must never block publishing. Fail OPEN
+    // (everything stays active) — consistent with the "fail towards including".
+    logDev(`[surface] skipped: ${e.message}`);
+  }
+
   // ── 5. Final gate: the real @fiodos/core validator ─────────────────────────
   // Loaded as a package dependency (not a monorepo path) so it resolves when
   // the CLI is installed from npm.
@@ -373,14 +426,34 @@ async function main() {
   logDev(`[done] manifest: ${manifest.routes.length} routes, ${manifest.actions.length} actions`);
   logDev(`[done] output → ${outDir}`);
 
-  if (process.argv.includes('--publish')) {
-    loadAppEnv(analysisRoot);
-    await publishManifest(manifest, {
-      ...analysisMeta,
-      generatedAt: new Date().toISOString(),
-      routesIncluded: manifest.routes.length,
-      actionsIncluded: manifest.actions.length,
-    }, analysisToken);
+  const publishing = process.argv.includes('--publish');
+  const publishMeta = {
+    ...analysisMeta,
+    generatedAt: new Date().toISOString(),
+    routesIncluded: manifest.routes.length,
+    actionsIncluded: manifest.actions.length,
+    // Conservative default-OFF set for low-confidence (orphan) routes/actions.
+    // The backend applies these to the workspace's disabled-intent sets ONLY on
+    // the first publish / when the developer has not customized scope (no
+    // clobbering manual choices). Empty when scoring did not apply.
+    scopeDefaults: {
+      disabledRouteIntents: surface.disabledRouteIntents || [],
+      disabledActionIntents: surface.disabledActionIntents || [],
+    },
+  };
+
+  // Informative, non-blocking summary (the dashboard is where scope is managed).
+  const offR = (surface.disabledRouteIntents || []).length;
+  const offA = (surface.disabledActionIntents || []).length;
+  if (surface.stats && surface.stats.applied && (offR || offA)) {
+    const onR = manifest.routes.length - offR;
+    const onA = manifest.actions.length - offA;
+    logUser(`Main surface (active): ${onR} route(s), ${onA} action(s)`);
+    logUser(
+      `Detected but off by default: ${offR} route(s), ${offA} action(s) — ` +
+      `not reachable from your app's home (likely internal/secondary screens)`,
+    );
+    logUser('Review or re-enable any of them in your dashboard → Agent configuration');
   }
 
   // ── 6. Web: offer to wire the orb into the app (consent-based) ─────────────
@@ -392,38 +465,7 @@ async function main() {
     const assumeYes = process.argv.includes('--yes') || process.argv.includes('--wire-yes');
     const noWire = process.argv.includes('--no-wire');
     let envWriteResult = null;
-
-    // --no-orb-wire skips ONLY the orb mount (useful to test handler wiring in
-    // isolation without modifying the app's entrypoint / package.json).
-    if (!process.argv.includes('--no-orb-wire')) {
-      const result = await wireWebOrb(analysisRoot, {
-        apiUrl,
-        colors: fyodosTermColors(),
-        assumeYes,
-        noWire,
-        runTest: !process.argv.includes('--no-wire-test'),
-      });
-      reportWireResult(result, fyodosTermColors(), { quiet: !isVerbose() });
-      // Tell the dashboard the orb is wired — no need to boot localhost for the
-      // onboarding checker to complete.
-      if (
-        process.argv.includes('--publish') &&
-        apiKey &&
-        (result.status === 'added' || result.status === 'already')
-      ) {
-        await postOrbWired({ apiKey, apiUrl, file: result.file || '' });
-      }
-    }
-
-    // ── 7. Web: SECOND consent — connect detected actions to real app functions.
-    // The orb is mounted but the agent cannot DO anything until each manifest
-    // action is bridged to the function that performs it. We prepare that wiring,
-    // write a readable document into the project's Fiodos folder, and ask a
-    // separate, informed [yes/no] before touching anything. Security is enforced
-    // upstream by the engine, so generated handlers can never skip a confirmation.
     const { runPostWireTest } = require('./postWireTest');
-    // Corrector: when a wired action fails install-time verification, re-prompt the
-    // AI with the concrete error to fix THAT action. Disable with --no-self-correct.
     const selfCorrect = !process.argv.includes('--no-self-correct');
     const corrector = selfCorrect
       ? async (args) => {
@@ -431,7 +473,7 @@ async function main() {
           return fixed;
         }
       : null;
-    const handlerResult = await wireHandlers(analysisRoot, {
+    const handlerOpts = {
       manifest,
       evidence,
       wiring,
@@ -446,13 +488,54 @@ async function main() {
       corrector,
       files: included,
       maxAttempts: Number(process.env.FYODOS_WIRE_MAX_ATTEMPTS || 3),
-    });
-    reportHandlerResult(handlerResult, fyodosTermColors(), { quiet: !isVerbose() });
+    };
+
+    const runWebWire = async ({ setLabel, pause, resume }) => {
+      // --no-orb-wire skips ONLY the orb mount (useful to test handler wiring in
+      // isolation without modifying the app's entrypoint / package.json).
+      if (!process.argv.includes('--no-orb-wire')) {
+        setLabel('Mounting the orb in your app');
+        if (!assumeYes) pause();
+        const result = await wireWebOrb(analysisRoot, {
+          apiUrl,
+          colors: fyodosTermColors(),
+          assumeYes,
+          noWire,
+          runTest: !process.argv.includes('--no-wire-test'),
+        });
+        if (!assumeYes) resume();
+        reportWireResult(result, fyodosTermColors(), { quiet: !isVerbose() });
+        if (
+          publishing &&
+          apiKey &&
+          (result.status === 'added' || result.status === 'already')
+        ) {
+          await postOrbWired({ apiKey, apiUrl, file: result.file || '' });
+        }
+      }
+
+      setLabel('Wiring actions to your app');
+      if (!assumeYes) pause();
+      const handlerResult = await wireHandlers(analysisRoot, handlerOpts);
+      if (!assumeYes) resume();
+      reportHandlerResult(handlerResult, fyodosTermColors(), { quiet: !isVerbose() });
+    };
+
+    if (publishing) {
+      loadAppEnv(analysisRoot);
+      await withSpinner('Publishing to your project', async (spinner) => {
+        await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true });
+        await runWebWire(spinner);
+      });
+      logUser('Published to your project');
+    } else {
+      await withSpinner('Mounting the orb in your app', runWebWire);
+    }
 
     // ── 8. API key in environment (LAST step — always asks; independent of --yes)
     // --yes only skips orb/handler prompts. --write-env-yes skips this one (CI).
     // If the developer declines, we show a copy-paste reminder here at the end.
-    if (process.argv.includes('--publish') && !process.argv.includes('--no-write-env')) {
+    if (publishing && !process.argv.includes('--no-write-env')) {
       try {
         envWriteResult = await offerWriteEnv({
           appRoot: analysisRoot,
@@ -473,6 +556,12 @@ async function main() {
         logDev(`[write-env] skipped: ${e.message}`);
       }
     }
+  } else if (publishing) {
+    loadAppEnv(analysisRoot);
+    await withSpinner('Publishing to your project', () =>
+      publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true }),
+    );
+    logUser('Published to your project');
   }
 }
 
@@ -693,7 +782,7 @@ function printQuotaBlocked(quota) {
   );
 }
 
-async function publishManifest(manifest, meta, analysisToken = null) {
+async function publishManifest(manifest, meta, analysisToken = null, opts = {}) {
   const { apiKey, apiUrl } = resolveApiTarget();
   if (!apiKey) {
     console.error(
@@ -726,7 +815,9 @@ async function publishManifest(manifest, meta, analysisToken = null) {
     process.exit(1);
   }
   const body = await res.json();
-  logUser('Published to your project');
+  if (!opts.skipSuccessLog) {
+    logUser('Published to your project');
+  }
   logDev(`[publish] OK — ${body.routes} routes, ${body.actions} actions received at ${body.receivedAt}`);
 
   // Self-check: confirm the orb will find this manifest (silent unless --verbose).

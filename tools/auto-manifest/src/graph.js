@@ -157,4 +157,4 @@ function mapScreens(routes, graph) {
   return { screens, stores };
 }
 
-module.exports = { buildGraph, mapScreens };
+module.exports = { buildGraph, mapScreens, closure };

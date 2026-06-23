@@ -73,7 +73,41 @@ function extractFromFile(filePath, appRoot) {
     imports: [],
     linkingCalls: [],
     defaultExportName: null,
+    // Internal navigation destinations referenced in this file (route strings):
+    // <Link href|to>, <a href>, router.push/replace, navigate(), redirect().
+    // Used by the surface-scoring layer to build the navigation reachability
+    // graph (which screens are reachable from the deployed entry). External
+    // links (http, mailto, tel, #anchors) are excluded.
+    navTargets: [],
+    // True when this file DEFINES the app's route table (react-router <Route>,
+    // createBrowserRouter, Angular RouterModule.forRoot/provideRouter, Vue
+    // createRouter). Such a file's links act as GLOBAL navigation (available
+    // from any screen), unlike a per-section sidebar.
+    routeHost: false,
+    // Soft signals that this file sits behind authentication (used ONLY to keep
+    // an orphaned cluster ACTIVE — never to disable). Identifiers/paths that
+    // commonly indicate an auth gate.
+    authSignals: [],
   };
+
+  // Collect an internal route string if it looks like an in-app path.
+  function pushNavTarget(value) {
+    if (!value || typeof value !== 'string') return;
+    const v = value.trim();
+    if (!v) return;
+    // Only same-app paths. Drop external/protocol/anchor/empty targets.
+    if (!v.startsWith('/')) return;
+    if (v.startsWith('//')) return; // protocol-relative external
+    out.navTargets.push(v);
+  }
+
+  // GATING constructs only (a redirect/block when unauthenticated) — NOT mere
+  // session reading (useUser/useSession): reading the user does not gate access,
+  // and counting it would wrongly protect public-but-orphaned pages from being
+  // disabled. Used solely to KEEP an orphaned cluster active (SaaS guard).
+  const AUTH_HINT_RE =
+    /(requireAuth|withAuth|ProtectedRoute|RequireAuth|AuthGuard|authGuard|ensureAuth|canActivate|redirectToLogin|RedirectToSignIn|SignedOut)/;
+  const AUTH_PATH_RE = /\/(login|signin|sign-in|sign_in)\b/i;
 
   function jsxAttr(attrs, names) {
     for (const attr of attrs.properties) {
@@ -118,6 +152,10 @@ function extractFromFile(filePath, appRoot) {
         }
       }
       out.imports.push({ from: node.moduleSpecifier.text, names });
+      for (const n of names) {
+        if (AUTH_HINT_RE.test(n)) out.authSignals.push(n);
+      }
+      if (AUTH_PATH_RE.test(node.moduleSpecifier.text)) out.authSignals.push(node.moduleSpecifier.text);
     }
 
     // default export name (screen component)
@@ -157,6 +195,34 @@ function extractFromFile(filePath, appRoot) {
           }
         }
         out.navCalls.push({ verb, target, file: rel });
+        if (verb !== 'back' && verb !== 'goBack') pushNavTarget(target);
+      }
+
+      // Next.js / framework redirects: redirect('/x'), permanentRedirect('/x').
+      if (/^(redirect|permanentRedirect)$/.test(exprText) && node.arguments[0]) {
+        pushNavTarget(literalText(node.arguments[0]));
+      }
+      // react-router imperative: navigate('/x') / history.push('/x').
+      if (/(^|\.)navigate$/.test(exprText) && node.arguments[0]) {
+        pushNavTarget(literalText(node.arguments[0]));
+      }
+      // Bare push('/x') from a destructured useRouter()/useNavigate() hook.
+      if (exprText === 'push' && node.arguments[0]) {
+        pushNavTarget(literalText(node.arguments[0]));
+      }
+      // Route-table definitions → this file's links are GLOBAL navigation.
+      if (/^(createBrowserRouter|createHashRouter|createMemoryRouter|createRouter)$/.test(exprText)) {
+        out.routeHost = true;
+      }
+      if (/\.(forRoot|forChild)$/.test(exprText) || /^provideRouter$/.test(exprText)) {
+        out.routeHost = true;
+      }
+
+      // Auth gate by call: redirect('/login') etc. is captured above as a nav
+      // target; also flag it as an auth signal when the path looks like a gate.
+      if (/^(redirect|replace|push)$/.test(exprText.split('.').pop() || '') && node.arguments[0]) {
+        const t = literalText(node.arguments[0]);
+        if (t && AUTH_PATH_RE.test(t)) out.authSignals.push(t);
       }
 
       // Alert.alert(title, message?, buttons?)
@@ -217,6 +283,12 @@ function extractFromFile(filePath, appRoot) {
     if (ts.isJsxSelfClosingElement(node) || ts.isJsxOpeningElement(node)) {
       const tag = node.tagName.getText();
       const attrs = node.attributes;
+      // Any element carrying an internal route via href/to (next/link <Link>,
+      // <a href>, react-router <Link to>/<Navigate to>/<Redirect to>).
+      const linkTarget = jsxAttr(attrs, ['href', 'to']);
+      if (linkTarget) pushNavTarget(linkTarget);
+      // react-router <Route> table → global navigation host.
+      if (tag === 'Route') out.routeHost = true;
       if (/Button/i.test(tag) || tag === 'TouchableOpacity' || tag === 'Pressable') {
         const title = jsxAttr(attrs, ['title', 'label', 'accessibilityLabel']);
         const handler = jsxAttrHandlerName(attrs, ['onPress']);
