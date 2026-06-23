@@ -123,8 +123,8 @@ async function main() {
 
   // The document must record the verification outcome per action.
   const doc = fs.readFileSync(result.docPath, 'utf8');
-  assert.ok(/Verificación automática/.test(doc), 'doc explains the verify+retry loop');
-  assert.ok(/frob/.test(doc) && /no se pudo/.test(doc), 'doc marks frob as not auto-wired');
+  assert.ok(/Automatic verification/.test(doc), 'doc explains the verify+retry loop');
+  assert.ok(/frob/.test(doc) && /could not/.test(doc), 'doc marks frob as not auto-wired');
   console.log('  PASS — document is honest about what passed and what did not');
 
   assert.ok(correctorCalls >= 2, 'corrector was invoked for both failing actions');

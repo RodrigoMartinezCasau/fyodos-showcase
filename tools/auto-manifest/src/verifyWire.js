@@ -48,10 +48,56 @@ function normErr(line) {
 }
 
 /**
+ * Is this output line a GENUINE compile/type/syntax failure (i.e. the code is
+ * really broken), as opposed to a style violation? These mean the safety net
+ * MUST act: the action does not actually work.
+ */
+function isRealCompileError(line) {
+  const l = String(line);
+  return /error\s+TS\d+|Type error:|Cannot find (?:module|name)|is not assignable|does not exist on type|has no exported member|Module not found|SyntaxError|Unexpected (?:token|keyword|reserved word)|Expression expected|Parsing error/i.test(l);
+}
+
+/**
+ * Is this output line a pure ESLint/style complaint? These do NOT mean the code
+ * is broken — they mean it breaks the PROJECT's style rules. We neutralize those
+ * on our own generated files and fence our injected blocks, so honestly they
+ * should never reach here; when one does, we still treat it as non-broken code.
+ */
+function isLintError(line) {
+  const l = String(line);
+  if (isRealCompileError(l)) return false;
+  // Reference to a known ESLint rule namespace / a bare `no-*` rule.
+  if (/@typescript-eslint\/|react-hooks\/|jsx-a11y\/|@next\/next\/|\bimport\/[a-z-]+|\breact\/[a-z-]+|prettier\/|\bno-[a-z][a-z-]+\b/.test(l)) return true;
+  // ESLint compact format "12:5  Error  message  rule" without a TS error code.
+  if (/^\s*\d+:\d+\s+(?:error|warning)\b/i.test(l) && !/TS\d+/.test(l)) return true;
+  return false;
+}
+
+/**
+ * Split error lines into { real, lint, unknown }. Unknown lines (an "Error" we
+ * cannot confidently classify) are treated as REAL by callers — we fail safe
+ * toward "the code might be broken", never toward shipping a red build.
+ */
+function classifyErrorLines(lines) {
+  const real = [];
+  const lint = [];
+  const unknown = [];
+  for (const l of lines || []) {
+    if (isRealCompileError(l)) real.push(l);
+    else if (isLintError(l)) lint.push(l);
+    else unknown.push(l);
+  }
+  return { real, lint, unknown };
+}
+
+/**
  * Did applying THIS action introduce a NEW build problem? Compare position-
  * normalized error lines after vs. baseline. Any error that is new (not present
  * in baseline) AND references a file we touched or our generated modules is
- * attributed to this action. Returns { ok, newErrors: string[] }.
+ * attributed to this action.
+ * Returns { ok, newErrors, realErrors, lintErrors }: `ok` is false on a genuine
+ * regression; `realErrors`/`lintErrors` classify the attributed lines so callers
+ * can tell "code is broken" (revert) from "style rule tripped" (style only).
  */
 function compileRegressed(baselineOutput, afterOutput, touchedFiles) {
   const before = new Set(extractErrorLines(baselineOutput).map(normErr));
@@ -61,12 +107,19 @@ function compileRegressed(baselineOutput, afterOutput, touchedFiles) {
   const ours = fresh.filter(
     (l) => /handlers\.generated|fyodos[\\/]bridge|FYODOS/i.test(l) || touched.some((t) => t && l.includes(t)),
   );
-  if (ours.length) return { ok: false, newErrors: ours };
+  if (ours.length) {
+    const { real, lint, unknown } = classifyErrorLines(ours);
+    return { ok: false, newErrors: ours, realErrors: [...real, ...unknown], lintErrors: lint };
+  }
   // Only when the app built cleanly before (no baseline errors) do we treat any
   // unattributable fresh error as a regression. If it was already broken, an
   // unattributable error is almost certainly pre-existing → don't blame ourselves.
-  if (fresh.length && !before.size) return { ok: false, newErrors: fresh.slice(0, 8) };
-  return { ok: true, newErrors: [] };
+  if (fresh.length && !before.size) {
+    const slice = fresh.slice(0, 8);
+    const { real, lint, unknown } = classifyErrorLines(slice);
+    return { ok: false, newErrors: slice, realErrors: [...real, ...unknown], lintErrors: lint };
+  }
+  return { ok: true, newErrors: [], realErrors: [], lintErrors: [] };
 }
 
 // ── Effect probe (in-process, real instance) ─────────────────────────────────────
@@ -212,4 +265,7 @@ async function probeEffect(appRoot, entry, opts = {}) {
   return { status: 'skipped', detail: 'module target not safely simulable in-process; verified by compilation' };
 }
 
-module.exports = { probeEffect, compileRegressed, extractErrorLines, readDexieStores };
+module.exports = {
+  probeEffect, compileRegressed, extractErrorLines, readDexieStores,
+  classifyErrorLines, isRealCompileError, isLintError,
+};

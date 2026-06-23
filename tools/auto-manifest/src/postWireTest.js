@@ -24,7 +24,56 @@
 
 const fs = require('fs');
 const path = require('path');
-const { spawnSync } = require('child_process');
+const { spawn } = require('child_process');
+
+/**
+ * Run a command WITHOUT blocking Node's event loop (unlike spawnSync). This
+ * matters for the live terminal spinner: spawnSync freezes the whole process
+ * while the build runs, so the elapsed-seconds counter appears to jump in big
+ * steps ("stuck"). With async spawn the loop stays free and the counter ticks
+ * every second. Resolves to a spawnSync-shaped result { status, stdout, stderr,
+ * error } and never rejects.
+ */
+function runAsync(cmd, args, opts = {}) {
+  return new Promise((resolve) => {
+    let child;
+    try {
+      child = spawn(cmd, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
+    } catch (error) {
+      resolve({ status: null, stdout: '', stderr: '', error });
+      return;
+    }
+    let stdout = '';
+    let stderr = '';
+    const max = opts.maxBuffer || 64 * 1024 * 1024;
+    // Bound total captured output (the way maxBuffer would) without throwing.
+    child.stdout.on('data', (c) => { if (stdout.length + stderr.length < max) stdout += c.toString(); });
+    child.stderr.on('data', (c) => { if (stdout.length + stderr.length < max) stderr += c.toString(); });
+
+    let timedOut = false;
+    let timer = null;
+    if (opts.timeout) {
+      timer = setTimeout(() => {
+        timedOut = true;
+        try { child.kill('SIGKILL'); } catch { /* ignore */ }
+      }, opts.timeout);
+    }
+    child.on('error', (error) => {
+      if (timer) clearTimeout(timer);
+      resolve({ status: null, stdout, stderr, error });
+    });
+    child.on('close', (code) => {
+      if (timer) clearTimeout(timer);
+      if (timedOut) {
+        const error = new Error('ETIMEDOUT');
+        error.code = 'ETIMEDOUT';
+        resolve({ status: null, stdout, stderr, error });
+        return;
+      }
+      resolve({ status: code, stdout, stderr, error: null });
+    });
+  });
+}
 
 function readPkg(appRoot) {
   try {
@@ -70,9 +119,8 @@ async function runPostWireTest(appRoot, opts = {}) {
     return { ok: true, stage: 'skipped-no-deps', command: '(none)', output: 'no build/typecheck script.' };
   }
 
-  const res = spawnSync('npm', chosen.args, {
+  const res = await runAsync('npm', chosen.args, {
     cwd: appRoot,
-    encoding: 'utf8',
     timeout: timeoutMs,
     env: { ...process.env, CI: '1', NODE_ENV: process.env.NODE_ENV || 'production' },
     maxBuffer: 64 * 1024 * 1024,

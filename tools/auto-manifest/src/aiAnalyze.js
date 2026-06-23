@@ -103,6 +103,15 @@ const PLATFORM_GUIDES = {
       'Web actions come in TWO kinds, BOTH first-class — detect both:\n' +
       '  (1) FUNCTION actions (kind "function"): functions wired to UI — handlers inside components, store/context actions (Zustand, Redux, React Context), or service functions. Set "handler" to that real function name exactly. INCLUDE common web product actions you might be tempted to skip: switching language/locale (e.g. setLang/setLocale/i18n.changeLanguage), toggling theme, submitting a contact/newsletter/search form. (Still skip pure micro-plumbing like opening a dropdown or controlled input onChange.)\n' +
       '  (2) LINK actions (kind "link"): the core actions of marketing/landing pages, which are NAVIGATION not function calls — download/get-the-app buttons (App Store / Google Play / direct download), "contact us" / email / phone links, social links, and in-page jumps to a section (anchor hrefs like #pricing). For these set kind "link" and navTarget to the EXACT href string in the code; do NOT set handler. A list of detected link elements on the product-surface pages is provided below — turn the meaningful ones into link actions (group obvious duplicates, e.g. several App Store buttons → one "download on the App Store").\n' +
+      'VITAL WEB SECTIONS — almost every website exposes a small set of high-value, low-risk destinations that users very commonly ask for. Before finishing, actively SCAN the code and the detected-links list for these and INCLUDE the ones that genuinely exist (each as a link action when it is a navigation/href, or a function action when it is a real handler). Do NOT invent any that are not in the code — but do not overlook them either, because these are exactly what users ask the assistant for:\n' +
+      '    • Contact / get in touch (mailto:, tel:, a /contact page or #contact anchor, a contact form)\n' +
+      '    • Help / support / FAQ / docs (a help center link, support email, /faq or /help)\n' +
+      '    • Social media profiles (links to Instagram, X/Twitter, LinkedIn, YouTube, TikTok, GitHub, etc. — one action per network)\n' +
+      '    • Download / get the app (store or direct-download links)\n' +
+      '    • Change language / locale (a language switcher link or a setLang/i18n handler)\n' +
+      '    • Legal (privacy policy, terms of service, cookies)\n' +
+      '    • Pricing / plans, and newsletter/subscribe, when present.\n' +
+      'These vital sections apply to EVERY web product, not any specific one — treat them as a standing checklist for all websites.\n' +
       'CRITICAL: the manifest is for THIS web deployment only — do NOT include routes or actions from mobile/native code that is not in the file list (even if you infer it exists elsewhere in the monorepo).',
   },
   mobile: {

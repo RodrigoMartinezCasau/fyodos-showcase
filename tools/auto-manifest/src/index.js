@@ -506,6 +506,11 @@ async function main() {
     };
 
     const runWebWire = async ({ setLabel, pause, resume }) => {
+      // Emit a report on its OWN clean line: pause the live spinner (clears its
+      // line), print, then resume. Without this, a log written while the spinner
+      // is ticking gets glued onto the spinner line ("…10sFiodos · …").
+      const report = (fn) => { pause(); fn(); resume(); };
+
       // --no-orb-wire skips ONLY the orb mount (useful to test handler wiring in
       // isolation without modifying the app's entrypoint / package.json).
       if (!process.argv.includes('--no-orb-wire')) {
@@ -519,25 +524,19 @@ async function main() {
           runTest: !process.argv.includes('--no-wire-test'),
         });
         if (!assumeYes) resume();
-        reportWireResult(result, fyodosTermColors(), { quiet: !isVerbose() });
+        report(() => reportWireResult(result, fyodosTermColors(), { quiet: !isVerbose() }));
         if (
           publishing &&
           apiKey &&
           (result.status === 'added' || result.status === 'already')
         ) {
+          // Records the install proof so the dashboard onboarding orb check can
+          // complete without booting the app. If the backend can't record it
+          // (e.g. an outdated deployment without the endpoint), keep it as a
+          // dev-only trace — it is not actionable noise for the end developer.
           const proof = await postOrbWired({ apiKey, apiUrl, file: result.file || '' });
-          // The dashboard's onboarding orb check completes on THIS install proof
-          // (no need to run the app). If the backend could not record it (e.g. an
-          // outdated deployment without the orb-wired endpoint), say so plainly so
-          // the developer knows the check will otherwise wait for a runtime ping.
           if (proof && proof.ok === false && proof.reason !== 'no-api-key') {
-            const why = proof.status === 404
-              ? 'the backend does not expose /v1/developer/orb-wired yet (update the backend deployment)'
-              : `the backend rejected the install proof (HTTP ${proof.status || '?'})`;
-            logUser(
-              `Note: the orb is wired into your app, but ${why}. ` +
-              'The dashboard install check will complete once the orb connects from your running app.',
-            );
+            logDev(`[orb-wired] install proof not recorded (status=${proof.status || proof.reason}); dashboard check will rely on a runtime ping`);
           }
         }
       }
@@ -546,7 +545,7 @@ async function main() {
       if (!assumeYes) pause();
       const handlerResult = await wireHandlers(analysisRoot, handlerOpts);
       if (!assumeYes) resume();
-      reportHandlerResult(handlerResult, fyodosTermColors(), { quiet: !isVerbose() });
+      report(() => reportHandlerResult(handlerResult, fyodosTermColors(), { quiet: !isVerbose() }));
     };
 
     if (publishing) {
