@@ -20,8 +20,30 @@
 
 const fs = require('fs');
 const path = require('path');
-// Reuse the monorepo's TypeScript — real parser, real AST.
-const ts = require(path.join(__dirname, '../../../node_modules/typescript'));
+
+// Load the TypeScript compiler (real parser, real AST). `typescript` is a
+// declared dependency of this package, so when the CLI is installed from npm
+// (or run via `npx`) it resolves from the CLI's own node_modules. The monorepo
+// path is only a dev-time fallback for the hoisted workspace install.
+const ts = loadTypeScript();
+
+function loadTypeScript() {
+  try {
+    // Installed/npx case: resolves from @fiodos/cli's node_modules.
+    return require('typescript');
+  } catch {
+    // Monorepo dev fallback: TypeScript is hoisted to the repo root.
+    try {
+      return require(path.join(__dirname, '../../../node_modules/typescript'));
+    } catch (e) {
+      throw new Error(
+        'Fiodos CLI could not load its TypeScript dependency. This usually means ' +
+        'a corrupted install — try `npm cache clean --force` and re-run, or reinstall ' +
+        `@fiodos/cli. Original error: ${e.message}`,
+      );
+    }
+  }
+}
 
 function parseFile(filePath) {
   const text = fs.readFileSync(filePath, 'utf8');
