@@ -66,7 +66,9 @@ AppManifest (all fields required unless noted):
   "actions": [{
     "intent": string (snake_case, UNIQUE across routes AND actions),
     "label": string, "category": string,
-    "handler": string (name of the REAL function in the app code that implements it),
+    "kind": "function" | "link" (OPTIONAL, default "function". Use "link" for navigation/link actions: open an external/download URL, jump to a page section, open an email/phone/social link. Web landing pages are mostly these.),
+    "handler": string (for kind "function": name of the REAL function in the app code that implements it. For kind "link": OMIT or empty — link actions have no handler.),
+    "navTarget": string (REQUIRED for kind "link": the EXACT href/URL/anchor string as written in the code — e.g. "https://apps.apple.com/...", "#contact", "mailto:hi@x.com". Must appear verbatim in the evidence file.),
     "description": string (what the action does, in clear plain language),
     "preconditions": string (what must be true to run it, in words — e.g. "the cart must have at least one item"; empty string if none),
     "effect": string (what happens AFTER it runs — the result/outcome the user perceives),
@@ -80,7 +82,7 @@ AppManifest (all fields required unless noted):
   "policies": {"requireConfirmationForDestructive": true, "allowedWithoutAuth": string[], "contextRetentionTurns": 5}
 }
 Validation rules: no duplicate intents anywhere; every route/action needs non-empty examples;
-actions need non-empty handler; requireConfirmation implies confirmationMessageTemplate.
+"function" actions need non-empty handler; "link" actions need non-empty navTarget (no handler); requireConfirmation implies confirmationMessageTemplate.
 The description/preconditions/effect/relatedIntents (actions), description (routes) and appType/appFlow
 fields are the app's "manual": they go verbatim into the agent's prompt so it understands the app.
 Base them on the REAL code you read; be precise and concise, never padding.`;
@@ -98,7 +100,10 @@ const PLATFORM_GUIDES = {
     routeHintLine:
       'No reliable static route list is available for web apps, so infer routes/views from the router setup, page/route components, and navigation calls (react-router <Route>, Next.js pages, navigate()/<Link>). Routes you propose are NOT statically verified, so only include ones you can actually see in the code below.',
     actionHintLine:
-      'Actions are functions wired to UI IN THE SOURCE FILES PROVIDED BELOW: handlers inside components, store/context actions (Zustand, Redux, React Context), or service functions. Set "handler" to that real function name exactly. CRITICAL: the manifest is for THIS web deployment only — do NOT include routes or actions from mobile/native code that is not in the file list (even if you infer it exists elsewhere in the monorepo).',
+      'Web actions come in TWO kinds, BOTH first-class — detect both:\n' +
+      '  (1) FUNCTION actions (kind "function"): functions wired to UI — handlers inside components, store/context actions (Zustand, Redux, React Context), or service functions. Set "handler" to that real function name exactly. INCLUDE common web product actions you might be tempted to skip: switching language/locale (e.g. setLang/setLocale/i18n.changeLanguage), toggling theme, submitting a contact/newsletter/search form. (Still skip pure micro-plumbing like opening a dropdown or controlled input onChange.)\n' +
+      '  (2) LINK actions (kind "link"): the core actions of marketing/landing pages, which are NAVIGATION not function calls — download/get-the-app buttons (App Store / Google Play / direct download), "contact us" / email / phone links, social links, and in-page jumps to a section (anchor hrefs like #pricing). For these set kind "link" and navTarget to the EXACT href string in the code; do NOT set handler. A list of detected link elements on the product-surface pages is provided below — turn the meaningful ones into link actions (group obvious duplicates, e.g. several App Store buttons → one "download on the App Store").\n' +
+      'CRITICAL: the manifest is for THIS web deployment only — do NOT include routes or actions from mobile/native code that is not in the file list (even if you infer it exists elsewhere in the monorepo).',
   },
   mobile: {
     appKindLabel: 'a mobile app (Expo / React Native)',
@@ -138,7 +143,9 @@ function buildSystemPrompt(platform) {
   const { appKindLabel, screenWord, routeHintLine, actionHintLine } = guide;
   return `You analyze the FULL source code of ${appKindLabel} and produce the manifest of an in-app voice agent (Fiodos AppManifest).
 
-ROUTES: every ${screenWord} the user can navigate to. ${routeHintLine} Skip auth screens (sign-in/sign-up) and dynamic [param] routes. Always include a BACK route ("route": "BACK").
+${platform === 'web' ? `PRODUCT SURFACE FOCUS (IMPORTANT): some files below are marked [PRODUCT SURFACE] and others [SECONDARY]. The PRODUCT SURFACE is what is reachable by navigation from the deployed home page — it is what this web product actually IS. Concentrate your routes and actions there. [SECONDARY] files exist in the repo but are NOT reachable from the home (e.g. a separate app mirrored inside the same codebase, dead/work-in-progress screens); model something from them ONLY if it is unmistakably part of this same product. When in doubt, prefer the product surface. This is how you avoid drowning a landing's real actions under a secondary app's internals.
+
+` : ''}ROUTES: every ${screenWord} the user can navigate to. ${routeHintLine} Skip auth screens (sign-in/sign-up) and dynamic [param] routes. Always include a BACK route ("route": "BACK").
 
 ACTIONS: things a user could trigger by voice. ${actionHintLine} CRITICAL RULES:
 - Every action MUST be backed by a REAL function you can see in the provided code. Set "handler" to that real function's name exactly as written in the code.
@@ -232,8 +239,23 @@ For EVERY action, also return a "wiring" entry describing how a separate module 
 - The confirmation flow is enforced by the engine BEFORE your handler runs, so never add your own confirmation logic; just perform the action.`;
 }
 
-function buildUserPrompt(appMeta, files, omitted, staticRoutes) {
-  const codeBlob = files.map((f) => `===== FILE: ${f.rel} =====\n${f.content}`).join('\n\n');
+function buildUserPrompt(appMeta, files, omitted, staticRoutes, surface = null) {
+  // When a reachability surface is available, tag each file header so the model
+  // knows what is the live product vs secondary code, and list the detected
+  // link elements on the product surface (seed for LINK actions).
+  const reachableRel = new Set();
+  if (surface && surface.applied && surface.relOf) {
+    for (const abs of surface.reachableClosure) reachableRel.add(surface.relOf(abs));
+    for (const abs of surface.entryFiles) reachableRel.add(surface.relOf(abs));
+  }
+  const tagFor = (rel) => {
+    if (!surface || !surface.applied) return '';
+    return reachableRel.has(rel) ? ' [PRODUCT SURFACE]' : ' [SECONDARY]';
+  };
+  const codeBlob = files
+    .map((f) => `===== FILE${tagFor(f.rel)}: ${f.rel} =====\n${f.content}`)
+    .join('\n\n');
+
   const routeHint = staticRoutes
     .map((r) => `${r.routePath}${r.isDynamic ? ' (dynamic)' : ''} ← ${r.relFile}`)
     .join('\n');
@@ -244,10 +266,24 @@ function buildUserPrompt(appMeta, files, omitted, staticRoutes) {
     ? `Statically-scanned routes (existence is verified — use these hrefs):\n${routeHint}\n`
     : `No static route list (web app): infer routes/views from the router and navigation calls in the code below.\n`;
 
+  // Detected interactive link elements on the product surface — concrete hrefs
+  // the model should turn into LINK actions (verified later against the file).
+  let linkBlock = '';
+  const links = (surface && surface.productLinks) || [];
+  if (links.length) {
+    const lines = links
+      .slice(0, 60)
+      .map((l) => `- [${l.kind}] ${l.target}${l.label ? `  (label: ${l.label})` : ''}  ← ${l.file}`)
+      .join('\n');
+    linkBlock =
+      `\nDETECTED LINK ELEMENTS ON THE PRODUCT SURFACE (turn the meaningful ones into "link" actions; navTarget must match the target string exactly; group duplicates):\n${lines}\n`;
+  }
+
   return (
     `App: ${appMeta.name}\nDescription: ${appMeta.description || '(none)'}\n` +
     `App id / bundle id (if any): ${appMeta.bundleId || '(none)'}\nDependencies: ${(appMeta.dependencies || []).join(', ')}\n\n` +
     routeBlock +
+    linkBlock +
     omittedNote +
     `\nManifest schema:\n${manifestSchemaDoc()}\n\n` +
     `FULL SOURCE CODE (${files.length} files):\n\n${codeBlob}`
@@ -384,11 +420,11 @@ async function analyzeViaProxy({ apiKey, apiUrl, model, system, user }) {
  */
 async function analyzeWithAI({
   appMeta, files, omitted, staticRoutes, model = DEFAULT_MODEL, platform = 'mobile',
-  useProxy = false, apiKey = '', apiUrl = '',
+  useProxy = false, apiKey = '', apiUrl = '', surface = null,
 }) {
   const resolved = resolveModel(model);
   const system = buildSystemPrompt(platform);
-  const user = buildUserPrompt(appMeta, files, omitted, staticRoutes);
+  const user = buildUserPrompt(appMeta, files, omitted, staticRoutes, surface);
 
   const t0 = Date.now();
   let parsed;

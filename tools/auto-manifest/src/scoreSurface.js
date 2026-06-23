@@ -227,6 +227,115 @@ function hasGlobalAuthGate(included, analysisRoot, extracted) {
   return false;
 }
 
+/** Actionable (non-internal-route) link kinds → candidates for LINK actions. */
+const ACTION_LINK_KINDS = new Set(['external', 'store', 'anchor', 'mailto', 'tel']);
+
+/**
+ * Compute the navigation reachability surface ONCE, from the collected files —
+ * independent of any manifest. Used (a) BEFORE the AI call to focus the prompt
+ * on the real product surface, and (b) AFTER it by scoreSurface() to score
+ * intents. Lifting it earlier is what turns reachability from a post-filter into
+ * a signal that GUIDES detection.
+ *
+ * @returns {{
+ *   applied: boolean, reason: string,
+ *   extracted: Map, edges: Map, absSet: Set, routeMap: Map,
+ *   entryFiles: Set<string>, reached: Set<string>, reachableClosure: Set<string>,
+ *   globalAuthGate: boolean, trustworthy: boolean, resolvableTargets: number,
+ *   productLinks: Array<{target:string,kind:string,label:?string,file:string}>,
+ *   relOf: (abs:string)=>string,
+ * }}
+ */
+function computeSurface({ included = [], analysisRoot, platform = 'web' }) {
+  const { extracted, edges, absSet } = buildGraphFromFiles(included, analysisRoot);
+  const routeMap = buildWebRouteMap(included, analysisRoot);
+  const relOf = (abs) => toPosix(path.relative(analysisRoot, abs));
+
+  // Web-first. Other platforms: reachability is not computed confidently yet.
+  if (platform !== 'web') {
+    return {
+      applied: false, reason: 'not-web', extracted, edges, absSet, routeMap,
+      entryFiles: new Set(), reached: new Set(), reachableClosure: new Set(),
+      globalAuthGate: false, trustworthy: false, resolvableTargets: 0,
+      productLinks: [], relOf,
+    };
+  }
+
+  const globalAuthGate = hasGlobalAuthGate(included, analysisRoot, extracted);
+  const entryFiles = findEntryFiles(routeMap, extracted);
+
+  const routeHostFiles = [];
+  for (const [abs, ex] of extracted) if (ex.routeHost) routeHostFiles.push(abs);
+
+  const allTargets = new Set();
+  for (const ex of extracted.values()) {
+    for (const t of ex.navTargets || []) {
+      const f = routeMap.get(normUrl(t));
+      if (f) allTargets.add(normUrl(t));
+    }
+  }
+  const trustworthy = allTargets.size >= 2;
+  const applied = entryFiles.size > 0 && trustworthy && !globalAuthGate;
+
+  const reached = new Set(entryFiles);
+  const queue = [...entryFiles];
+  const seedTargets = (files) => {
+    for (const t of collectTargets(files, edges, extracted)) {
+      const f = routeMap.get(normUrl(t));
+      if (f && !reached.has(f)) {
+        reached.add(f);
+        queue.push(f);
+      }
+    }
+  };
+  seedTargets(routeHostFiles);
+  while (queue.length) {
+    const f = queue.shift();
+    seedTargets([f, ...layoutChain(f, analysisRoot, absSet)]);
+  }
+
+  const reachableClosure = new Set();
+  for (const f of reached) {
+    for (const dep of closure(f, edges)) reachableClosure.add(dep);
+    for (const lay of layoutChain(f, analysisRoot, absSet)) {
+      for (const dep of closure(lay, edges)) reachableClosure.add(dep);
+    }
+  }
+
+  // Link/navigation signals living on the reachable product surface (the files
+  // the user actually sees + their shells/closures). Deduped by target. These
+  // seed the analyzer so download/contact/social/anchor actions are detected.
+  // When reachability is not trustworthy, fall back to ALL files' links (better
+  // to surface candidates than to hide them — fail towards including).
+  const linkScope = applied ? reachableClosure : new Set(extracted.keys());
+  const productLinks = [];
+  const seenLink = new Set();
+  for (const abs of linkScope) {
+    const ex = extracted.get(abs);
+    if (!ex || !ex.linkEls) continue;
+    for (const l of ex.linkEls) {
+      if (!ACTION_LINK_KINDS.has(l.kind)) continue;
+      const key = l.kind + '|' + l.target;
+      if (seenLink.has(key)) continue;
+      seenLink.add(key);
+      productLinks.push({ target: l.target, kind: l.kind, label: l.label, file: relOf(abs) });
+    }
+  }
+
+  return {
+    applied,
+    reason: applied
+      ? 'scored'
+      : globalAuthGate ? 'global-auth-gate'
+        : entryFiles.size === 0 ? 'no-entry'
+          : !trustworthy ? 'sparse-graph' : 'unknown',
+    extracted, edges, absSet, routeMap,
+    entryFiles, reached, reachableClosure,
+    globalAuthGate, trustworthy, resolvableTargets: allTargets.size,
+    productLinks, relOf,
+  };
+}
+
 /**
  * Score every route/action of a manifest by product-surface confidence and
  * compute the conservative default-disabled sets.
@@ -237,6 +346,7 @@ function hasGlobalAuthGate(included, analysisRoot, extracted) {
  * @param {Array}    p.included   collected files [{rel, content}]
  * @param {string}   p.analysisRoot
  * @param {string}   p.platform
+ * @param {object}   [p.surface]  precomputed computeSurface() result (avoids recompute)
  * @returns {{
  *   routes: Object<string,{confidence:string,reason:string}>,
  *   actions: Object<string,{confidence:string,reason:string}>,
@@ -245,7 +355,7 @@ function hasGlobalAuthGate(included, analysisRoot, extracted) {
  *   stats: object,
  * }}
  */
-function scoreSurface({ manifest, evidence = {}, included = [], analysisRoot, platform = 'web' }) {
+function scoreSurface({ manifest, evidence = {}, included = [], analysisRoot, platform = 'web', surface = null }) {
   const empty = {
     routes: {},
     actions: {},
@@ -259,8 +369,10 @@ function scoreSurface({ manifest, evidence = {}, included = [], analysisRoot, pl
   if (platform !== 'web') return empty;
   if (!manifest || !Array.isArray(manifest.routes)) return empty;
 
-  const { extracted, edges, absSet } = buildGraphFromFiles(included, analysisRoot);
-  const routeMap = buildWebRouteMap(included, analysisRoot);
+  const surf = surface || computeSurface({ included, analysisRoot, platform });
+  const { extracted, edges, absSet, routeMap, entryFiles, reached, reachableClosure, globalAuthGate, trustworthy } = surf;
+  const canScore = surf.applied;
+  const allTargetsSize = surf.resolvableTargets;
 
   const evAbs = (rel) => {
     if (!rel) return null;
@@ -269,61 +381,6 @@ function scoreSurface({ manifest, evidence = {}, included = [], analysisRoot, pl
   };
   const routeEv = evidence.routes || {};
   const actionEv = evidence.actions || {};
-
-  // Global auth gate (root middleware) → keep everything active.
-  const globalAuthGate = hasGlobalAuthGate(included, analysisRoot, extracted);
-
-  // Entry screen file(s). Without one we cannot judge orphans → disable nothing.
-  const entryFiles = findEntryFiles(routeMap, extracted);
-
-  // SPA route hosts (react-router/Angular/Vue): their links are GLOBAL nav.
-  const routeHostFiles = [];
-  for (const [abs, ex] of extracted) if (ex.routeHost) routeHostFiles.push(abs);
-
-  // Is the navigation graph trustworthy? (Enough resolvable internal links that
-  // an "orphan" is believable rather than just unparsed dynamic navigation.)
-  const allTargets = new Set();
-  for (const ex of extracted.values()) {
-    for (const t of ex.navTargets || []) {
-      const f = routeMap.get(normUrl(t));
-      if (f) allTargets.add(normUrl(t));
-    }
-  }
-  const trustworthy = allTargets.size >= 2;
-
-  const canScore = entryFiles.size > 0 && trustworthy && !globalAuthGate;
-
-  // BFS over screen files from the entry, following nav links found in each
-  // reached screen's closure AND its layout chain. SPA route-host links are
-  // seeded as globally available.
-  const reached = new Set(entryFiles);
-  const queue = [...entryFiles];
-  const seedTargets = (files) => {
-    for (const t of collectTargets(files, edges, extracted)) {
-      const f = routeMap.get(normUrl(t));
-      if (f && !reached.has(f)) {
-        reached.add(f);
-        queue.push(f);
-      }
-    }
-  };
-  // Global navigation from route hosts (SPA) is reachable from anywhere.
-  seedTargets(routeHostFiles);
-  while (queue.length) {
-    const f = queue.shift();
-    const shell = [f, ...layoutChain(f, analysisRoot, absSet)];
-    seedTargets(shell);
-  }
-
-  // Closure of everything reachable (for action membership): a non-screen file
-  // (service/store) is "on the product surface" if a reachable screen imports it.
-  const reachableClosure = new Set();
-  for (const f of reached) {
-    for (const dep of closure(f, edges)) reachableClosure.add(dep);
-    for (const lay of layoutChain(f, analysisRoot, absSet)) {
-      for (const dep of closure(lay, edges)) reachableClosure.add(dep);
-    }
-  }
 
   const routes = {};
   const disabledRouteIntents = [];
@@ -393,7 +450,7 @@ function scoreSurface({ manifest, evidence = {}, included = [], analysisRoot, pl
               : 'unknown',
       entryCount: entryFiles.size,
       reachableScreens: reached.size,
-      resolvableTargets: allTargets.size,
+      resolvableTargets: allTargetsSize,
       trustworthy,
       globalAuthGate,
       routesDisabled: disabledRouteIntents.length,
@@ -402,4 +459,4 @@ function scoreSurface({ manifest, evidence = {}, included = [], analysisRoot, pl
   };
 }
 
-module.exports = { scoreSurface, normUrl, buildWebRouteMap, buildGraphFromFiles };
+module.exports = { scoreSurface, computeSurface, normUrl, buildWebRouteMap, buildGraphFromFiles };

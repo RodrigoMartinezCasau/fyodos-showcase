@@ -106,6 +106,13 @@ function extractFromFile(filePath, appRoot) {
     // createRouter). Such a file's links act as GLOBAL navigation (available
     // from any screen), unlike a per-section sidebar.
     routeHost: false,
+    // Interactive LINK elements found in this file: <a href>, <Link href|to>,
+    // window.open(...), Linking.openURL(...). Each is {target, kind, label}.
+    // kind ∈ internal | external | store | anchor | mailto | tel. These feed the
+    // analyzer so web "link/navigation actions" (download, contact, social,
+    // jump-to-section, change-language-by-link) are detected with the href as
+    // concrete, hallucination-proof evidence — not just state-mutating handlers.
+    linkEls: [],
     // Soft signals that this file sits behind authentication (used ONLY to keep
     // an orphaned cluster ACTIVE — never to disable). Identifiers/paths that
     // commonly indicate an auth gate.
@@ -121,6 +128,30 @@ function extractFromFile(filePath, appRoot) {
     if (!v.startsWith('/')) return;
     if (v.startsWith('//')) return; // protocol-relative external
     out.navTargets.push(v);
+  }
+
+  // Classify a link/navigation target for the analyzer hint + link actions.
+  function classifyLink(value) {
+    if (!value || typeof value !== 'string') return null;
+    const v = value.trim();
+    if (!v || v === '#') return null;
+    if (/^mailto:/i.test(v)) return { target: v, kind: 'mailto' };
+    if (/^tel:/i.test(v)) return { target: v, kind: 'tel' };
+    if (v.startsWith('#')) return { target: v, kind: 'anchor' };
+    if (/^https?:\/\//i.test(v) || v.startsWith('//')) {
+      const store = /(apps\.apple\.com|itunes\.apple\.com|play\.google\.com|testflight)/i.test(v);
+      return { target: v, kind: store ? 'store' : 'external' };
+    }
+    if (v.startsWith('/')) return { target: v, kind: 'internal' };
+    // Template/expression placeholders (e.g. `#${id}`) or unknown — skip as a
+    // concrete link (no verifiable literal href).
+    return null;
+  }
+
+  function pushLink(value, label) {
+    const c = classifyLink(value);
+    if (!c) return;
+    out.linkEls.push({ target: c.target, kind: c.kind, label: label || null, file: rel });
   }
 
   // GATING constructs only (a redirect/block when unauthenticated) — NOT mere
@@ -275,6 +306,12 @@ function extractFromFile(filePath, appRoot) {
       if (/^Linking\.(openURL|canOpenURL)$/.test(exprText) && node.arguments[0]) {
         const t = literalText(node.arguments[0]) || node.arguments[0].getText().slice(0, 60);
         out.linkingCalls.push({ target: t, file: rel });
+        pushLink(literalText(node.arguments[0]));
+      }
+
+      // window.open(url, ...) / window.location.assign(url) — web external nav.
+      if (/^(window\.open|window\.location\.assign|window\.location\.replace|location\.assign|location\.replace)$/.test(exprText) && node.arguments[0]) {
+        pushLink(literalText(node.arguments[0]));
       }
 
       // Zustand: create<T>()(persist((set) => ({...}))) or create((set) => ({...}))
@@ -308,7 +345,11 @@ function extractFromFile(filePath, appRoot) {
       // Any element carrying an internal route via href/to (next/link <Link>,
       // <a href>, react-router <Link to>/<Navigate to>/<Redirect to>).
       const linkTarget = jsxAttr(attrs, ['href', 'to']);
-      if (linkTarget) pushNavTarget(linkTarget);
+      if (linkTarget) {
+        pushNavTarget(linkTarget);
+        const label = jsxAttr(attrs, ['aria-label', 'title', 'download', 'alt']);
+        pushLink(linkTarget, label);
+      }
       // react-router <Route> table → global navigation host.
       if (tag === 'Route') out.routeHost = true;
       if (/Button/i.test(tag) || tag === 'TouchableOpacity' || tag === 'Pressable') {

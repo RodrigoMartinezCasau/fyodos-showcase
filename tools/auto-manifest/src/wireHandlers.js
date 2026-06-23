@@ -612,6 +612,9 @@ function prepareHandlerPlan({ appRoot, manifest, evidence, wiring = {}, fyodosDi
 
   for (const action of actions) {
     const intent = action.intent;
+    // Link/navigation actions have no handler and need NO wiring — the client
+    // performs the navigation in navTarget. Skip them entirely here.
+    if (action.kind === 'link') continue;
     const handler = action.handler || intent;
     const ev = evActions[intent] || {};
     const evFile = normRel(ev.file);
@@ -1373,6 +1376,9 @@ async function runAutoCorrectionLoop(ctx) {
 
   for (const action of manifest.actions || []) {
     const intent = action.intent;
+    // Link/navigation actions need no wiring (no handler); never run the wiring
+    // verify/auto-correct loop for them.
+    if (action.kind === 'link') continue;
     let attempt = 0;
     let lastError = '';
     let resolved = null;

@@ -96,7 +96,7 @@ const { verifyManifest } = require('./verify');
 const { wireWebOrb, reportWireResult } = require('./wireWeb');
 const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
 const { offerWriteEnv, printEnvManualReminder } = require('./writeEnv');
-const { scoreSurface } = require('./scoreSurface');
+const { scoreSurface, computeSurface } = require('./scoreSurface');
 
 function arg(flag, fallback) {
   const i = process.argv.indexOf(flag);
@@ -275,6 +275,21 @@ async function main() {
   logDev(`[collect] files=${included.length} (~${estimatedTokens} tokens)` +
     (omitted.length ? ` omitted=${omitted.length} (over budget)` : ''));
 
+  // ── 2c. Reachability surface (web) — computed BEFORE the AI call so it can
+  // GUIDE detection, not just clean up afterwards. It tells the model which
+  // files are the live product (reachable from the home) vs secondary code, and
+  // hands it the concrete link elements on those pages (download/contact/social/
+  // anchors) so landing-page actions stop being invisible. Reused after verify
+  // for scoring (no recompute). Best-effort: never blocks analysis.
+  let surface = null;
+  try {
+    surface = computeSurface({ included, analysisRoot, platform });
+    logDev(`[surface] pre-analysis applied=${surface.applied} reason=${surface.reason} ` +
+      `reachable=${surface.reached.size} links=${surface.productLinks.length}`);
+  } catch (e) {
+    logDev(`[surface] pre-analysis skipped: ${e.message}`);
+  }
+
   let manifest;
   let provenance;
   let evidence = {};
@@ -328,7 +343,7 @@ async function main() {
         'Analyzing your project — may take 1–2 min',
         () => analyzeWithAI({
           appMeta, files: included, omitted, staticRoutes: routes, model, platform,
-          useProxy, apiKey, apiUrl,
+          useProxy, apiKey, apiUrl, surface,
         }),
       );
     if (usedModel) model = usedModel;
@@ -390,18 +405,18 @@ async function main() {
   // Anything uncertain stays ACTIVE (fail towards including). The on/off lives
   // in the workspace's disabled-intent sets (reused infra); the developer flips
   // it in the dashboard. Web-first; other platforms are not scored yet.
-  let surface = { disabledRouteIntents: [], disabledActionIntents: [], stats: { applied: false } };
+  let surfaceScore = { disabledRouteIntents: [], disabledActionIntents: [], stats: { applied: false } };
   try {
-    surface = scoreSurface({ manifest, evidence, included, analysisRoot, platform });
+    surfaceScore = scoreSurface({ manifest, evidence, included, analysisRoot, platform, surface });
     for (const r of manifest.routes) {
-      const s = surface.routes && surface.routes[r.intent];
+      const s = surfaceScore.routes && surfaceScore.routes[r.intent];
       if (s) { r.surfaceConfidence = s.confidence; r.surfaceReason = s.reason; }
     }
     for (const a of manifest.actions) {
-      const s = surface.actions && surface.actions[a.intent];
+      const s = surfaceScore.actions && surfaceScore.actions[a.intent];
       if (s) { a.surfaceConfidence = s.confidence; a.surfaceReason = s.reason; }
     }
-    logDev(`[surface] ${JSON.stringify(surface.stats)}`);
+    logDev(`[surface] ${JSON.stringify(surfaceScore.stats)}`);
   } catch (e) {
     // Scoring is best-effort: a failure must never block publishing. Fail OPEN
     // (everything stays active) — consistent with the "fail towards including".
@@ -437,15 +452,15 @@ async function main() {
     // the first publish / when the developer has not customized scope (no
     // clobbering manual choices). Empty when scoring did not apply.
     scopeDefaults: {
-      disabledRouteIntents: surface.disabledRouteIntents || [],
-      disabledActionIntents: surface.disabledActionIntents || [],
+      disabledRouteIntents: surfaceScore.disabledRouteIntents || [],
+      disabledActionIntents: surfaceScore.disabledActionIntents || [],
     },
   };
 
   // Informative, non-blocking summary (the dashboard is where scope is managed).
-  const offR = (surface.disabledRouteIntents || []).length;
-  const offA = (surface.disabledActionIntents || []).length;
-  if (surface.stats && surface.stats.applied && (offR || offA)) {
+  const offR = (surfaceScore.disabledRouteIntents || []).length;
+  const offA = (surfaceScore.disabledActionIntents || []).length;
+  if (surfaceScore.stats && surfaceScore.stats.applied && (offR || offA)) {
     const onR = manifest.routes.length - offR;
     const onA = manifest.actions.length - offA;
     logUser(`Main surface (active): ${onR} route(s), ${onA} action(s)`);

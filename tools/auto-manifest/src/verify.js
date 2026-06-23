@@ -117,6 +117,36 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
       continue;
     }
 
+    // LINK/navigation actions: no handler. Verify the navTarget appears VERBATIM
+    // in the evidence file (the real href/URL/anchor) — concrete, hallucination-
+    // proof evidence. No wiring is generated for these.
+    if (action.kind === 'link') {
+      const target = String(action.navTarget || ev.href || '').trim();
+      if (!target) {
+        provenance.actions.push({
+          intent: action.intent, included: false,
+          reason: `link action '${action.intent}' has no navTarget — DROPPED`,
+        });
+        continue;
+      }
+      if (!content.includes(target)) {
+        provenance.actions.push({
+          intent: action.intent, included: false,
+          reason: `link action navTarget '${target}' not found verbatim in '${evFile}' — DROPPED`,
+        });
+        continue;
+      }
+      // Normalize: link actions carry no handler and never require wiring.
+      action.handler = '';
+      actions.push(action);
+      provenance.actions.push({
+        intent: action.intent, included: true,
+        verification: `link target '${target}' confirmed in ${evFile}`,
+        evidence: ev,
+      });
+      continue;
+    }
+
     // The handler must be a real identifier in the evidence file. Also accept
     // any identifier from the symbol (covers "store.addItem"-style handlers).
     const candidates = [action.handler, ...identifiersIn(ev.symbol)].filter(Boolean);
