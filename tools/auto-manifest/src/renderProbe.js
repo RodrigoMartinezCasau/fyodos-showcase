@@ -49,6 +49,46 @@ function isVerboseProbe() {
 }
 
 /**
+ * Render-probe teardown guard.
+ *
+ * The probe mounts the user's real React component in jsdom, then unmounts and
+ * tears the DOM down. React 18 schedules passive-effect cleanup ASYNCHRONOUSLY
+ * (a scheduler timer/microtask). If any cleanup fires AFTER we removed the
+ * jsdom globals, React throws "The `document` global was defined when React was
+ * initialized, but is not defined anymore". On Node ≥ 21/25 that async throw is
+ * an uncaughtException that kills the ENTIRE CLI — long after the probe returned
+ * (e.g. while the CLI is awaiting the ".env" prompt). The probe is an OPTIONAL
+ * effect check; it must never crash an otherwise-successful install.
+ *
+ * We install (once) a narrow process-level filter that swallows ONLY this jsdom/
+ * React teardown error class and lets every other error crash as usual.
+ */
+let teardownGuardInstalled = false;
+function isProbeTeardownError(err) {
+  const msg = String((err && (err.stack || err.message)) || err || '');
+  return (
+    /`document` global was defined when React was initialized/.test(msg) ||
+    /\bdocument is not defined\b/.test(msg) ||
+    /Cannot read properties of (?:null|undefined) \(reading '(?:document|ownerDocument|defaultView|createElement|body)'\)/.test(msg) ||
+    (/jsdom/i.test(msg) && /not defined|closed|null/i.test(msg))
+  );
+}
+function installProbeTeardownGuard() {
+  if (teardownGuardInstalled) return;
+  teardownGuardInstalled = true;
+  process.on('uncaughtException', (err) => {
+    if (isProbeTeardownError(err)) return; // late probe passive-effect cleanup — safe to drop
+    // Not ours: preserve Node's default fail-fast behavior for real errors.
+    console.error(err && err.stack ? err.stack : err);
+    process.exit(1);
+  });
+  process.on('unhandledRejection', (reason) => {
+    if (isProbeTeardownError(reason)) return;
+    throw reason;
+  });
+}
+
+/**
  * Capture (swallow) noisy global console output during a probe — React error
  * boundary logs ("The above error occurred in <X>", "Consider adding an error
  * boundary…"), uncaught-error dumps, etc. These come from rendering the user's
@@ -150,8 +190,18 @@ async function probeReactEffect(appRoot, entry, ctx) {
     `import { flushSync } from 'react-dom';\n` +
     `export const probe = { React: ReactNS.default || ReactNS, createRoot, flushSync, Comp, registry: fyodosGeneratedRegistries };\n`;
 
+  // A late React passive-effect cleanup that fires after we tear down jsdom must
+  // never crash the CLI (see installProbeTeardownGuard).
+  installProbeTeardownGuard();
+
   let restore = () => {};
   let cap = { restore() {} };
+  // Hoisted so the finally block can drain React (synchronously unmount + settle)
+  // BEFORE the DOM globals are removed — the only reliable way to stop React from
+  // running cleanup against a closed jsdom.
+  let root = null;
+  let flushSync = null;
+  const settle = () => new Promise((r) => setTimeout(r, 0));
   try {
     fs.writeFileSync(harnessAbs, harness);
     await esbuild.build({
@@ -173,14 +223,13 @@ async function probeReactEffect(appRoot, entry, ctx) {
     restore = installDom(jsdomMod, { storageKeys: ctx.storageKeys, kind: ctx.kind });
     delete require.cache[outAbs];
     const mod = require(outAbs);
-    const { React, createRoot, flushSync, Comp, registry } = mod.probe;
+    const { React, createRoot, Comp, registry } = mod.probe;
+    flushSync = mod.probe.flushSync;
     const Component = pickComponent(Comp);
     if (!Component) return { status: 'unverifiable', detail: `did not find a mountable React component exported by '${entry.bridge.file}' — real effect not verifiable, test by hand` };
 
     const container = document.createElement('div');
     document.body.appendChild(container);
-    let root;
-    const settle = () => new Promise((r) => setTimeout(r, 0));
     try {
       flushSync(() => { root = createRoot(container); root.render(React.createElement(Component)); });
       await settle();
@@ -192,12 +241,11 @@ async function probeReactEffect(appRoot, entry, ctx) {
     const beforeHTML = captureSnapshot(container);
     const beforeText = container.textContent || '';
     const handler = registry.handlers[entry.handler];
-    if (typeof handler !== 'function') { try { root.unmount(); } catch {} return { status: 'fail', detail: `el registro no expone el handler '${entry.handler}'` }; }
+    if (typeof handler !== 'function') return { status: 'fail', detail: `el registro no expone el handler '${entry.handler}'` };
 
     if (ctx.sensitive) {
       // Do NOT fire the effect; we proved it mounts and the handler resolves to a
       // live bridge function. Verify the bridge has the method, nothing more.
-      try { root.unmount(); } catch {}
       return { status: 'unverifiable', detail: 'confirmation action: its effect is not fired in the test render (security); wiring verified up to the confirmation point' };
     }
 
@@ -205,15 +253,25 @@ async function probeReactEffect(appRoot, entry, ctx) {
     try { await handler(ctx.params); } catch (e) { invokeErr = e; }
     await settle();
     try { flushSync(() => {}); } catch {}
-    if (invokeErr) { try { root.unmount(); } catch {} return { status: 'fail', detail: `invoking the handler, the real app threw: ${short(invokeErr)}` }; }
+    if (invokeErr) return { status: 'fail', detail: `invoking the handler, the real app threw: ${short(invokeErr)}` };
 
     const afterHTML = captureSnapshot(container);
     const afterText = container.textContent || '';
-    try { root.unmount(); } catch {}
     return decide(ctx.kind, { beforeHTML, beforeText, afterHTML, afterText });
   } catch (err) {
     return { status: 'unverifiable', detail: `could not prepare the test render (${short(err)}); real effect not automatically verifiable — test by hand` };
   } finally {
+    // Drain React WHILE the DOM is still alive: a synchronous unmount runs every
+    // pending passive-effect cleanup now, so nothing fires after we remove the
+    // jsdom globals below. Two settle ticks flush the scheduler's macro/microtasks.
+    try {
+      if (root) {
+        if (flushSync) flushSync(() => { try { root.unmount(); } catch { /* ignore */ } });
+        else { try { root.unmount(); } catch { /* ignore */ } }
+        await settle();
+        await settle();
+      }
+    } catch { /* ignore */ }
     try { cap.restore(); } catch {}
     try { fs.existsSync(harnessAbs) && fs.rmSync(harnessAbs); } catch {}
     try { fs.existsSync(outAbs) && fs.rmSync(outAbs); } catch {}
@@ -357,6 +415,9 @@ function installDom(jsdomMod, { storageKeys = [], kind } = {}) {
  * `sources` are the project's source files (for storage-key detection, etc.).
  */
 async function probeComponentEffect(appRoot, entry, opts = {}) {
+  // Defense-in-depth: a late headless-render teardown error (React/Vue passive
+  // cleanup firing after jsdom is closed) must never crash the CLI.
+  installProbeTeardownGuard();
   const framework = (opts.framework || 'web').toLowerCase();
   const kind = actionKind(entry);
   const params = probeParams(entry, kind);
@@ -376,4 +437,4 @@ async function probeComponentEffect(appRoot, entry, opts = {}) {
   return { status: 'unverifiable', detail: `framework '${framework}' has no render-probe; real effect not automatically verifiable` };
 }
 
-module.exports = { probeComponentEffect, actionKind, decide, SENTINEL, SEED_ID, installDom, pickComponent, detectStorageKeys, probeParams, captureSnapshot, short, loadEsbuild, loadJsdom, reqFrom, emptyAssetsPlugin, captureConsole, isVerboseProbe };
+module.exports = { probeComponentEffect, actionKind, decide, SENTINEL, SEED_ID, installDom, pickComponent, detectStorageKeys, probeParams, captureSnapshot, short, loadEsbuild, loadJsdom, reqFrom, emptyAssetsPlugin, captureConsole, isVerboseProbe, installProbeTeardownGuard, isProbeTeardownError };

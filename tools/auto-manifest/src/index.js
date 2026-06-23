@@ -525,7 +525,20 @@ async function main() {
           apiKey &&
           (result.status === 'added' || result.status === 'already')
         ) {
-          await postOrbWired({ apiKey, apiUrl, file: result.file || '' });
+          const proof = await postOrbWired({ apiKey, apiUrl, file: result.file || '' });
+          // The dashboard's onboarding orb check completes on THIS install proof
+          // (no need to run the app). If the backend could not record it (e.g. an
+          // outdated deployment without the orb-wired endpoint), say so plainly so
+          // the developer knows the check will otherwise wait for a runtime ping.
+          if (proof && proof.ok === false && proof.reason !== 'no-api-key') {
+            const why = proof.status === 404
+              ? 'the backend does not expose /v1/developer/orb-wired yet (update the backend deployment)'
+              : `the backend rejected the install proof (HTTP ${proof.status || '?'})`;
+            logUser(
+              `Note: the orb is wired into your app, but ${why}. ` +
+              'The dashboard install check will complete once the orb connects from your running app.',
+            );
+          }
         }
       }
 
@@ -846,7 +859,7 @@ async function publishManifest(manifest, meta, analysisToken = null, opts = {}) 
  * already succeeded); a failed re-fetch is surfaced as an actionable warning.
  */
 async function postOrbWired({ apiKey, apiUrl, file }) {
-  if (!apiKey) return;
+  if (!apiKey) return { ok: false, reason: 'no-api-key' };
   try {
     const res = await fetch(`${apiUrl}/v1/developer/orb-wired`, {
       method: 'POST',
@@ -855,11 +868,13 @@ async function postOrbWired({ apiKey, apiUrl, file }) {
     });
     if (res.ok) {
       logDev(`[orb-wired] install proof recorded (${file || 'web'})`);
-    } else {
-      logDev(`[orb-wired] could not record install proof: HTTP ${res.status}`);
+      return { ok: true };
     }
+    logDev(`[orb-wired] could not record install proof: HTTP ${res.status}`);
+    return { ok: false, status: res.status };
   } catch (e) {
     logDev(`[orb-wired] skipped: ${e.message || e}`);
+    return { ok: false, reason: e.message || String(e) };
   }
 }
 async function verifyOrbCanFetch({ apiKey, apiUrl }) {
