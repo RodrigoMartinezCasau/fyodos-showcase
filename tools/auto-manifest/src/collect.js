@@ -21,7 +21,12 @@ const path = require('path');
 const PROFILES = {
   web: {
     exts: ['.ts', '.tsx', '.js', '.jsx', '.vue', '.svelte'],
-    skipDirs: ['node_modules', 'assets', '.git', 'dist', 'build', '.expo', 'android', 'ios', 'coverage', '.next', 'web-build'],
+    skipDirs: [
+      'node_modules', 'assets', '.git', 'dist', 'build', '.expo', 'android', 'ios', 'coverage',
+      '.next', 'web-build',
+      // Monorepo siblings: never mix mobile/native code into a web analysis.
+      'mobile', 'native', 'flutter', 'react-native', 'expo',
+    ],
   },
   mobile: {
     exts: ['.ts', '.tsx', '.js', '.jsx'],

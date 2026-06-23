@@ -96,9 +96,9 @@ const PLATFORM_GUIDES = {
     appKindLabel: 'a web app (React, Next.js, Vite, react-router, or similar)',
     screenWord: 'page/view/route',
     routeHintLine:
-      'No reliable static route list is available for web apps, so infer routes/views from the router setup, page/route components, and navigation calls (react-router <Route>, Next.js pages, navigate()/<Link>). Routes you propose are NOT statically verified, so only include ones you can actually see in the code.',
+      'No reliable static route list is available for web apps, so infer routes/views from the router setup, page/route components, and navigation calls (react-router <Route>, Next.js pages, navigate()/<Link>). Routes you propose are NOT statically verified, so only include ones you can actually see in the code below.',
     actionHintLine:
-      'Actions are functions wired to UI: handlers inside components, store/context actions (Zustand, Redux, React Context), or service functions. Set "handler" to that real function name exactly.',
+      'Actions are functions wired to UI IN THE SOURCE FILES PROVIDED BELOW: handlers inside components, store/context actions (Zustand, Redux, React Context), or service functions. Set "handler" to that real function name exactly. CRITICAL: the manifest is for THIS web deployment only — do NOT include routes or actions from mobile/native code that is not in the file list (even if you infer it exists elsewhere in the monorepo).',
   },
   mobile: {
     appKindLabel: 'a mobile app (Expo / React Native)',

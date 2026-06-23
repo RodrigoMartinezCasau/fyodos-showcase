@@ -1360,10 +1360,10 @@ async function runAutoCorrectionLoop(ctx) {
   const {
     appRoot, fyodosDirRel, fyodosDirAbs, manifest, evidence, wiringMap,
     ts, esm, ext, testRunner, corrector, files, framework,
-    maxAttempts = 3, tag, dim, reset, registryRel,
+    maxAttempts = 3, tag, dim, reset, registryRel, quiet = false,
   } = ctx;
 
-  const log = (m) => console.error(`${tag} · ${dim || ''}${m}${reset || ''}`);
+  const log = quiet ? () => {} : (m) => console.error(`${tag} · ${dim || ''}${m}${reset || ''}`);
   log('Verifying and auto-correcting each action (may take a while)…');
   const baseline = await testRunner(appRoot, { framework });
 
@@ -1455,6 +1455,7 @@ async function wireHandlers(appRoot, opts = {}) {
     colors = {},
     assumeYes = false,
     noWire = false,
+    quiet = false,
     framework = 'web',
     appName,
     registryExt: registryExtOpt,
@@ -1516,13 +1517,15 @@ async function wireHandlers(appRoot, opts = {}) {
   //    to consent and let the loop decide what ends up wired.
   const loopEnabled = typeof corrector === 'function' && runTest && testRunner;
   if (!plan.auto.length && !loopEnabled) {
-    console.error(
-      `\n${tag} · ${dim || ''}Prepared the action wiring, but none of the ` +
-        `${plan.manual.length} action(s) can be connected with confidence.${reset || ''}`,
-    );
-    console.error(
-      `${tag} · See what is needed and how to do it by hand in: ${docRel}`,
-    );
+    if (!quiet) {
+      console.error(
+        `\n${tag} · ${dim || ''}Prepared the action wiring, but none of the ` +
+          `${plan.manual.length} action(s) can be connected with confidence.${reset || ''}`,
+      );
+      console.error(
+        `${tag} · See what is needed and how to do it by hand in: ${docRel}`,
+      );
+    }
     return { status: 'manual-only', docPath: docAbs, autoCount: 0, manualCount: plan.manual.length, plan };
   }
 
@@ -1538,29 +1541,33 @@ async function wireHandlers(appRoot, opts = {}) {
     `${tag} · Apply these changes after reviewing? [yes/no] `;
 
   if (!assumeYes && !process.stdin.isTTY) {
-    console.error(prompt.trimEnd());
-    console.error(
-      `${tag} · ${dim || ''}Non-interactive terminal: leaving your code untouched. The document ` +
-        `is at ${docRel}. Re-run with --wire-yes to apply it.${reset || ''}`,
-    );
+    if (!quiet) {
+      console.error(prompt.trimEnd());
+      console.error(
+        `${tag} · ${dim || ''}Non-interactive terminal: leaving your code untouched. The document ` +
+          `is at ${docRel}. Re-run with --wire-yes to apply it.${reset || ''}`,
+      );
+    }
     return { status: 'declined-noninteractive', docPath: docAbs, autoCount: plan.auto.length, manualCount: plan.manual.length, plan };
   }
 
   const yes = assumeYes || (await askYesNo(prompt));
   if (!yes) {
-    console.error(
-      `${tag} · ${dim || ''}Leaving your code untouched. The document stays at ${docRel} ` +
-        `in case you want to wire it by hand or re-run with --wire-yes.${reset || ''}`,
-    );
+    if (!quiet) {
+      console.error(
+        `${tag} · ${dim || ''}Leaving your code untouched. The document stays at ${docRel} ` +
+          `in case you want to wire it by hand or re-run with --wire-yes.${reset || ''}`,
+      );
+    }
     return { status: 'declined', docPath: docAbs, autoCount: plan.auto.length, manualCount: plan.manual.length, plan };
   }
 
   // 4) Baseline: BEFORE touching anything, check whether the app already builds.
-  //    This lets us tell "we broke it" (revert) from "it was already broken"
-  //    (don't revert a good wiring over a pre-existing failure).
   let baseline = null;
   if (runTest && testRunner) {
-    console.error(`${tag} · ${dim || ''}Checking the build baseline BEFORE wiring…${reset || ''}`);
+    if (!quiet) {
+      console.error(`${tag} · ${dim || ''}Checking the build baseline BEFORE wiring…${reset || ''}`);
+    }
     try {
       baseline = await testRunner(appRoot, { framework });
     } catch (err) {
@@ -1579,7 +1586,7 @@ async function wireHandlers(appRoot, opts = {}) {
     const loop = await runAutoCorrectionLoop({
       appRoot, fyodosDirRel, fyodosDirAbs, manifest, evidence, wiringMap,
       ts, esm, ext, testRunner, corrector, files, framework, maxAttempts,
-      tag, dim, reset, registryRel, baseline,
+      tag, dim, reset, registryRel, baseline, quiet,
     });
 
     const finalAuto = loop.ready;
@@ -1692,7 +1699,9 @@ async function wireHandlers(appRoot, opts = {}) {
     if (baseline && baseline.ok === false && baseline.stage !== 'skipped-no-deps') {
       return { status: 'applied-untested', ...baseResult, test: baseline, preexistingFailure: true };
     }
-    console.error(`${tag} · ${dim || ''}Checking the app still builds after wiring…${reset || ''}`);
+    if (!quiet) {
+      console.error(`${tag} · ${dim || ''}Checking the app still builds after wiring…${reset || ''}`);
+    }
     let test;
     try {
       test = await testRunner(appRoot, { framework });
@@ -1710,50 +1719,26 @@ async function wireHandlers(appRoot, opts = {}) {
   return { status: 'applied', ...baseResult };
 }
 
-function reportHandlerResult(result, colors = {}) {
+function reportHandlerResult(result, colors = {}, opts = {}) {
+  const quiet = opts.quiet !== false;
   if (!result) return;
   const { blue, cyan, dim, reset } = colors;
   const tag = `${cyan || ''}◉${reset || ''} ${blue || ''}Fiodos${reset || ''}`;
   switch (result.status) {
     case 'applied':
-    case 'applied-untested': {
-      const rel = result.registryRel || result.registryFile;
-      console.error(`${tag} · ✓ Handler wiring applied → ${rel} (${result.autoCount} action(s)).`);
-      if (Array.isArray(result.verification) && result.verification.length) {
-        const ready = result.verification.filter((v) => v.status === 'ready');
-        const corrected = ready.filter((v) => v.attempts > 1).length;
-        const firstTry = ready.length - corrected;
-        const eff = ready.filter((v) => v.level === 'effect').length;
-        console.error(`${tag} · ${dim || ''}Verification: ${ready.length} action(s) ready (${firstTry} on first try, ${corrected} after auto-correction, ${eff} with real effect confirmed).${reset || ''}`);
-      }
-      if (result.editedFiles && result.editedFiles.length) {
-        console.error(`${tag} · ${dim || ''}Bridges added (reversible) in: ${result.editedFiles.join(', ')}.${reset || ''}`);
-      }
-      if (Array.isArray(result.dropped) && result.dropped.length) {
-        console.error(`${tag} · ${dim || ''}${result.dropped.length} action(s) could NOT be wired after retries (reverted, see the document): ${result.dropped.map((d) => d.intent).join(', ')}.${reset || ''}`);
-      } else if (result.manualCount) {
-        console.error(`${tag} · ${dim || ''}${result.manualCount} action(s) left for review (see the document).${reset || ''}`);
-      }
-      if (result.test && result.test.ok) {
-        console.error(`${tag} · ✓ Post-wiring build check OK (${result.test.stage}).`);
-      } else if (result.preexistingFailure) {
-        console.error(`${tag} · ${dim || ''}Note: your app was ALREADY not building BEFORE wiring (${result.test && result.test.stage}); not caused by Fiodos, so the wiring is kept but cannot be build-verified.${reset || ''}`);
-      } else if (result.status === 'applied-untested') {
-        console.error(`${tag} · ${dim || ''}Note: could not verify the build (${result.test && result.test.stage}); please check it.${reset || ''}`);
-      }
-      console.error(`${tag} · ${dim || ''}Enable it by passing registries={fyodosGeneratedRegistries} to <FiodosAgent/> (snippet in the document).${reset || ''}`);
+    case 'applied-untested':
+      if (quiet) return;
       break;
-    }
     case 'reverted':
       console.error(`${tag} · ✗ Post-wiring build check failed (${result.test && result.test.stage}) — reverted all changes, your app is untouched.`);
       console.error(`${tag} · ${dim || ''}Details in the document; nothing was modified in your code.${reset || ''}`);
       break;
     case 'manual-only':
+      if (quiet) return;
       console.error(`${tag} · ${dim || ''}Wiring documented; apply it by hand following ${result.docPath}.${reset || ''}`);
       break;
     case 'declined':
     case 'declined-noninteractive':
-      // already reported inline
       break;
     case 'failed':
       console.error(`${tag} · ✗ Could not write the handler registry: ${result.error && result.error.message}`);

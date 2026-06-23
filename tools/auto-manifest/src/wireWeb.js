@@ -222,7 +222,9 @@ async function wireWebOrb(appRoot, opts = {}) {
     return { status: 'printed', reason: plan.reason };
   }
 
-  printMountPreview(plan, colors);
+  if (!assumeYes) {
+    printMountPreview(plan, colors);
+  }
 
   const yes = assumeYes || (await askYesNo(
     `${colors.cyan || ''}◉${colors.reset || ''} About to add the orb to ${plan.rel}. Proceed? [y/N] `,
@@ -286,22 +288,15 @@ async function wireWebOrb(appRoot, opts = {}) {
   }
 }
 
-function reportWireResult(result, colors = {}) {
+function reportWireResult(result, colors = {}, opts = {}) {
+  const quiet = opts.quiet !== false;
+  if (!result) return;
   const { blue, cyan, dim, reset } = colors;
   const tag = `${cyan || ''}◉${reset || ''} ${blue || ''}Fiodos${reset || ''}`;
   switch (result.status) {
     case 'added':
-      console.error(`${tag} · ✓ orb added to ${result.file}. Start your web app (e.g. \`npm run dev\`) to see it.`);
-      if (result.preexistingFailure) {
-        console.error(`${tag} · ${dim || ''}Note: your app was ALREADY not building before the orb was added (${result.test && result.test.stage}); not caused by Fiodos — the orb is kept so it appears once your build is fixed.${reset || ''}`);
-      } else if (result.test && result.test.stage === 'skipped-no-deps') {
-        console.error(`${tag} · ${dim || ''}build not verified (no node_modules) — run npm install && npm run build locally.${reset || ''}`);
-      } else if (result.test && result.test.ok) {
-        console.error(`${tag} · ✓ ${result.test.command} passed after mount.`);
-      }
-      break;
     case 'already':
-      console.error(`${tag} · ✓ orb already mounted in ${result.file}. Nothing to do.`);
+      if (quiet) return;
       break;
     case 'declined':
       console.error(`${tag} · ${dim || ''}did not modify your code. Paste the snippet above to mount the orb.${reset || ''}`);

@@ -31,7 +31,8 @@
  *   After analysis, a web target is OFFERED automatic wiring of <FiodosAgent/>
  *   into the app's root layout. It asks before editing your code; on "no" (or a
  *   non-interactive shell) it prints the ready-to-paste snippet instead.
- *     --yes          accept the wiring/env without the prompt (CI / express)
+ *     --yes          accept orb/handler wiring without prompts (CI / express)
+ *     --write-env-yes write the API key to .env without asking (CI only)
  *     --no-wire      skip wiring entirely (analysis/publish unaffected)
  *     --no-write-env skip the offer to align the app's .env with the published
  *                    key/URL (see below)
@@ -39,10 +40,11 @@
  * Avoiding the silent "orb fetches the wrong backend" failure:
  *   After --publish the CLI (1) re-fetches the manifest with the SAME key+URL to
  *   confirm the orb will find it, printing the exact key/URL your app must use,
- *   and (2) on web, OFFERS to write that key/URL into the app's env file
- *   (.env.local for Next, .env for Vite) so the runtime matches what you
- *   published. It never overwrites a differing value silently — it warns and
- *   asks first. Disable with --no-write-env.
+ *   and (2) on web, ASKS at the END whether to write that key/URL into the
+ *   app's env file (.env.local for Next, .env for Vite). If you say yes it
+ *   writes; if you say no it prints the exact file path and lines to add.
+ *   Independent of --yes (which only skips orb/handler prompts). CI: --write-env-yes.
+ *   Disable entirely with --no-write-env.
  *
  * AI key — HYBRID model:
  *   DEFAULT (hosted): the AI analysis runs on the Fiodos backend with FIODOS'S
@@ -88,11 +90,12 @@ loadEnv();
 
 const { scanRoutes } = require('./routes');
 const { collectFiles } = require('./collect');
+const { resolveAnalysisRoot } = require('./resolveAnalysisRoot');
 const { analyzeWithAI, correctActionWiring, DEFAULT_MODEL, resolveModel } = require('./aiAnalyze');
 const { verifyManifest } = require('./verify');
 const { wireWebOrb, reportWireResult } = require('./wireWeb');
 const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
-const { offerWriteEnv } = require('./writeEnv');
+const { offerWriteEnv, printEnvManualReminder } = require('./writeEnv');
 
 function arg(flag, fallback) {
   const i = process.argv.indexOf(flag);
@@ -187,7 +190,8 @@ async function main() {
   // Default output dir lives in the OS temp dir, NOT inside the installed
   // package (when run via npx, __dirname is under node_modules and writing
   // there pollutes the package). Operators can still override with --out.
-  const safeName = path.basename(path.resolve(appRoot)).replace(/[^a-z0-9_-]/gi, '_') || 'app';
+  const inputRoot = path.resolve(appRoot);
+  const safeName = path.basename(inputRoot).replace(/[^a-z0-9_-]/gi, '_') || 'app';
   const outDir = arg('--out', path.join(os.tmpdir(), 'fiodos', 'analysis', safeName));
   // Model precedence: explicit --model (operator override) > backend plan model
   // (resolved below from the analysis-quota pre-check) > DEFAULT_MODEL fallback.
@@ -197,30 +201,47 @@ async function main() {
   const useLLM = !process.argv.includes('--no-llm');
   fs.mkdirSync(outDir, { recursive: true });
 
-  // ── 1. Static route scan (cheap facts; also the route verifier's ground truth)
-  // Platform: auto-detected from the presence of an expo-router app/ dir, or
-  // forced with --platform web|mobile. Web apps have no static route ground
-  // truth, so the AI proposes routes and we keep them unverified (honest flag).
-  const { appDir, routes: scannedRoutes } = scanRoutes(appRoot);
   const platformArg = (arg('--platform', '') || '').toLowerCase();
   const KNOWN_PLATFORMS = ['web', 'mobile', 'flutter', 'ios', 'android'];
-  const platform = KNOWN_PLATFORMS.includes(platformArg)
-    ? platformArg
-    : detectPlatform(appRoot, appDir);
+  const forcedPlatform = KNOWN_PLATFORMS.includes(platformArg) ? platformArg : null;
+
+  // ── 1. Static route scan (cheap facts; also the route verifier's ground truth)
+  // Platform: auto-detected from package.json / native manifests, or forced with
+  // --platform. Web apps have no static route ground truth, so the AI proposes
+  // routes and we keep them unverified (honest flag).
+  const { appDir, routes: scannedRoutes } = scanRoutes(inputRoot);
+  const platform = forcedPlatform ?? detectPlatform(inputRoot, appDir);
+
+  // Monorepos: scope analysis to the sub-app for this platform (e.g. frontend/
+  // for Next, mobile/ for Expo) so the web orb never inherits mobile actions.
+  const explicitAnalysisRoot = arg('--analysis-root', '');
+  const scope = explicitAnalysisRoot
+    ? { root: path.resolve(explicitAnalysisRoot), scoped: true, reason: '--analysis-root' }
+    : resolveAnalysisRoot(inputRoot, platform);
+  const analysisRoot = scope.root;
+  if (scope.scoped) {
+    const rel = path.relative(inputRoot, analysisRoot) || '.';
+    logDev(
+      `Scoped to ${rel} (${platform} app) — analyzing this folder only, not the whole repo.`,
+    );
+    logDev(`[scope] input=${inputRoot} analysis=${analysisRoot} reason=${scope.reason}`);
+  }
+
+  const { appDir: scopedAppDir, routes: scopedRoutes } = scanRoutes(analysisRoot);
   // The expo-router filesystem scan ONLY describes a mobile app. A Next.js App
   // Router web app also has an app/ dir, so the scan would otherwise produce
   // bogus "routes" and misclassify the project; for web we ignore it and let
   // the AI propose routes (the documented web contract).
   // Only Expo/RN ('mobile') has a static route ground truth. Web AND the native
   // platforms (flutter/ios/android) have the AI infer routes (kept unverified).
-  const routes = platform === 'mobile' ? scannedRoutes : [];
+  const routes = platform === 'mobile' ? scopedRoutes : [];
   const verifyRoutes = platform === 'mobile' && routes.length > 0;
-  const appMeta = readAppMeta(appRoot);
+  const appMeta = readAppMeta(analysisRoot);
   logDev(`[static] platform=${platform} routes=${routes.length}` +
     (platform === 'web' ? ' (web: routes inferred by AI, not statically verified)' : ''));
 
   // ── 2. Collect source files (rule-based, budget-aware) ────────────────────
-  const { included, omitted, estimatedTokens } = collectFiles(appRoot, { maxInputTokens, platform });
+  const { included, omitted, estimatedTokens } = collectFiles(analysisRoot, { maxInputTokens, platform });
   fs.writeFileSync(path.join(outDir, 'files-sent.json'), JSON.stringify({
     included: included.map((f) => f.rel),
     omitted,
@@ -244,14 +265,14 @@ async function main() {
     // is not acceptable for this app.
     ({ manifest, provenance } = routesOnlyManifest(appMeta, routes));
     logDev('[no-llm] static-only manifest (routes only, no actions)');
-    logUser(`Static analysis complete — ${manifest.routes.length} routes`);
+    logUser('Static analysis complete');
   } else {
     // Hybrid AI-key model. DEFAULT: hosted analysis via the Fiodos backend
     // proxy (Fiodos's AI key, no key needed by the developer). With
     // --own-ai-key the analysis runs locally against the developer's own
     // provider key (privacy path: source code goes straight to the AI and
     // never reaches Fiodos). --no-llm (handled above) sends no code anywhere.
-    loadAppEnv(path.resolve(appRoot));
+    loadAppEnv(analysisRoot);
     const { apiKey, apiUrl } = resolveApiTarget();
     const useProxy = !process.argv.includes('--own-ai-key');
 
@@ -304,7 +325,7 @@ async function main() {
     const droppedRoutes = provenance.routes.filter((r) => !r.included).length;
     logDev(`[verify] kept routes=${manifest.routes.length} actions=${manifest.actions.length}` +
       ` | dropped: ${droppedRoutes} routes, ${droppedActions} actions (unproven evidence)`);
-    logUser(`Analysis complete — ${manifest.routes.length} routes, ${manifest.actions.length} actions`);
+    logUser('Analysis complete');
 
     fs.writeFileSync(path.join(outDir, 'evidence.json'), JSON.stringify({
       evidence, wiring, uncertain: parsed.uncertain || [],
@@ -353,7 +374,7 @@ async function main() {
   logDev(`[done] output → ${outDir}`);
 
   if (process.argv.includes('--publish')) {
-    loadAppEnv(path.resolve(appRoot));
+    loadAppEnv(analysisRoot);
     await publishManifest(manifest, {
       ...analysisMeta,
       generatedAt: new Date().toISOString(),
@@ -370,35 +391,28 @@ async function main() {
     const { apiKey, apiUrl } = resolveApiTarget();
     const assumeYes = process.argv.includes('--yes') || process.argv.includes('--wire-yes');
     const noWire = process.argv.includes('--no-wire');
+    let envWriteResult = null;
 
-    // ── 5b. Offer to align the app's .env with the published key/URL (consent).
-    // Removes the second manual copy of the key — the root cause of the silent
-    // "orb fetches the wrong backend" failure. Skipped with --no-write-env.
-    if (process.argv.includes('--publish') && !process.argv.includes('--no-write-env')) {
-      try {
-        await offerWriteEnv({
-          appRoot: path.resolve(appRoot),
-          apiKey,
-          apiUrl,
-          defaultApiUrl: DEFAULT_API_URL,
-          assumeYes,
-          log: logUser,
-        });
-      } catch (e) {
-        logDev(`[write-env] skipped: ${e.message}`);
-      }
-    }
     // --no-orb-wire skips ONLY the orb mount (useful to test handler wiring in
     // isolation without modifying the app's entrypoint / package.json).
     if (!process.argv.includes('--no-orb-wire')) {
-      const result = await wireWebOrb(path.resolve(appRoot), {
+      const result = await wireWebOrb(analysisRoot, {
         apiUrl,
         colors: fyodosTermColors(),
         assumeYes,
         noWire,
         runTest: !process.argv.includes('--no-wire-test'),
       });
-      reportWireResult(result, fyodosTermColors());
+      reportWireResult(result, fyodosTermColors(), { quiet: !isVerbose() });
+      // Tell the dashboard the orb is wired — no need to boot localhost for the
+      // onboarding checker to complete.
+      if (
+        process.argv.includes('--publish') &&
+        apiKey &&
+        (result.status === 'added' || result.status === 'already')
+      ) {
+        await postOrbWired({ apiKey, apiUrl, file: result.file || '' });
+      }
     }
 
     // ── 7. Web: SECOND consent — connect detected actions to real app functions.
@@ -417,7 +431,7 @@ async function main() {
           return fixed;
         }
       : null;
-    const handlerResult = await wireHandlers(path.resolve(appRoot), {
+    const handlerResult = await wireHandlers(analysisRoot, {
       manifest,
       evidence,
       wiring,
@@ -425,6 +439,7 @@ async function main() {
       colors: fyodosTermColors(),
       assumeYes,
       noWire,
+      quiet: !isVerbose(),
       runTest: !process.argv.includes('--no-wire-test'),
       revertOnFailure: true,
       testRunner: runPostWireTest,
@@ -432,7 +447,32 @@ async function main() {
       files: included,
       maxAttempts: Number(process.env.FYODOS_WIRE_MAX_ATTEMPTS || 3),
     });
-    reportHandlerResult(handlerResult, fyodosTermColors());
+    reportHandlerResult(handlerResult, fyodosTermColors(), { quiet: !isVerbose() });
+
+    // ── 8. API key in environment (LAST step — always asks; independent of --yes)
+    // --yes only skips orb/handler prompts. --write-env-yes skips this one (CI).
+    // If the developer declines, we show a copy-paste reminder here at the end.
+    if (process.argv.includes('--publish') && !process.argv.includes('--no-write-env')) {
+      try {
+        envWriteResult = await offerWriteEnv({
+          appRoot: analysisRoot,
+          apiKey,
+          apiUrl,
+          defaultApiUrl: DEFAULT_API_URL,
+          assumeYes: process.argv.includes('--write-env-yes'),
+          log: logUser,
+          logDev,
+        });
+        if (
+          envWriteResult &&
+          (envWriteResult.status === 'declined by user' || envWriteResult.status === 'manual')
+        ) {
+          printEnvManualReminder(envWriteResult.writePlan, { logUser, logDev });
+        }
+      } catch (e) {
+        logDev(`[write-env] skipped: ${e.message}`);
+      }
+    }
   }
 }
 
@@ -686,17 +726,11 @@ async function publishManifest(manifest, meta, analysisToken = null) {
     process.exit(1);
   }
   const body = await res.json();
-  logUser(`Published to your project — ${body.routes} routes, ${body.actions} actions`);
+  logUser('Published to your project');
   logDev(`[publish] OK — ${body.routes} routes, ${body.actions} actions received at ${body.receivedAt}`);
 
-  // ── Self-check: confirm the orb will actually FIND this manifest ───────────
-  // Re-fetch it the way the SDK does at runtime (GET /v1/client/manifest with
-  // the SAME key + URL). This catches the silent-failure setup BEFORE the
-  // developer is left wondering why the orb never appears, and prints the exact
-  // key/URL their app must use so they can compare with their .env.
+  // Self-check: confirm the orb will find this manifest (silent unless --verbose).
   await verifyOrbCanFetch({ apiKey, apiUrl });
-
-  logUser('Open the dashboard → Agent settings → "Reload analysis" to review');
 }
 
 /**
@@ -705,6 +739,23 @@ async function publishManifest(manifest, meta, analysisToken = null) {
  * and URL their running app must use. Never hard-fails the publish (the publish
  * already succeeded); a failed re-fetch is surfaced as an actionable warning.
  */
+async function postOrbWired({ apiKey, apiUrl, file }) {
+  if (!apiKey) return;
+  try {
+    const res = await fetch(`${apiUrl}/v1/developer/orb-wired`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+      body: JSON.stringify({ file: file || '', platform: 'web' }),
+    });
+    if (res.ok) {
+      logDev(`[orb-wired] install proof recorded (${file || 'web'})`);
+    } else {
+      logDev(`[orb-wired] could not record install proof: HTTP ${res.status}`);
+    }
+  } catch (e) {
+    logDev(`[orb-wired] skipped: ${e.message || e}`);
+  }
+}
 async function verifyOrbCanFetch({ apiKey, apiUrl }) {
   try {
     const res = await fetch(`${apiUrl}/v1/client/manifest`, {
@@ -714,27 +765,15 @@ async function verifyOrbCanFetch({ apiKey, apiUrl }) {
     if (res.ok) {
       const data = await res.json().catch(() => null);
       if (data && data.manifest) {
-        logUser(
-          `✓ Verified: your orb will find this manifest using API key ${apiKey.slice(0, 12)}… ` +
-            `against ${apiUrl}.`,
-        );
-        logUser(
-          'Make sure your app uses this SAME key and URL in its .env ' +
-            '(NEXT_PUBLIC_FYODOS_API_KEY / VITE_FYODOS_API_KEY, and the API URL).',
+        logDev(
+          `[verify] manifest reachable with key ${apiKey.slice(0, 12)}… against ${apiUrl}`,
         );
         return true;
       }
     }
-    logUser(
-      `⚠︎ Published, but could not re-read the manifest from ${apiUrl} (HTTP ${res.status}). ` +
-        'Check that your app uses this same key and URL.',
-    );
+    logDev(`[verify] published but re-fetch failed: HTTP ${res.status}`);
   } catch (e) {
     logDev(`[verify] re-fetch failed: ${e.message}`);
-    logUser(
-      `⚠︎ Published, but could not reach ${apiUrl} to verify. ` +
-        'Confirm your app points to this same URL and key.',
-    );
   }
   return false;
 }
