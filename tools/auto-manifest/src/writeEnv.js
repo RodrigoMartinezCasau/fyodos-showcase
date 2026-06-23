@@ -30,24 +30,36 @@ function readJsonSafe(file) {
 }
 
 /**
- * Decide which env file + variable names the detected framework uses. Returns
- * null when there is no safe .env convention to write (Angular, or unknown).
+ * Decide which env files + variable names the detected framework uses. Returns
+ * `file: null` when there is no safe .env convention to write (Angular,
+ * unknown). `candidates` is the list of env files the framework loads, ordered
+ * HIGHEST precedence first — so we can fix the value WHERE THE APP ACTUALLY
+ * READS IT instead of writing a second file that may or may not win. `file` is
+ * the default file to create when no candidate already defines the vars.
  */
 function resolveEnvPlan(appRoot) {
   const pkg = readJsonSafe(path.join(appRoot, 'package.json'));
   const has = (rel) => fs.existsSync(path.join(appRoot, rel));
   if (!pkg && !has('angular.json')) {
-    return { framework: null, file: null, keyVar: null, urlVar: null };
+    return { framework: null, file: null, candidates: [], keyVar: null, urlVar: null };
   }
   const deps = pkg ? { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) } : {};
 
   if (deps.next) {
-    return { framework: 'next', file: '.env.local', keyVar: 'NEXT_PUBLIC_FYODOS_API_KEY', urlVar: 'NEXT_PUBLIC_FYODOS_API_URL' };
+    // Next dev precedence (first wins): .env.development.local > .env.local >
+    // .env.development > .env.
+    return {
+      framework: 'next',
+      file: '.env.local',
+      candidates: ['.env.development.local', '.env.local', '.env.development', '.env'],
+      keyVar: 'NEXT_PUBLIC_FYODOS_API_KEY',
+      urlVar: 'NEXT_PUBLIC_FYODOS_API_URL',
+    };
   }
   if (deps['@angular/core'] || has('angular.json')) {
     // Angular has no .env convention (values live in environment.ts), so we
     // never write a file blindly — the caller prints manual guidance instead.
-    return { framework: 'angular', file: null, keyVar: null, urlVar: null };
+    return { framework: 'angular', file: null, candidates: [], keyVar: null, urlVar: null };
   }
   if (
     deps['@sveltejs/kit'] ||
@@ -58,9 +70,33 @@ function resolveEnvPlan(appRoot) {
     deps['@vitejs/plugin-react'] ||
     deps['react-scripts']
   ) {
-    return { framework: 'vite', file: '.env', keyVar: 'VITE_FYODOS_API_KEY', urlVar: 'VITE_FYODOS_API_URL' };
+    // Vite dev precedence (first wins): .env.development.local >
+    // .env.development > .env.local > .env.
+    return {
+      framework: 'vite',
+      file: '.env',
+      candidates: ['.env.development.local', '.env.development', '.env.local', '.env'],
+      keyVar: 'VITE_FYODOS_API_KEY',
+      urlVar: 'VITE_FYODOS_API_URL',
+    };
   }
-  return { framework: null, file: null, keyVar: null, urlVar: null };
+  return { framework: null, file: null, candidates: [], keyVar: null, urlVar: null };
+}
+
+/**
+ * Scan the framework's candidate env files (highest precedence first) for VAR.
+ * Returns { file, value } for the first (highest-precedence) file that defines
+ * it — i.e. the value the running app actually reads — or null if none do.
+ */
+function findEffectiveVar(appRoot, candidates, name) {
+  for (const rel of candidates) {
+    const filePath = path.join(appRoot, rel);
+    if (!fs.existsSync(filePath)) continue;
+    const lines = fs.readFileSync(filePath, 'utf8').replace(/\n$/, '').split('\n');
+    const value = readEnvVar(lines, name);
+    if (value !== undefined) return { file: rel, value };
+  }
+  return null;
 }
 
 /** Find the value of VAR in the parsed lines, or undefined if not present. */
@@ -145,13 +181,23 @@ async function offerWriteEnv({ appRoot, apiKey, apiUrl, defaultApiUrl, assumeYes
     return 'manual (unknown framework)';
   }
 
-  const filePath = path.join(appRoot, plan.file);
+  // Look across ALL the files the framework loads (not just the default one):
+  // the app may already keep its Fiodos vars in .env while we would otherwise
+  // create a separate .env.local — leaving the stale value the orb actually
+  // reads untouched. Fix the value WHERE THE APP READS IT.
+  const candidates = plan.candidates && plan.candidates.length ? plan.candidates : [plan.file];
+  const effectiveKey = findEffectiveVar(appRoot, candidates, plan.keyVar);
+  const effectiveUrl = findEffectiveVar(appRoot, candidates, plan.urlVar);
+  const currentKey = effectiveKey ? effectiveKey.value : undefined;
+  const currentUrl = effectiveUrl ? effectiveUrl.value : undefined;
+
+  // Write in the highest-precedence file that already defines either var (so the
+  // fix is the value the app loads). If none do, create the framework default.
+  const targetRel = (effectiveKey && effectiveKey.file) || (effectiveUrl && effectiveUrl.file) || plan.file;
+  const filePath = path.join(appRoot, targetRel);
   const exists = fs.existsSync(filePath);
   const raw = exists ? fs.readFileSync(filePath, 'utf8') : '';
   const lines = raw.length ? raw.replace(/\n$/, '').split('\n') : [];
-
-  const currentKey = readEnvVar(lines, plan.keyVar);
-  const currentUrl = readEnvVar(lines, plan.urlVar);
 
   // Only write a URL var when it differs from the public default (the SDK
   // already defaults to production). But if a STALE url var exists and differs
@@ -163,7 +209,7 @@ async function offerWriteEnv({ appRoot, apiKey, apiUrl, defaultApiUrl, assumeYes
   const keyMatches = currentKey === apiKey;
   const urlOk = !urlNeedsFix && (wantUrl ? currentUrl === wantUrl : true);
   if (keyMatches && urlOk) {
-    log(`✓ Your ${plan.file} already uses the same key/URL as the publication. Nothing to change.`);
+    log(`✓ Your ${targetRel} already uses the same key/URL as the publication. Nothing to change.`);
     return 'already aligned';
   }
 
@@ -189,7 +235,7 @@ async function offerWriteEnv({ appRoot, apiKey, apiUrl, defaultApiUrl, assumeYes
   }
 
   if (!changes.length) {
-    log(`✓ Your ${plan.file} is already aligned.`);
+    log(`✓ Your ${targetRel} is already aligned.`);
     return 'already aligned';
   }
 
@@ -197,17 +243,17 @@ async function offerWriteEnv({ appRoot, apiKey, apiUrl, defaultApiUrl, assumeYes
   const isOverwrite = (currentKey !== undefined && !keyMatches) || urlNeedsFix;
   log(
     `${isOverwrite ? '⚠︎ ' : ''}For the orb to find its manifest, your app should use the SAME ` +
-      `key/URL you just published with. Proposed in ${plan.file}: ${changes.join('; ')}.`,
+      `key/URL you just published with. Proposed in ${targetRel}: ${changes.join('; ')}.`,
   );
 
   let proceed = assumeYes;
   if (!proceed) {
     proceed = await askYesNo(
-      `◉ Fiodos · Write/update ${plan.file} with the published key/URL? [yes/no] `,
+      `◉ Fiodos · Write/update ${targetRel} with the published key/URL? [yes/no] `,
     );
   }
   if (!proceed) {
-    log(`Left your ${plan.file} untouched. Do it by hand: ${changes.join('; ')}.`);
+    log(`Left your ${targetRel} untouched. Do it by hand: ${changes.join('; ')}.`);
     return 'declined by user';
   }
 
@@ -219,10 +265,10 @@ async function offerWriteEnv({ appRoot, apiKey, apiUrl, defaultApiUrl, assumeYes
     out = upsertEnvVar(out, plan.urlVar, apiUrl);
   }
   fs.writeFileSync(filePath, `${out.join('\n')}\n`);
-  log(`✓ ${plan.file} updated (${changes.join('; ')}).`);
+  log(`✓ ${targetRel} updated (${changes.join('; ')}).`);
 
-  if (!isGitIgnored(appRoot, plan.file)) {
-    log(`Reminder: add ${plan.file} to .gitignore so you don't commit your API key.`);
+  if (!isGitIgnored(appRoot, targetRel)) {
+    log(`Reminder: add ${targetRel} to .gitignore so you don't commit your API key.`);
   }
   return 'written';
 }
