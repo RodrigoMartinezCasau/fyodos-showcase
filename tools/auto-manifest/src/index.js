@@ -157,6 +157,19 @@ function logUser(line) {
   console.log(`${cyan}◉${reset} ${blue}Fiodos${reset} · ${line}`);
 }
 
+/** Spinner copy: "website" for web targets, "app" for mobile/native. */
+function surfaceNoun(platform) {
+  return platform === 'web' ? 'website' : 'app';
+}
+
+function orbMountSpinnerLabel(platform) {
+  return `Mounting the orb on your ${surfaceNoun(platform)}`;
+}
+
+function wiringSpinnerLabel(platform) {
+  return `Wiring actions to your ${surfaceNoun(platform)}`;
+}
+
 /** Branded terminal spinner (Fiodos orb + colors when stderr is a TTY). */
 async function withSpinner(label, work) {
   const orbFrames = ['◴', '◷', '◶', '◵'];
@@ -514,7 +527,7 @@ async function main() {
       // --no-orb-wire skips ONLY the orb mount (useful to test handler wiring in
       // isolation without modifying the app's entrypoint / package.json).
       if (!process.argv.includes('--no-orb-wire')) {
-        setLabel('Mounting the orb in your app');
+        setLabel(orbMountSpinnerLabel(platform));
         if (!assumeYes) pause();
         const result = await wireWebOrb(analysisRoot, {
           apiUrl,
@@ -541,7 +554,7 @@ async function main() {
         }
       }
 
-      setLabel('Wiring actions to your app');
+      setLabel(wiringSpinnerLabel(platform));
       if (!assumeYes) pause();
       const handlerResult = await wireHandlers(analysisRoot, handlerOpts);
       if (!assumeYes) resume();
@@ -556,7 +569,7 @@ async function main() {
       });
       logUser('Published to your project');
     } else {
-      await withSpinner('Mounting the orb in your app', runWebWire);
+      await withSpinner(orbMountSpinnerLabel(platform), runWebWire);
     }
 
     // ── 8. API key in environment (LAST step — always asks; independent of --yes)
