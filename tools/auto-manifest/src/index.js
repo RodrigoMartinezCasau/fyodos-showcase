@@ -526,6 +526,8 @@ async function main() {
 
       // --no-orb-wire skips ONLY the orb mount (useful to test handler wiring in
       // isolation without modifying the app's entrypoint / package.json).
+      let orbProofPosted = false;
+      let orbMountFile = '';
       if (!process.argv.includes('--no-orb-wire')) {
         setLabel(orbMountSpinnerLabel(platform));
         if (!assumeYes) pause();
@@ -544,10 +546,15 @@ async function main() {
           (result.status === 'added' || result.status === 'already')
         ) {
           // Records the install proof so the dashboard onboarding orb check can
-          // complete without booting the app. If the backend can't record it
-          // (e.g. an outdated deployment without the endpoint), keep it as a
-          // dev-only trace — it is not actionable noise for the end developer.
-          const proof = await postOrbWired({ apiKey, apiUrl, file: result.file || '' });
+          // complete without booting the app. We post 'pending' here: the orb is
+          // mounted, but action wiring (below) has NOT happened yet — so the
+          // dashboard must keep showing "installing" until we post the terminal
+          // status after wireHandlers. If the backend can't record it (e.g. an
+          // outdated deployment without the endpoint), keep it as a dev-only
+          // trace — it is not actionable noise for the end developer.
+          orbMountFile = result.file || '';
+          const proof = await postOrbWired({ apiKey, apiUrl, file: orbMountFile, actionsStatus: 'pending' });
+          orbProofPosted = true;
           if (proof && proof.ok === false && proof.reason !== 'no-api-key') {
             logDev(`[orb-wired] install proof not recorded (status=${proof.status || proof.reason}); dashboard check will rely on a runtime ping`);
           }
@@ -559,6 +566,23 @@ async function main() {
       const handlerResult = await wireHandlers(analysisRoot, handlerOpts);
       if (!assumeYes) resume();
       report(() => reportHandlerResult(handlerResult, fyodosTermColors(), { quiet: !isVerbose() }));
+
+      // Finalize the install proof: now that the (slow) action wiring is done,
+      // tell the dashboard the terminal status so its "actions connected" tick
+      // turns green for real — never before wiring actually finished. Only do
+      // this when we already posted the mount proof, so --no-orb-wire and
+      // runtime-only flows don't get a spurious install record.
+      if (orbProofPosted) {
+        const { status, total, done } = actionsWiredFromHandlerResult(handlerResult);
+        await postOrbWired({
+          apiKey,
+          apiUrl,
+          file: orbMountFile,
+          actionsStatus: status,
+          actionsTotal: total,
+          actionsDone: done,
+        });
+      }
     };
 
     if (publishing) {
@@ -870,16 +894,29 @@ async function publishManifest(manifest, meta, analysisToken = null, opts = {}) 
  * and URL their running app must use. Never hard-fails the publish (the publish
  * already succeeded); a failed re-fetch is surfaced as an actionable warning.
  */
-async function postOrbWired({ apiKey, apiUrl, file }) {
+async function postOrbWired({
+  apiKey,
+  apiUrl,
+  file,
+  actionsStatus = 'pending',
+  actionsTotal = 0,
+  actionsDone = 0,
+}) {
   if (!apiKey) return { ok: false, reason: 'no-api-key' };
   try {
     const res = await fetch(`${apiUrl}/v1/developer/orb-wired`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-      body: JSON.stringify({ file: file || '', platform: 'web' }),
+      body: JSON.stringify({
+        file: file || '',
+        platform: 'web',
+        actionsStatus,
+        actionsTotal,
+        actionsDone,
+      }),
     });
     if (res.ok) {
-      logDev(`[orb-wired] install proof recorded (${file || 'web'})`);
+      logDev(`[orb-wired] install proof recorded (${file || 'web'}, actions=${actionsStatus} ${actionsDone}/${actionsTotal})`);
       return { ok: true };
     }
     logDev(`[orb-wired] could not record install proof: HTTP ${res.status}`);
@@ -888,6 +925,35 @@ async function postOrbWired({ apiKey, apiUrl, file }) {
     logDev(`[orb-wired] skipped: ${e.message || e}`);
     return { ok: false, reason: e.message || String(e) };
   }
+}
+
+// Map a wireHandlers() result to the terminal action-wiring status the backend
+// records, plus how many actions ended up wired. Drives the onboarding's third
+// "actions connected" tick so it only goes green once wiring truly finished.
+function actionsWiredFromHandlerResult(handlerResult) {
+  const r = handlerResult || {};
+  const total = Number(r.autoCount || 0) + Number(r.manualCount || 0);
+  const done = Number(r.autoCount || 0);
+  let status;
+  switch (r.status) {
+    case 'no-actions':
+      status = 'none';
+      break;
+    case 'skipped':
+      status = 'skipped';
+      break;
+    case 'reverted':
+    case 'failed':
+      status = 'failed';
+      break;
+    case 'applied':
+    case 'applied-untested':
+      status = r.partial ? 'partial' : 'complete';
+      break;
+    default:
+      status = 'complete';
+  }
+  return { status, total, done };
 }
 async function verifyOrbCanFetch({ apiKey, apiUrl }) {
   try {
