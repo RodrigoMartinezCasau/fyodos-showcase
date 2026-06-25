@@ -93,7 +93,7 @@ const { collectFiles } = require('./collect');
 const { resolveAnalysisRoot } = require('./resolveAnalysisRoot');
 const { analyzeWithAI, correctActionWiring, DEFAULT_MODEL, resolveModel } = require('./aiAnalyze');
 const { verifyManifest } = require('./verify');
-const { wireWebOrb, reportWireResult } = require('./wireWeb');
+const { wireWebOrb, reportWireResult, connectOrbRegistries, reportRegistriesResult } = require('./wireWeb');
 const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
 const { offerWriteEnv, printEnvManualReminder } = require('./writeEnv');
 const { scoreSurface, computeSurface } = require('./scoreSurface');
@@ -527,6 +527,7 @@ async function main() {
       // --no-orb-wire skips ONLY the orb mount (useful to test handler wiring in
       // isolation without modifying the app's entrypoint / package.json).
       let orbProofPosted = false;
+      let orbMounted = false;
       let orbMountFile = '';
       if (!process.argv.includes('--no-orb-wire')) {
         setLabel(orbMountSpinnerLabel(platform));
@@ -540,6 +541,7 @@ async function main() {
         });
         if (!assumeYes) resume();
         report(() => reportWireResult(result, fyodosTermColors(), { quiet: !isVerbose() }));
+        orbMounted = result.status === 'added' || result.status === 'already';
         if (
           publishing &&
           apiKey &&
@@ -566,6 +568,23 @@ async function main() {
       const handlerResult = await wireHandlers(analysisRoot, handlerOpts);
       if (!assumeYes) resume();
       report(() => reportHandlerResult(handlerResult, fyodosTermColors(), { quiet: !isVerbose() }));
+
+      // Second pass — connect the generated registry to the mounted orb so it
+      // EXECUTES actions, not just navigates. Removes the manual "paste
+      // registries={…}" step. Only when the orb is mounted AND there are
+      // auto-wired handlers (autoCount > 0): nav-only / all-manual apps don't
+      // need a registry and are left untouched. Idempotent + reversible.
+      const handlerApplied =
+        handlerResult &&
+        (handlerResult.status === 'applied' || handlerResult.status === 'applied-untested') &&
+        (handlerResult.autoCount || 0) > 0 &&
+        handlerResult.registryFile;
+      if (orbMounted && handlerApplied && !process.argv.includes('--no-orb-wire')) {
+        const connected = connectOrbRegistries(analysisRoot, {
+          registryFileAbs: handlerResult.registryFile,
+        });
+        report(() => reportRegistriesResult(connected, fyodosTermColors(), { quiet: !isVerbose() }));
+      }
 
       // Finalize the install proof: now that the (slow) action wiring is done,
       // tell the dashboard the terminal status so its "actions connected" tick

@@ -87,6 +87,42 @@ function isAlreadyMounted(source) {
   return /FiodosAgent|fyodos-agent|FYODOS:ORB:START/.test(source);
 }
 
+// Import specifier (no extension, normalized slashes) from the file holding the
+// orb mount to the generated registry module.
+function registryRelImport(fromFile, registryAbs) {
+  let rel = path
+    .relative(path.dirname(fromFile), registryAbs)
+    .replace(/\\/g, '/')
+    .replace(/\.(tsx?|jsx?|mjs|cjs)$/, '');
+  if (!rel.startsWith('.')) rel = `./${rel}`;
+  return rel;
+}
+
+// Idempotently add `registries={EXPORT}` to the mounted <FiodosAgent/> and
+// import EXPORT from the generated registry. React-family mounts only. The prop
+// lands INSIDE the FYODOS:ORB block, so removing that block reverts it; the
+// import follows the existing FiodosAgent import convention (added once,
+// harmless if the block is later removed). Returns { changed, source, reason? }.
+function addRegistriesToMountSource(source, exportName, importPath) {
+  if (new RegExp(`registries=\\{${escapeRe(exportName)}\\}`).test(source)) {
+    return { changed: false, source, reason: 'already' };
+  }
+  const tagRe = /([ \t]*)<FiodosAgent\b[\s\S]*?\/>/;
+  const m = source.match(tagRe);
+  if (!m) return { changed: false, source, reason: 'not-mounted' };
+  const tag = m[0];
+  const baseIndent = m[1] || '';
+  const propMatch = tag.match(/\n([ \t]*)(?:apiKey|api-key|apiUrl|baseUrl)/);
+  const propIndent = propMatch ? propMatch[1] : `${baseIndent}  `;
+  const newTag = tag.replace(/\n?[ \t]*\/>$/, `\n${propIndent}registries={${exportName}}\n${baseIndent}/>`);
+  let next = source.replace(tag, newTag);
+  const importLine = `import { ${exportName} } from '${importPath}';`;
+  if (!next.includes(importLine)) {
+    next = insertImportAfterLastImport(next, importLine);
+  }
+  return { changed: true, source: next };
+}
+
 /**
  * Assess whether we can inject safely. Returns { ok, reason?, strategy, files, rel }.
  */
@@ -398,18 +434,17 @@ function writeConsentDoc(appRoot, plan) {
   const dir = path.join(appRoot, 'src', 'fyodos');
   fs.mkdirSync(dir, { recursive: true });
   const doc = [
-    '# Fiodos orb mount (auto-generated)',
+    '# Fiodos — orb mount',
     '',
-    `Date: ${new Date().toISOString()}`,
-    `Strategy: ${plan.strategy}`,
-    `Files edited:`,
-    ...plan.files.map((f) => `- ${path.relative(appRoot, f)}`),
+    'Mounts `<FiodosAgent />` in your app. The orb connects to the Fiodos backend',
+    'with your project API key and fetches its manifest and appearance on its own;',
+    'nothing else to paste.',
     '',
-    'Changes are wrapped in FYODOS:ORB:START / FYODOS:ORB:END markers.',
-    'Remove those blocks (and the Fiodos import) to revert manually.',
+    `- Strategy: \`${plan.strategy}\``,
+    `- Files: ${plan.files.map((f) => `\`${path.relative(appRoot, f)}\``).join(', ')}`,
     '',
-    'Planned edits:',
-    ...describePlan(plan).map((l) => `- ${l}`),
+    'Edits sit between `FYODOS:ORB:START` / `FYODOS:ORB:END` markers. Remove those',
+    'blocks (and the Fiodos import) to revert.',
     '',
   ].join('\n');
   writeFile(path.join(dir, 'FYODOS_ORB_MOUNT.md'), doc);
@@ -430,6 +465,8 @@ module.exports = {
   revertFiles,
   writeConsentDoc,
   isAlreadyMounted,
+  registryRelImport,
+  addRegistriesToMountSource,
   IMPORT_NAME,
   WRAPPER_BASENAME,
 };

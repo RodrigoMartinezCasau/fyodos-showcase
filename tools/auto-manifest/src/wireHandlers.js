@@ -736,13 +736,15 @@ function buildRegistryModule(plan, opts = {}) {
   }
 
   // Self-contained types (no @fyodos import) so the file typechecks even before
-  // the SDK is installed; the shape stays structurally compatible with
-  // ActionRegistries when passed to <FiodosAgent registries={...}/>.
+  // the SDK is installed; the shape MUST stay assignable to @fiodos/core's
+  // ActionRegistries so `<FiodosAgent registries={...}/>` type-checks. In
+  // particular idempotencyCheckers must match IdempotencyChecker —
+  // `(context) => Promise<{ alreadyApplied; message? }>` — not a boolean.
   const typeDefs = ts
     ? 'type FiodosActionResult = { success: boolean; data?: Record<string, unknown>; error?: string };\n' +
       'type FiodosRegistries = {\n' +
       '  handlers: Record<string, (params: Record<string, any>) => Promise<FiodosActionResult>>;\n' +
-      '  idempotencyCheckers: Record<string, (params: Record<string, any>) => boolean | Promise<boolean>>;\n' +
+      '  idempotencyCheckers: Record<string, (context: Record<string, any>) => Promise<{ alreadyApplied: boolean; message?: string }>>;\n' +
       '};\n'
     : '';
   const resultType = ts ? ': Promise<FiodosActionResult>' : '';
@@ -751,14 +753,11 @@ function buildRegistryModule(plan, opts = {}) {
   const handlerBlocks = plan.auto.map((e) => {
     const takesParams = e.usesParams != null ? e.usesParams : /\bparams\b/.test(e.callExpr);
     const arg = takesParams ? `params${paramsType}` : `_params${paramsType}`;
-    const confNote = e.requireConfirmation
-      ? '\n      // Confirmation action: the Fiodos engine already asked for confirmation BEFORE calling here.'
-      : '';
     // `: unknown` lets the truthiness test below be legal even when the wired
     // call returns void (e.g. db.delete(...)) — otherwise TS errors on `result &&`.
     const resultDecl = ts ? 'const result: unknown' : 'const result';
     return (
-      `    ${e.handler}: async (${arg})${resultType} => {${confNote}\n` +
+      `    ${e.handler}: async (${arg})${resultType} => {\n` +
       `      try {\n` +
       `        ${resultDecl} = await Promise.resolve(${e.callExpr});\n` +
       `        return { success: true, data: (result && typeof result === 'object') ? result as Record<string, unknown> : { result } };\n` +
@@ -772,20 +771,19 @@ function buildRegistryModule(plan, opts = {}) {
   // Plain-JS variant: drop the `as` cast.
   const handlerText = (ts ? handlerBlocks.join('\n') : handlerBlocks.join('\n').replace(/ as Record<string, unknown>/g, ''));
 
-  const manualNotes = plan.manual.map(
-    (e) => `    // MANUAL — '${e.intent}' (${e.handler}): ${e.reason}`,
+  // List each handler that needs manual wiring once. Skip any handler already
+  // auto-wired above (the same handler name can back both an auto-wired and a
+  // manual intent — listing it as "manual" would contradict the wired entry).
+  const autoHandlers = new Set(plan.auto.map((e) => e.handler));
+  const manualHandlers = [...new Set(plan.manual.map((e) => e.handler))].filter(
+    (h) => !autoHandlers.has(h),
+  );
+  const manualNotes = manualHandlers.map(
+    (h) => `    // ${h}: needs manual wiring — see ${DOC_BASENAME}`,
   );
 
   const header =
-    `/**\n` +
-    ` * ${GENERATED_MARKER}.\n` +
-    ` * Do not edit by hand: re-run the Fiodos installer to regenerate it.\n` +
-    ` * Read ${DOC_BASENAME} (same folder) to see what it wires and why.\n` +
-    ` *\n` +
-    ` * SECURITY: this file only CALLS your functions. It never decides whether a\n` +
-    ` * sensitive action runs — the Fiodos engine applies the manifest confirmations\n` +
-    ` * (requireConfirmation / voiceConfirmation) BEFORE invoking any handler here.\n` +
-    ` */\n`;
+    `/** ${GENERATED_MARKER}. Do not edit — re-run the Fiodos installer to regenerate. */\n`;
 
   const decl = esm
     ? `export const ${REGISTRY_EXPORT}${ts ? ': FiodosRegistries' : ''} = {`
@@ -801,8 +799,6 @@ function buildRegistryModule(plan, opts = {}) {
     `${handlerText}\n` +
     (manualNotes.length ? `${manualNotes.join('\n')}\n` : '') +
     `  },\n` +
-    `  // Idempotency checkers read your app state; implement them by hand if\n` +
-    `  // an action declares idempotencyCheck (see ${DOC_BASENAME}).\n` +
     `  idempotencyCheckers: {},\n` +
     `};\n` +
     (esm ? '' : `\nmodule.exports = { ${REGISTRY_EXPORT} };\n`);
@@ -821,12 +817,7 @@ function buildBridgeModule(opts = {}) {
   const esm = opts.esm !== false;
   const header =
     `${GENERATED_FILE_DIRECTIVES}` +
-    `/**\n` +
-    ` * ${GENERATED_MARKER} (bridge holder).\n` +
-    ` * Do not edit by hand. Your component registers its real functions here and the\n` +
-    ` * generated handlers invoke them. This is what connects the agent to the state\n` +
-    ` * living inside your components, without creating disconnected instances.\n` +
-    ` */\n`;
+    `/** ${GENERATED_MARKER} (bridge holder). Do not edit — re-run the Fiodos installer to regenerate. */\n`;
   if (ts) {
     return (
       `${header}\n` +
@@ -964,134 +955,48 @@ function confLabel(e) {
 function buildHandlerDoc(plan, ctx = {}) {
   const {
     appName = 'your app', framework = 'web', registryRel = '', mountSnippet = '',
-    bridgeRel = '', edits = [], verification = null,
+    bridgeRel = '', edits = [],
   } = ctx;
-  const L = [];
-  L.push('# Fiodos action wiring (handler wiring)');
-  L.push('');
-  L.push(
-    'This document describes **exactly** what Fiodos will do to connect the ' +
-      'actions detected in your app with the real functions that run them. ' +
-      '**Nothing is applied until you accept in the terminal.**',
-  );
-  L.push('');
   const review = plan.review || plan.manual || [];
-  const aiCount = plan.auto.filter((e) => e.source === 'ai').length;
-  L.push(`- App: **${appName}**`);
-  L.push(`- Detected framework: **${framework}**`);
-  L.push(`- Actions that will be wired automatically: **${plan.auto.length}** ` +
-    `(${aiCount} wired by the AI, ${plan.auto.length - aiCount} by the mechanical fallback detector)`);
-  L.push(`- Actions that need review: **${review.length}**`);
-  L.push('');
-  L.push('## How is this wiring generated?');
-  L.push('');
-  L.push(
-    'The **same AI** that analyzed your code to detect the actions also proposed ' +
-      'how to run them: which real function/module to call and how to map the parameters. ' +
-      'Then a **mechanical verifier** checks that every referenced symbol ' +
-      'really exists in your code before writing anything. If the AI proposes something ' +
-      'the verifier cannot find, that action is left **for review**, never wired blindly.',
-  );
-  L.push('');
-  if (Array.isArray(verification) && verification.length) {
-    L.push('## Automatic verification (real effect + retries)');
-    L.push('');
-    L.push(
-      'After your "yes", the install **does not trust** that the wiring compiles: for each ' +
-        'action it runs a **wire → verify → diagnose → correct** loop with no ' +
-        'human intervention. Verification checks (1) that the project **still ' +
-        'builds** with that action wired and, when it is safe to simulate, (2) that ' +
-        'invoking the handler **changes the real state** (the task is added, etc.). If an ' +
-        'action fails, the AI receives the **concrete error** and retries with corrected ' +
-        'wiring (up to several attempts). An action is only marked **ready** when it passes ' +
-        'verification; if it is not achieved after the retries, **only that action is ' +
-        'reverted** and marked below as "could not be wired" — never left faking it.',
-    );
-    L.push('');
-    L.push('| Action (intent) | Result | Attempts | Verification | Detail |');
-    L.push('| --- | --- | --- | --- | --- |');
-    for (const v of verification) {
-      const res = v.status === 'ready' ? '✅ ready' : '❌ could not';
-      let lvl = '—';
-      if (v.status === 'ready') {
-        lvl = v.level === 'effect' ? 'real effect (UI)'
-          : v.level === 'unverifiable' ? '⚠️ effect NOT verifiable (review by hand)'
-            : 'compilation';
-      }
-      const detail = String(v.detail || v.error || '').replace(/\|/g, '\\|').slice(0, 160);
-      L.push(`| \`${v.intent}\` | ${res} | ${v.attempts} | ${lvl} | ${detail} |`);
-    }
-    L.push('');
-    L.push('_"real effect (UI)" = the real component was mounted in a test DOM (jsdom) with ' +
-      'the framework\'s standard tooling (React: react-dom; Vue: vue + @vue/compiler-sfc), ' +
-      'the wired handler was invoked and the **change in the UI/state was observed** (the task appears, ' +
-      'the item toggles, etc.). For the data layer (Dexie/store) the effect is observed by running ' +
-      'the action against a real instance. "compilation" = it compiles and the real symbol exists and is ' +
-      'invoked, but the effect could not be safely simulated here. "⚠️ effect NOT verifiable" = ' +
-      'the wiring was applied but the real effect could not be confirmed automatically (component not ' +
-      'mountable in isolation, or a sensitive action that is not fired) — **review/test by hand**. ' +
-      'Sensitive actions (with confirmation) are **never** fired in the test._');
-    L.push('');
-  }
-
-  L.push('## Why is it needed?');
-  L.push('');
-  L.push(
-    'The orb is already mounted, but the agent cannot **run** actions until ' +
-      'each manifest action is connected to your app\'s real function. ' +
-      'This wiring is that bridge: it translates each action (e.g. `addToCart`) into a ' +
-      'call to your function (e.g. `useShop.getState().addToCart(...)`).',
-  );
-  L.push('');
   const bridgeEntries = plan.auto.filter((e) => e.kind === 'bridge');
-  L.push('## Which files are created / edited');
+  const confirmed = plan.entries.filter((e) => e.requireConfirmation);
+  const L = [];
+
+  L.push('# Fiodos — action wiring');
   L.push('');
-  L.push(`- **CREATES** \`${registryRel}\` — the generated handler registry.`);
-  if (bridgeEntries.length && bridgeRel) {
-    L.push(`- **CREATES** \`${bridgeRel}\` — the "bridge" where your component registers its real functions.`);
-  }
-  if (edits.length) {
-    L.push('- **EDITS the following files OF YOURS** (only adds lines marked with ' +
-      '`FYODOS:BRIDGE`, reversible):');
-    for (const ed of edits) L.push(`  - \`${ed.file}\` — registers: ${ed.intents.map((i) => `\`${i}\``).join(', ')}`);
-  } else {
-    L.push('- **No existing file of yours is edited** (all actions were ' +
-      'reachable from a module).');
-  }
-  L.push('- To enable it, pass the generated registry to `<FiodosAgent/>` (see "How to enable it").');
+  L.push('Connects each action in your manifest to the real function in your app that runs it.');
+  L.push('');
+  L.push(`- App: \`${appName}\``);
+  L.push(`- Framework: \`${framework}\``);
+  L.push(`- Wired automatically: ${plan.auto.length}`);
+  L.push(`- Need manual wiring: ${review.length}`);
   L.push('');
 
-  if (edits.length) {
-    L.push('## EXACT changes inside your components');
-    L.push('');
-    L.push('These are the lines Fiodos will add to your files (each block sits between ' +
-      '`FYODOS:BRIDGE:START` / `END` markers, so you can remove or revert them without touching ' +
-      'your own code):');
-    L.push('');
-    for (const ed of edits) {
-      L.push(`### \`${ed.file}\``);
-      L.push('');
-      L.push('After the last `import` line, this is added:');
-      L.push('');
-      L.push('```ts');
-      L.push(ed.importBlock);
-      L.push('```');
-      L.push('');
-      L.push(ed.file.endsWith('.vue')
-        ? 'Right before `</script>`, this is added:'
-        : `Next to the anchor \`${(ed.anchor || '').trim().slice(0, 80)}\`, this is added:`);
-      L.push('');
-      L.push('```ts');
-      L.push(ed.registerBlock.replace(/^\s+/gm, (s) => s)); // keep as-is
-      L.push('```');
-      L.push('');
-    }
+  L.push('## Files');
+  L.push('');
+  L.push(`- Creates \`${registryRel}\` — the handler registry.`);
+  if (bridgeEntries.length && bridgeRel) {
+    L.push(`- Creates \`${bridgeRel}\` — bridge where your components register live functions.`);
   }
+  if (edits.length) {
+    L.push('- Edits (only reversible `FYODOS:BRIDGE` blocks):');
+    for (const ed of edits) L.push(`  - \`${ed.file}\` — ${ed.intents.map((i) => `\`${i}\``).join(', ')}`);
+  }
+  L.push('');
+
+  L.push('## Enable it');
+  L.push('');
+  L.push('Pass the generated registry to your orb:');
+  L.push('');
+  L.push('```tsx');
+  L.push(mountSnippet || `import { ${REGISTRY_EXPORT} } from './${registryRel.split('/').pop()}';\n\n<FiodosAgent registries={${REGISTRY_EXPORT}} />`);
+  L.push('```');
+  L.push('');
 
   if (plan.auto.length) {
-    L.push(`## Actions that will be wired automatically (${plan.auto.length})`);
+    L.push(`## Wired automatically (${plan.auto.length})`);
     L.push('');
-    L.push('| Action (intent) | How it runs | Where | Parameters | Type | Security |');
+    L.push('| Action | Runs | Where | Params | Type | Confirmation |');
     L.push('| --- | --- | --- | --- | --- | --- |');
     for (const e of plan.auto) {
       const expr = e.kind === 'bridge' ? e.bridge.invoke : e.callExpr;
@@ -1100,84 +1005,43 @@ function buildHandlerDoc(plan, ctx = {}) {
       const params = e.manifestParams.length
         ? e.manifestParams.map((p) => `${p.name}${p.required ? '*' : ''}`).join(', ')
         : '—';
-      const kind = e.kind === 'bridge'
-        ? 'bridge (edits your component)'
-        : (e.source === 'ai' ? 'module (AI)' : 'module (mechanical)');
+      const kind = e.kind === 'bridge' ? 'bridge' : 'module';
       L.push(`| \`${e.intent}\` | ${call} | ${where} | ${params} | ${kind} | ${confLabel(e)} |`);
     }
     L.push('');
-    L.push('_`*` = required parameter. Each call was proposed by the AI reading your ' +
-      'code and **confirmed by the verifier** (the symbols exist). Parameters ' +
-      'are mapped **by name**, never by position._');
+    L.push('`*` = required parameter. Parameters are mapped by name.');
     L.push('');
   }
 
   if (review.length) {
-    L.push(`## Actions that need REVIEW (${review.length})`);
+    L.push(`## Needs manual wiring (${review.length})`);
     L.push('');
-    L.push(
-      'For these actions, neither did the AI propose **verifiable** wiring nor did the ' +
-        'mechanical fallback detector find the function safely. Wiring them wrong would be ' +
-        'worse than leaving them unwired, so they are marked for review and we explain why:',
-    );
+    L.push(`Add a handler in \`${registryRel}\` that calls your function and returns \`{ success: true }\` (or \`{ success: false, message }\`).`);
     L.push('');
+    L.push('| Action | Handler | Reason |');
+    L.push('| --- | --- | --- |');
     for (const e of review) {
-      L.push(`### \`${e.intent}\` — ${e.label}`);
-      L.push('');
-      L.push(`- Expected handler: \`${e.handler}\``);
-      if (e.file) L.push(`- Evidence file: \`${e.file}\``);
-      L.push(`- Reason: ${e.reason}`);
-      L.push(
-        `- What to do: add a handler \`${e.handler}\` in \`${registryRel}\` (or in your ` +
-          'own registry) that calls the real function and returns ' +
-          '`{ success: true }` (or `{ success: false, message }`).',
-      );
-      L.push('');
+      // Keep the reason to a clean one-liner: collapse whitespace, drop the
+      // npm/compiler dump after the first `|`, and cap length (no leaked paths).
+      const reason = String(e.reason || '')
+        .split('|')[0]
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 160);
+      L.push(`| \`${e.intent}\` | \`${e.handler}\` | ${reason} |`);
     }
+    L.push('');
   }
 
-  const confirmed = plan.entries.filter((e) => e.requireConfirmation);
   L.push('## Security');
   L.push('');
-  L.push(
-    '- The generated wiring **only calls** your functions. It **never** decides whether a ' +
-      'sensitive action runs: the Fiodos engine applies the manifest confirmations ' +
-      '(`requireConfirmation` / `voiceConfirmation`) **before** invoking ' +
-      'the handler. It is impossible for the auto-wiring to skip a confirmation.',
-  );
+  L.push('- The wiring only calls your functions; the Fiodos engine enforces manifest confirmations (`requireConfirmation` / `voiceConfirmation`) before any handler runs.');
+  L.push('- No secrets are read or embedded — only function names and the parameters the manifest declares.');
   if (confirmed.length) {
-    L.push('- Actions protected by confirmation (the agent will ask to confirm before running them):');
-    for (const e of confirmed) {
-      L.push(`  - \`${e.intent}\` — ${confLabel(e)}.`);
-    }
-  } else {
-    L.push('- None of the detected actions require confirmation in the manifest.');
+    L.push(`- Confirmation-protected actions: ${confirmed.map((e) => `\`${e.intent}\``).join(', ')}.`);
   }
-  L.push('- The wiring does not read, embed or expose secrets; it only references function');
-  L.push('  names and the parameters the manifest already declares.');
   L.push('');
 
-  L.push('## How to enable it');
-  L.push('');
-  if (mountSnippet) {
-    L.push('Pass the generated registry to your `<FiodosAgent/>`:');
-    L.push('');
-    L.push('```tsx');
-    L.push(mountSnippet);
-    L.push('```');
-  } else {
-    L.push('Import `' + REGISTRY_EXPORT + '` from the generated file and pass it as ' +
-      '`registries` to your `<FiodosAgent/>`.');
-  }
-  L.push('');
-  L.push('## If you said "no"');
-  L.push('');
-  L.push(
-    'Your code was not touched. You can implement the wiring yourself following ' +
-      'this document, or re-run the installer to accept the auto-wiring ' +
-      '(`--wire-yes` to accept without prompting).',
-  );
-  L.push('');
   return L.join('\n');
 }
 

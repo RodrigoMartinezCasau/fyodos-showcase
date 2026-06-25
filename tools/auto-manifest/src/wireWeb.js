@@ -24,6 +24,8 @@ const {
   writeConsentDoc,
   agentJsx,
   envExpr,
+  registryRelImport,
+  addRegistriesToMountSource,
   IMPORT_NAME,
   WRAPPER_BASENAME,
 } = require('./wireWebMount');
@@ -317,9 +319,94 @@ function reportWireResult(result, colors = {}, opts = {}) {
   }
 }
 
+/**
+ * Second pass (after handler wiring): connect the generated registry to the
+ * already-mounted orb so it EXECUTES actions, not just navigates. This is what
+ * removes the manual "paste registries={…}" step. Idempotent and reversible:
+ * the prop lives inside the FYODOS:ORB block. React-family mounts only —
+ * Vue/Svelte/Angular SDKs receive handlers differently and are left to the doc.
+ * Nav-only apps (no auto-wired handlers) never reach here (the caller gates on
+ * autoCount > 0), so they are not given a needless registries prop.
+ */
+function connectOrbRegistries(appRoot, opts = {}) {
+  const { registryFileAbs, exportName = 'fyodosGeneratedRegistries' } = opts;
+  if (!registryFileAbs || !fs.existsSync(registryFileAbs)) return { status: 'no-registry' };
+
+  const framework = detectFramework(appRoot);
+  const target = detectTarget(appRoot, framework);
+  if (!target || !target.file) return { status: 'no-target' };
+
+  // Only React-family mounts accept a `registries={...}` prop.
+  const reactKinds = new Set(['vite', 'next-pages', 'next-app']);
+  if (!reactKinds.has(target.kind)) return { status: 'unsupported-framework', framework };
+
+  // <FiodosAgent/> lives in the client wrapper for the Next App Router, in the
+  // entry/root file otherwise.
+  let mountFile = target.file;
+  if (target.kind === 'next-app') {
+    const dir = path.dirname(target.file);
+    mountFile =
+      [path.join(dir, `${WRAPPER_BASENAME}.tsx`), path.join(dir, `${WRAPPER_BASENAME}.jsx`)].find((f) =>
+        fs.existsSync(f),
+      ) || null;
+    if (!mountFile) return { status: 'not-mounted' };
+  }
+
+  let source;
+  try {
+    source = fs.readFileSync(mountFile, 'utf8');
+  } catch {
+    return { status: 'not-mounted' };
+  }
+  if (!/<FiodosAgent\b/.test(source)) return { status: 'not-mounted' };
+
+  const importPath = registryRelImport(mountFile, registryFileAbs);
+  const fileRel = path.relative(appRoot, mountFile);
+  const backups = backupFiles([mountFile]);
+  try {
+    const res = addRegistriesToMountSource(source, exportName, importPath);
+    if (!res.changed) {
+      return { status: res.reason === 'already' ? 'already' : 'not-mounted', file: fileRel };
+    }
+    fs.writeFileSync(mountFile, res.source);
+    return { status: 'connected', file: fileRel };
+  } catch (e) {
+    revertFiles(backups);
+    return { status: 'failed', file: fileRel, error: e };
+  }
+}
+
+function reportRegistriesResult(result, colors = {}, opts = {}) {
+  const quiet = opts.quiet !== false;
+  if (!result) return;
+  const { blue, cyan, dim, reset } = colors;
+  const tag = `${cyan || ''}◉${reset || ''} ${blue || ''}Fiodos${reset || ''}`;
+  switch (result.status) {
+    case 'connected':
+      console.error(`${tag} · ${dim || ''}connected actions to the orb (registries=) in ${result.file}${reset || ''}`);
+      break;
+    case 'already':
+      if (quiet) return;
+      console.error(`${tag} · ${dim || ''}orb already wired to actions in ${result.file}${reset || ''}`);
+      break;
+    case 'unsupported-framework':
+      console.error(`${tag} · ${dim || ''}pass the generated registry to your orb manually (see FYODOS_HANDLERS.md)${reset || ''}`);
+      break;
+    case 'failed':
+      console.error(`${tag} · ✗ could not auto-connect actions to the orb${result.file ? ` in ${result.file}` : ''}. See FYODOS_HANDLERS.md.`);
+      break;
+    default:
+      // not-mounted / no-registry / no-target: silent. The orb still navigates,
+      // and the doc shows how to connect actions by hand if needed.
+      break;
+  }
+}
+
 module.exports = {
   wireWebOrb,
   reportWireResult,
+  connectOrbRegistries,
+  reportRegistriesResult,
   detectFramework,
   detectTarget,
 };
