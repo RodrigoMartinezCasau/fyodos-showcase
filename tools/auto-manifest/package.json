@@ -1,6 +1,6 @@
 {
   "name": "@fiodos/cli",
-  "version": "0.1.16",
+  "version": "0.1.17",
   "description": "Fiodos CLI — analyzes your app's source code and generates the in-app voice-agent manifest, then wires the orb. Powers `npx @fiodos/cli analyze`.",
   "type": "commonjs",
   "bin": {

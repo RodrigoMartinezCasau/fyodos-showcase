@@ -9,12 +9,14 @@
  *      · yes → written to the framework's env file, which we ALSO ensure is in
  *              .gitignore so the secret never reaches GitHub.
  *      · no  → a copy-paste reminder is shown at the very END of the run.
- *   2. Deploy provider — the SAME yes/no flow for the build-time public key
- *      (VITE_/NEXT_PUBLIC_), because that value is inlined at BUILD time: if it is
- *      only in the (gitignored, never-pushed) local env and NOT in the provider,
- *      the production build ships WITHOUT it and the orb never appears. We detect
- *      a linked Vercel project and offer to push it automatically; otherwise we
- *      warn clearly and print exactly what to add where.
+ *   2. Deploy provider — for the build-time public key (VITE_/NEXT_PUBLIC_),
+ *      which is inlined at BUILD time: if it is only in the (gitignored,
+ *      never-pushed) local env and NOT in the provider, the production build
+ *      ships WITHOUT it and the orb never appears. A CLI cannot (and must not)
+ *      authenticate into the user's hosting account, so we do NOT prompt and we
+ *      do NOT touch their provider. Instead we DETECT the stack and print a
+ *      clear, numbered step-by-step at the END (copy key → paste in the
+ *      provider's env panel → redeploy) so they do it themselves, safely.
  *
  * SECURITY: no secret is ever hardcoded into committed source. The orb key
  * (`fyd_…`) is a PUBLISHABLE client key (safe inside the frontend bundle), but it
@@ -26,7 +28,6 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const { execFileSync } = require('child_process');
 
 function readJsonSafe(file) {
   try {
@@ -210,55 +211,6 @@ function detectDeployProvider(appRoot) {
   return { provider: null, linked: false };
 }
 
-function commandExists(cmd) {
-  try {
-    execFileSync(process.platform === 'win32' ? 'where' : 'which', [cmd], { stdio: 'ignore' });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Best-effort push of a single var to a LINKED Vercel project, non-interactively,
- * across the given environments. Never hangs: only runs when the project is
- * already linked and the CLI resolves, each call bounded by a timeout. Returns a
- * per-environment result; failures (incl. "already exists") fall back to the
- * manual reminder.
- */
-function attemptVercelEnvAdd(appRoot, name, value, environments) {
-  if (!fs.existsSync(path.join(appRoot, '.vercel', 'project.json'))) {
-    return { attempted: false, reason: 'not-linked' };
-  }
-  let bin = null;
-  let pre = [];
-  if (commandExists('vercel')) {
-    bin = 'vercel';
-  } else if (commandExists('npx')) {
-    bin = 'npx';
-    pre = ['--no-install', 'vercel'];
-  } else {
-    return { attempted: false, reason: 'no-cli' };
-  }
-  const results = [];
-  for (const env of environments) {
-    try {
-      execFileSync(bin, [...pre, 'env', 'add', name, env], {
-        cwd: appRoot,
-        input: `${value}\n`,
-        stdio: ['pipe', 'ignore', 'pipe'],
-        timeout: 60_000,
-      });
-      results.push({ env, ok: true });
-    } catch (e) {
-      const msg = String((e && (e.stderr || e.message)) || '').split('\n')[0];
-      results.push({ env, ok: false, msg });
-    }
-  }
-  const okCount = results.filter((r) => r.ok).length;
-  return { attempted: true, ok: okCount > 0, okCount, results };
-}
-
 /**
  * Compute where the key/URL would go and what would change — no writes, no prompts.
  * @returns {object|null} null when there is nothing to do (already aligned / no key).
@@ -325,37 +277,56 @@ function computeEnvWritePlan(appRoot, apiKey, apiUrl, defaultApiUrl) {
   };
 }
 
-/** Lines explaining how to set the build-time public key in the deploy provider. */
+/** Where, per provider, the Environment Variables panel lives + how to redeploy. */
+function providerEnvHint(provider) {
+  if (provider === 'vercel') {
+    return {
+      label: 'Vercel',
+      where: 'Project → Settings → Environment Variables (tick Production, Preview, Development)',
+      redeploy: 'Deployments → ⋯ → Redeploy (or push a new commit)',
+    };
+  }
+  if (provider === 'netlify') {
+    return {
+      label: 'Netlify',
+      where: 'Site configuration → Environment variables → Add a variable',
+      redeploy: 'Deploys → Trigger deploy → Deploy site',
+    };
+  }
+  if (provider === 'cloudflare') {
+    return {
+      label: 'Cloudflare Pages',
+      where: 'Workers & Pages → your project → Settings → Variables and Secrets',
+      redeploy: 'Deployments → Retry deployment (or push a new commit)',
+    };
+  }
+  return null;
+}
+
+/**
+ * Clear, numbered step-by-step for setting the build-time public key in the
+ * deploy provider. Step 2 always speaks generically ("your hosting provider");
+ * when we detect a provider we append an optional tip in parentheses — we never
+ * assume the user's host is Vercel/Netlify/etc.
+ */
 function deployReminderLines(deploy) {
   const { keyVar, apiKey, provider } = deploy;
+  const hint = providerEnvHint(provider);
   const lines = [];
-  lines.push(
-    `${keyVar} is a PUBLISHABLE client key (safe in your frontend bundle), but it is`,
-  );
-  lines.push(
-    "read at BUILD time — it must also live in your deploy provider's env, or the",
-  );
-  lines.push('production build ships without it and the orb will NOT appear.');
+  lines.push('  Step 1 — Copy your orb key (this exact value):');
+  lines.push(`            ${apiKey}`);
   lines.push('');
-  if (provider === 'vercel') {
-    lines.push('Vercel — add it to Production, Preview and Development:');
-    lines.push(`    vercel env add ${keyVar} production`);
-    lines.push(`    vercel env add ${keyVar} preview`);
-    lines.push(`    vercel env add ${keyVar} development`);
-    lines.push(`  (value: ${apiKey})`);
-    lines.push('  …or Project → Settings → Environment Variables in the dashboard,');
-    lines.push('  then redeploy.');
-  } else if (provider === 'netlify') {
-    lines.push('Netlify — Site settings → Environment variables, then redeploy:');
-    lines.push(`    ${keyVar}=${apiKey}`);
-  } else if (provider === 'cloudflare') {
-    lines.push('Cloudflare Pages — Settings → Environment variables, then redeploy:');
-    lines.push(`    ${keyVar}=${apiKey}`);
+  lines.push('  Step 2 — In your hosting provider, open Environment Variables and add:');
+  lines.push(`            Name:  ${keyVar}`);
+  lines.push(`            Value: ${apiKey}`);
+  if (hint) {
+    lines.push(`            (e.g. ${hint.label}: ${hint.where})`);
   } else {
-    lines.push('Your deploy provider (Vercel / Netlify / Cloudflare / …) — add it in');
-    lines.push('its Environment Variables panel and redeploy:');
-    lines.push(`    ${keyVar}=${apiKey}`);
+    lines.push('            (usually Project or Site → Settings → Environment Variables)');
   }
+  lines.push('');
+  lines.push('  Step 3 — Redeploy so the variable is built in:');
+  lines.push(`            ${hint ? hint.redeploy : 'Trigger a new deploy (or push a commit)'}`);
   return lines;
 }
 
@@ -389,7 +360,7 @@ function printEnvManualReminder(result, { logUser, logDev }) {
   }
 
   if (deploy && deploy.reminder) {
-    logUser('Set the orb key in your deploy provider (or the orb is invisible in production)');
+    logUser('Make the orb appear in PRODUCTION — add the key to your host (3 steps)');
     for (const line of deployReminderLines(deploy)) console.log(line ? `  ${line}` : '');
     if (logDev) logDev(`[write-env] deploy reminder for provider=${deploy.provider || 'unknown'}`);
   }
@@ -405,7 +376,7 @@ async function offerWriteEnv({ appRoot, apiKey, apiUrl, defaultApiUrl, assumeYes
   if (writePlan.kind === 'aligned') {
     log(`Your environment already uses the same API key as this project. Nothing to change.`);
     // Even when the local env is aligned, production may still be missing the key.
-    const deploy = await offerDeployEnv({ appRoot, writePlan, assumeYes, log, devLog });
+    const deploy = planDeployReminder(appRoot, writePlan);
     return { status: 'already aligned', writePlan, deploy };
   }
 
@@ -422,13 +393,13 @@ async function offerWriteEnv({ appRoot, apiKey, apiUrl, defaultApiUrl, assumeYes
   }
 
   if (!proceed) {
-    const deploy = await offerDeployEnv({ appRoot, writePlan, assumeYes, log, devLog });
+    const deploy = planDeployReminder(appRoot, writePlan);
     return { status: 'declined by user', writePlan, deploy };
   }
 
   if (writePlan.kind === 'manual-angular' || writePlan.kind === 'manual-unknown') {
     log('Could not write automatically for this framework — see the reminder at the end.');
-    const deploy = await offerDeployEnv({ appRoot, writePlan, assumeYes, log, devLog });
+    const deploy = planDeployReminder(appRoot, writePlan);
     return { status: 'manual', writePlan, deploy };
   }
 
@@ -458,17 +429,22 @@ async function offerWriteEnv({ appRoot, apiKey, apiUrl, defaultApiUrl, assumeYes
     log(`Heads up: could not update .gitignore — make sure ${targetRel} is git-ignored.`);
   }
 
-  const deploy = await offerDeployEnv({ appRoot, writePlan, assumeYes, log, devLog });
+  const deploy = planDeployReminder(appRoot, writePlan);
   return { status: 'written', writePlan, deploy };
 }
 
 /**
- * Deploy-provider step for the build-time PUBLIC key (VITE_/NEXT_PUBLIC_). Same
- * yes/no flow as the local write. When a linked Vercel project is detected and
- * the user consents, the key is pushed automatically; otherwise (declined, no
- * provider, non-TTY, or failure) a clear reminder is queued for the end.
+ * Plan the deploy-provider reminder for the build-time PUBLIC key
+ * (VITE_/NEXT_PUBLIC_). We do NOT prompt and we do NOT touch the user's hosting
+ * provider — a CLI cannot safely authenticate into someone's Vercel/Netlify
+ * account, and we never want to access a production provider on their behalf.
+ *
+ * Instead we DETECT the stack (provider + var name) and queue a clear, numbered
+ * step-by-step that is printed at the very end of the run (see
+ * `deployReminderLines`). The developer copies the key and pastes it into their
+ * provider's Environment Variables panel themselves, then redeploys.
  */
-async function offerDeployEnv({ appRoot, writePlan, assumeYes, log, devLog }) {
+function planDeployReminder(appRoot, writePlan) {
   const framework = writePlan.framework;
   const keyVar = writePlan.keyVar;
   const apiKey = writePlan.apiKey;
@@ -476,40 +452,7 @@ async function offerDeployEnv({ appRoot, writePlan, assumeYes, log, devLog }) {
     return null; // Angular / unknown handle their own manual reminders.
   }
   const det = detectDeployProvider(appRoot);
-  const base = { provider: det.provider, linked: det.linked, keyVar, apiKey };
-
-  // Only Vercel can be automated here, and only when the project is already
-  // linked (so the CLI never blocks on an interactive link/login).
-  if (det.provider === 'vercel' && det.linked) {
-    let proceed = assumeYes;
-    if (!proceed) {
-      proceed = await askYesNo(
-        `◉ Fiodos · Add ${keyVar} to your linked Vercel project (production, preview, development) now? [yes/no] `,
-      );
-    }
-    if (proceed) {
-      const res = attemptVercelEnvAdd(appRoot, keyVar, apiKey, [
-        'production',
-        'preview',
-        'development',
-      ]);
-      if (res.attempted && res.ok) {
-        log(`Pushed ${keyVar} to Vercel (${res.okCount}/3 environments). Redeploy to apply.`);
-        if (res.okCount < 3) {
-          if (devLog) devLog('[write-env] some Vercel envs failed (often already set) — reminder kept');
-          return { ...base, reminder: true, partial: true };
-        }
-        return { ...base, reminder: false, automated: true };
-      }
-      if (devLog) devLog(`[write-env] vercel automation failed: ${res.reason || 'cli-error'}`);
-      log('Could not push to Vercel automatically — see the reminder at the end.');
-      return { ...base, reminder: true };
-    }
-    return { ...base, reminder: true };
-  }
-
-  // Any other provider / not linked / non-TTY: warn clearly at the end.
-  return { ...base, reminder: true };
+  return { provider: det.provider, linked: det.linked, keyVar, apiKey, reminder: true };
 }
 
 module.exports = {
