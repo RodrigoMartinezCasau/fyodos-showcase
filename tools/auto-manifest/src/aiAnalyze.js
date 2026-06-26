@@ -76,7 +76,7 @@ AppManifest (all fields required unless noted):
     "requireConfirmation": boolean,
     "confirmationMessageTemplate": string (REQUIRED if requireConfirmation true),
     "parameters": { "<name>": {"type": "string"|"number"|"boolean", "required": boolean, "description": string (non-empty)} },
-    "contextRequirements": {"requiresVisibleContent"?: bool, "requiresAuth"?: bool} (optional),
+    "contextRequirements": {"requiresVisibleContent"?: bool, "requiresAuth"?: bool} (optional; set requiresAuth: true for actions that need a signed-in user — see the REQUIRES-AUTH rule below),
     "examples": string[] (3-4 natural voice phrases, REQUIRED non-empty)
   }],
   "policies": {"requireConfirmationForDestructive": true, "allowedWithoutAuth": string[], "contextRetentionTurns": 5}
@@ -163,6 +163,12 @@ ACTIONS: things a user could trigger by voice. ${actionHintLine} CRITICAL RULES:
 - Skip pure UI plumbing (toggling pickers, onChange of inputs, sheet open/close) and credential entry (passwords cannot be dictated).
 - Destructive/sensitive operations (delete data, logout, place/cancel orders, spend money) need requireConfirmation + confirmationMessageTemplate.
 - "parameters" only when the user must supply a value by voice.
+
+REQUIRES-AUTH — mark which actions need a signed-in user (set contextRequirements.requiresAuth):
+This drives a real safety gate: an action marked requiresAuth: true is NOT executed unless the host app reports the user is signed in, so the agent never attempts inside-the-app operations from a logged-out state (e.g. the user is on the login screen). Decide per action by reading the code:
+- Set requiresAuth: true for actions that only make sense for a signed-in user — i.e. anything that reads or changes data tied to a personal session/account: viewing or editing the user's own data, profile/settings, orders/cart history, balances, posting/saving content, in-app operations, or navigating-by-doing into private/authenticated areas. A strong signal: the handler reads a session/token/user id, calls an authenticated API, or lives behind an auth guard/middleware/redirect-to-login. If the app has a global auth gate (a root middleware/layout that redirects unauthenticated users), treat its inside-app actions as requiresAuth: true by default.
+- Leave requiresAuth false/absent for genuinely public actions that work with no session: public navigation, marketing/landing LINK actions (download/get-the-app, social links, contact/email/phone, pricing, legal, in-page anchors), changing language/theme, viewing openly public information, and the sign-in/sign-up flow itself.
+- Be conservative AND fail-safe: do not over-mark clearly public actions (that would needlessly block them when logged out), but when you genuinely cannot tell whether an action is public or requires a session, prefer requiresAuth: true — it is safer to ask the user to sign in than to attempt a private action without a session. requiresAuth never replaces requireConfirmation; an action can need both.
 
 THE MANUAL (description/preconditions/effect/relatedIntents per action; description per screen; appType/appFlow):
 This is the context the agent reads to understand the app, so it can reason instead of guessing. Derive every field from the REAL code:
@@ -511,4 +517,14 @@ async function correctActionWiring({
   return { wiring, usage, costUSD };
 }
 
-module.exports = { analyzeWithAI, correctActionWiring, DEFAULT_MODEL, PRICES, resolveModel, isAnthropicModel };
+module.exports = {
+  analyzeWithAI,
+  correctActionWiring,
+  DEFAULT_MODEL,
+  PRICES,
+  resolveModel,
+  isAnthropicModel,
+  // Exported for offline tests of the analysis guidance (no API key needed).
+  buildSystemPrompt,
+  manifestSchemaDoc,
+};
