@@ -26,6 +26,8 @@ const {
   envExpr,
   registryRelImport,
   addRegistriesToMountSource,
+  addRegistriesToBootstrapSource,
+  buildEntryBootstrapBlock,
   IMPORT_NAME,
   WRAPPER_BASENAME,
 } = require('./wireWebMount');
@@ -62,17 +64,24 @@ function firstExisting(appRoot, rels) {
 
 function detectTarget(appRoot, framework = detectFramework(appRoot)) {
   if (framework === 'vue') {
-    const f = firstExisting(appRoot, ['src/App.vue', 'src/main.ts', 'src/main.js']);
+    // Prefer the entry module (deterministic anchor → bootstrap injection). Fall
+    // back to the SFC <template> strategy only when there is no entry file.
+    const entry = firstExisting(appRoot, ['src/main.ts', 'src/main.js']);
+    if (entry) return { kind: 'vue-entry', file: entry, ext: path.extname(entry), framework };
+    const f = firstExisting(appRoot, ['src/App.vue']);
     return f ? { kind: 'vue', file: f, ext: path.extname(f), framework } : { kind: 'vue', file: null, framework };
   }
   if (framework === 'sveltekit') {
-    const f = firstExisting(appRoot, [
-      'src/routes/+layout.svelte', 'src/routes/+page.svelte', 'src/App.svelte',
-    ]);
-    return f ? { kind: 'sveltekit', file: f, ext: '.svelte', framework } : { kind: 'sveltekit', file: null, framework };
+    // SvelteKit owns the bootstrap (no src/main.ts), but src/hooks.client.ts runs
+    // once in the browser — the ideal, template-free spot. Create it if missing.
+    const existing = firstExisting(appRoot, ['src/hooks.client.ts', 'src/hooks.client.js']);
+    const file = existing || path.join(appRoot, 'src/hooks.client.ts');
+    return { kind: 'sveltekit-hooks', file, ext: path.extname(file), framework };
   }
   if (framework === 'svelte') {
-    const f = firstExisting(appRoot, ['src/App.svelte', 'src/routes/+layout.svelte', 'src/main.ts']);
+    const entry = firstExisting(appRoot, ['src/main.ts', 'src/main.js']);
+    if (entry) return { kind: 'svelte-entry', file: entry, ext: path.extname(entry), framework };
+    const f = firstExisting(appRoot, ['src/App.svelte']);
     return f ? { kind: 'svelte', file: f, ext: '.svelte', framework } : { kind: 'svelte', file: null, framework };
   }
   if (framework === 'angular') {
@@ -162,6 +171,15 @@ function printSnippet(target, framework, colors, appRoot, reason) {
     console.error(`${dim}Reason: ${reason}${reset}\n`);
   }
 
+  // Entry-file bootstrap frameworks: the safe fallback is the same one-shot call
+  // we would have auto-injected into the entry module — no <template> edit.
+  const entryKind = target && /(-entry|-hooks)$/.test(target.kind || '');
+  if (entryKind) {
+    const where = path.relative(appRoot, target.file);
+    console.error(`${dim}In ${where}, after your imports:${reset}\n`);
+    console.error(buildEntryBootstrapBlock());
+    return;
+  }
   if (framework === 'vue') {
     const where = target && target.file ? path.relative(appRoot, target.file) : 'src/App.vue';
     console.error(`${dim}In ${where}:${reset}\n`);
@@ -245,10 +263,23 @@ async function wireWebOrb(appRoot, opts = {}) {
   };
 
   const backups = backupFiles(plan.files);
+  // Files the installer creates from scratch (e.g. SvelteKit src/hooks.client.ts)
+  // are not in `backups`; a revert must DELETE them, not leave an orphan behind.
+  const createdFiles = plan.files.filter((f) => !(f in backups));
+  const revertAll = () => {
+    revertFiles(backups);
+    for (const f of createdFiles) {
+      try {
+        if (fs.existsSync(f)) fs.unlinkSync(f);
+      } catch {
+        /* best-effort */
+      }
+    }
+  };
   try {
     applyMount(plan);
     if (!verifyMounted(plan)) {
-      revertFiles(backups);
+      revertAll();
       printSnippet(target, framework, colors, appRoot, 'post-edit verification failed — FiodosAgent not found in edited files');
       return { status: 'failed', file: plan.rel };
     }
@@ -267,7 +298,7 @@ async function wireWebOrb(appRoot, opts = {}) {
         return { status: 'added', file: plan.rel, test };
       }
       // Build failed with the orb mounted — was the app building WITHOUT it?
-      revertFiles(backups);
+      revertAll();
       const baseline = await build();
       if (baseline.ok) {
         // Built before, fails now → the mount is the regression. Keep it reverted.
@@ -284,7 +315,7 @@ async function wireWebOrb(appRoot, opts = {}) {
     writeConsentDoc(appRoot, plan);
     return { status: 'added', file: plan.rel };
   } catch (err) {
-    revertFiles(backups);
+    revertAll();
     printSnippet(target, framework, colors, appRoot, err.message || String(err));
     return { status: 'failed', file: plan.rel, error: err };
   }
@@ -335,6 +366,33 @@ function connectOrbRegistries(appRoot, opts = {}) {
   const framework = detectFramework(appRoot);
   const target = detectTarget(appRoot, framework);
   if (!target || !target.file) return { status: 'no-target' };
+
+  // Entry-file bootstrap (Vue / Svelte / SvelteKit): the registries go INTO the
+  // createFiodosAgent({…}) call we injected into the entry module — same safe,
+  // idempotent, reversible block. No manual "pass registries" step anywhere.
+  const bootstrapKinds = new Set(['vue-entry', 'svelte-entry', 'sveltekit-hooks']);
+  if (bootstrapKinds.has(target.kind)) {
+    let source;
+    try {
+      source = fs.readFileSync(target.file, 'utf8');
+    } catch {
+      return { status: 'not-mounted' };
+    }
+    const importPath = registryRelImport(target.file, registryFileAbs);
+    const fileRel = path.relative(appRoot, target.file);
+    const backups = backupFiles([target.file]);
+    try {
+      const res = addRegistriesToBootstrapSource(source, importPath);
+      if (!res.changed) {
+        return { status: res.reason === 'already' ? 'already' : 'not-mounted', file: fileRel };
+      }
+      fs.writeFileSync(target.file, res.source);
+      return { status: 'connected', file: fileRel };
+    } catch (e) {
+      revertFiles(backups);
+      return { status: 'failed', file: fileRel, error: e };
+    }
+  }
 
   // Only React-family mounts accept a `registries={...}` prop.
   const reactKinds = new Set(['vite', 'next-pages', 'next-app']);

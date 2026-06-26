@@ -60,6 +60,75 @@ function insertImportAfterLastImport(source, importLine) {
   return lines.join('\n');
 }
 
+// Insert a multi-line block right after the last top-level import. The block may
+// itself contain import statements — placed after the existing ones they stay
+// valid top-level imports (ESM hoists them anyway). Used by the entry-file
+// bootstrap so the orb starts before the app mounts.
+function insertBlockAfterLastImport(source, block) {
+  const lines = source.split('\n');
+  let lastImport = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (/^\s*import\b/.test(lines[i])) lastImport = i;
+  }
+  if (lastImport === -1) return `${block}\n\n${source}`;
+  lines.splice(lastImport + 1, 0, '', block);
+  return lines.join('\n');
+}
+
+// ── Entry-file bootstrap (Vue / Svelte / SvelteKit) ───────────────────────────
+// Instead of editing a framework <template> (no deterministic anchor, fragile),
+// we inject a one-shot createFiodosAgent() call into the app's entry module
+// (src/main.ts, hooks.client.ts). The orb mounts itself to document.body, so it
+// never needs to live in the component tree. The whole call lives between
+// FYODOS:ORB markers → idempotent (re-runs strip & rewrite) and reversible.
+const BOOTSTRAP_ALIAS = '__fiodosCreateAgent';
+const BOOTSTRAP_REGISTRY_EXPORT = 'fyodosGeneratedRegistries';
+
+function buildEntryBootstrapBlock(opts = {}) {
+  const { registryImportPath } = opts;
+  const lines = [];
+  lines.push(ORB_SCRIPT_START);
+  lines.push(`import { createFiodosAgent as ${BOOTSTRAP_ALIAS} } from '@fiodos/web-core';`);
+  if (registryImportPath) {
+    lines.push(`import { ${BOOTSTRAP_REGISTRY_EXPORT} } from '${registryImportPath}';`);
+  }
+  lines.push(`${BOOTSTRAP_ALIAS}({`);
+  lines.push('  apiKey: import.meta.env.VITE_FYODOS_API_KEY,');
+  lines.push('  baseUrl: import.meta.env.VITE_FYODOS_API_URL,');
+  if (registryImportPath) lines.push(`  registries: ${BOOTSTRAP_REGISTRY_EXPORT},`);
+  lines.push('  mount: true,');
+  lines.push('});');
+  lines.push(ORB_SCRIPT_END);
+  return lines.join('\n');
+}
+
+function injectEntryBootstrap(plan, opts = {}) {
+  const file = plan.target.file;
+  let source = fs.existsSync(file) ? readFile(file) : '';
+  source = stripMarkedRegion(source, ORB_SCRIPT_START, ORB_SCRIPT_END).replace(/\n{3,}$/, '\n');
+  const block = buildEntryBootstrapBlock(opts);
+  let next;
+  if (!source.trim()) {
+    next = `${block}\n`;
+  } else {
+    next = insertBlockAfterLastImport(source, block);
+  }
+  writeFile(file, next.endsWith('\n') ? next : `${next}\n`);
+}
+
+// Idempotently rewrite an existing entry-bootstrap block to carry the generated
+// registries (second pass, after handler wiring). Returns { changed, source, reason? }.
+function addRegistriesToBootstrapSource(source, registryImportPath) {
+  if (!source.includes(ORB_SCRIPT_START)) return { changed: false, source, reason: 'not-mounted' };
+  if (/\n\s*registries:\s/.test(source.slice(source.indexOf(ORB_SCRIPT_START)))) {
+    return { changed: false, source, reason: 'already' };
+  }
+  const stripped = stripMarkedRegion(source, ORB_SCRIPT_START, ORB_SCRIPT_END).replace(/\n{3,}$/, '\n');
+  const block = buildEntryBootstrapBlock({ registryImportPath });
+  const next = insertBlockAfterLastImport(stripped.trimEnd(), block);
+  return { changed: true, source: next.endsWith('\n') ? next : `${next}\n` };
+}
+
 function envExpr(framework, kind, ts) {
   if (framework === 'vite' || framework === 'vue' || framework === 'svelte' || framework === 'sveltekit') {
     if (kind === 'key') {
@@ -131,6 +200,19 @@ function assessMount(target, framework, appRoot) {
     return { ok: false, reason: 'could not locate a framework entry file (e.g. src/main.tsx, App.vue, +layout.svelte)' };
   }
   const rel = path.relative(appRoot, target.file);
+
+  // Entry-file bootstrap (Vue / Svelte / SvelteKit). The orb is injected into the
+  // app's entry module, not a <template>. For SvelteKit hooks the file may not
+  // exist yet — we create it (safe: a brand-new client hook only adds our block).
+  const entryKinds = new Set(['vue-entry', 'svelte-entry', 'sveltekit-hooks']);
+  if (entryKinds.has(target.kind)) {
+    const exists = fs.existsSync(target.file);
+    if (exists && isAlreadyMounted(readFile(target.file))) {
+      return { ok: false, reason: 'orb already present', already: true, rel };
+    }
+    return { ok: true, strategy: 'entry-bootstrap', files: [target.file], rel, framework, target, createIfMissing: !exists };
+  }
+
   const source = readFile(target.file);
   if (isAlreadyMounted(source)) {
     return { ok: false, reason: 'orb already present', already: true, rel };
@@ -141,14 +223,22 @@ function assessMount(target, framework, appRoot) {
       if (!source.includes('</body>')) {
         return { ok: false, reason: `${rel} has no </body> — cannot mount the orb wrapper safely` };
       }
-      return { ok: true, strategy: 'next-app', files: [target.file], rel, framework, target };
+      // The client wrapper we create lives next to the layout. Listing it in
+      // `files` means a revert DELETES it (it isn't in the backups) instead of
+      // leaving an orphan that imports @fiodos/react.
+      const ts = target.ext === '.tsx';
+      const wrapperFile = path.join(path.dirname(target.file), `${WRAPPER_BASENAME}${ts ? '.tsx' : '.jsx'}`);
+      return { ok: true, strategy: 'next-app', files: [target.file, wrapperFile], rel, framework, target };
     }
     case 'next-pages':
     case 'vite': {
       if (/createRoot\s*\(/.test(source) && /\.render\s*\(/.test(source)) {
         return { ok: true, strategy: 'vite-main', files: [target.file], rel, framework, target };
       }
-      if (/return\s*\([\s\S]*/.test(source)) {
+      // Accept any component that returns JSX — `return (` OR a bare `return <…/>`
+      // (the create-next-app default `_app.tsx`). We wrap the returned element in
+      // a fragment so the orb sits beside it without breaking adjacent-JSX rules.
+      if (/return\s*[<(]/.test(source)) {
         return { ok: true, strategy: 'react-return', files: [target.file], rel, framework, target };
       }
       return { ok: false, reason: `${rel} is not a recognizable React entry (no createRoot().render() or JSX return)` };
@@ -199,8 +289,13 @@ function resolveAngularTemplate(tsFile, tsSource) {
 }
 
 function describePlan(plan) {
-  const lines = [`Will edit: ${plan.files.map((f) => path.basename(f)).join(', ')}`];
+  const action = plan.createIfMissing ? 'Will create' : 'Will edit';
+  const lines = [`${action}: ${plan.files.map((f) => path.basename(f)).join(', ')}`];
   switch (plan.strategy) {
+    case 'entry-bootstrap':
+      lines.push('Add createFiodosAgent({ apiKey, baseUrl, mount }) after the imports');
+      lines.push('Orb self-mounts to document.body (no <template> edit, marked FYODOS:ORB:*)');
+      break;
     case 'next-app':
       lines.push(`Create ${WRAPPER_BASENAME} client wrapper next to layout`);
       lines.push(`Import wrapper and mount before </body>`);
@@ -298,6 +393,57 @@ function injectViteMain(plan) {
   writeFile(target.file, source);
 }
 
+// Wrap the component's last `return <jsx>` (with or without parentheses) in a
+// fragment that holds the original element AND the orb. Wrapping ANY single
+// returned expression as `<>{expr}{orb}</>` is always valid JSX, so this is the
+// universal, adjacent-JSX-safe fallback when there is no closing-tag anchor to
+// slot into (e.g. the create-next-app default `return <Component {...pageProps} />`).
+// Returns the new source, or null when no returnable JSX expression is found.
+function wrapLastReturnInFragment(source, orbJsx) {
+  const kw = /\breturn\b/g;
+  let m;
+  let retIdx = -1;
+  while ((m = kw.exec(source))) retIdx = m.index;
+  if (retIdx === -1) return null;
+
+  let i = retIdx + 'return'.length;
+  while (i < source.length && /\s/.test(source[i])) i += 1;
+  if (source[i] !== '(' && source[i] !== '<') return null;
+  const exprStart = i;
+
+  // Scan to the end of this one expression: stop at an unmatched ')' or '}'
+  // (the wrapping paren / function body) or a top-level ';'.
+  let round = 0;
+  let curly = 0;
+  let end = source.length;
+  for (let j = exprStart; j < source.length; j += 1) {
+    const c = source[j];
+    if (c === '(') round += 1;
+    else if (c === ')') {
+      if (round === 0) { end = j; break; }
+      round -= 1;
+    } else if (c === '{') curly += 1;
+    else if (c === '}') {
+      if (curly === 0) { end = j; break; }
+      curly -= 1;
+    } else if (c === ';' && round === 0 && curly === 0) { end = j; break; }
+  }
+
+  let expr = source.slice(exprStart, end).trim();
+  if (expr.startsWith('(') && expr.endsWith(')')) expr = expr.slice(1, -1).trim();
+  if (!expr) return null;
+
+  const ind = '    ';
+  const orbIndented = orbJsx
+    .split('\n')
+    .map((l) => (l ? `${ind}  ${l}` : l))
+    .join('\n');
+  const wrapped =
+    `(\n${ind}<>\n${ind}  ${expr}\n${orbIndented}\n${ind}</>\n${ind.slice(2)})`;
+
+  return source.slice(0, exprStart) + wrapped + source.slice(end);
+}
+
 function injectReactReturn(plan) {
   const { target, framework } = plan;
   const ts = target.ext === '.tsx';
@@ -317,12 +463,11 @@ function injectReactReturn(plan) {
       return;
     }
   }
-  const ret = source.lastIndexOf('return (');
-  if (ret === -1) throw new Error('no return ( found');
-  const close = source.indexOf(');', ret);
-  if (close === -1) throw new Error('no return close');
-  source = `${source.slice(0, close)}\n      ${orbBlock}\n    ${source.slice(close)}`;
-  writeFile(target.file, source);
+  // No closing-tag anchor (e.g. `return <Component {...pageProps} />`): wrap the
+  // returned element + orb in a fragment so adjacent JSX is always valid.
+  const wrapped = wrapLastReturnInFragment(source, orbBlock);
+  if (wrapped == null) throw new Error('no returnable JSX expression found');
+  writeFile(target.file, wrapped);
 }
 
 function injectVueSfc(plan) {
@@ -399,6 +544,9 @@ function injectAngularComponent(plan) {
 
 function applyMount(plan) {
   switch (plan.strategy) {
+    case 'entry-bootstrap':
+      injectEntryBootstrap(plan);
+      break;
     case 'next-app':
       injectNextApp(plan);
       break;
@@ -467,6 +615,8 @@ module.exports = {
   isAlreadyMounted,
   registryRelImport,
   addRegistriesToMountSource,
+  addRegistriesToBootstrapSource,
+  buildEntryBootstrapBlock,
   IMPORT_NAME,
   WRAPPER_BASENAME,
 };

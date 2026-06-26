@@ -71,22 +71,28 @@ function testVueSfc() {
   console.log('PASS vue App.vue');
 }
 
-function testSvelteLayout() {
+function testSvelteKitHooksBootstrap() {
+  // SvelteKit now mounts via an entry-file bootstrap in src/hooks.client.ts
+  // (created if missing) instead of editing +layout.svelte markup. This also
+  // lets registries auto-connect (the +layout strategy could not).
   const root = tmpDir();
   write(path.join(root, 'package.json'), JSON.stringify({ dependencies: { '@sveltejs/kit': '2', svelte: '5' } }));
   const layout = path.join(root, 'src/routes/+layout.svelte');
-  write(
-    layout,
-    `<script lang="ts">\n  let { children } = $props();\n</script>\n<main>{@render children()}</main>\n`,
-  );
+  const layoutSrc = `<script lang="ts">\n  let { children } = $props();\n</script>\n<main>{@render children()}</main>\n`;
+  write(layout, layoutSrc);
   const fw = detectFramework(root);
   const target = detectTarget(root, fw);
   const plan = assessMount(target, fw, root);
   assert.strictEqual(plan.ok, true);
-  assert.strictEqual(plan.strategy, 'svelte-sfc');
+  assert.strictEqual(plan.strategy, 'entry-bootstrap');
+  assert.strictEqual(plan.createIfMissing, true, 'hooks.client.ts should be created');
+  assert.ok(/hooks\.client\.ts$/.test(plan.target.file), 'targets hooks.client.ts');
   applyMount(plan);
   assert.ok(verifyMounted(plan));
-  console.log('PASS sveltekit +layout.svelte');
+  const hooks = fs.readFileSync(path.join(root, 'src/hooks.client.ts'), 'utf8');
+  assert.ok(hooks.includes('createFiodosAgent'), 'bootstrap in hooks');
+  assert.strictEqual(fs.readFileSync(layout, 'utf8'), layoutSrc, '+layout.svelte untouched');
+  console.log('PASS sveltekit src/hooks.client.ts bootstrap');
 }
 
 function testAngularComponent() {
@@ -127,7 +133,7 @@ function testFallbackNoTemplate() {
 
 testViteReactMain();
 testVueSfc();
-testSvelteLayout();
+testSvelteKitHooksBootstrap();
 testAngularComponent();
 testFallbackNoTemplate();
 console.log('ALL wireWeb.mount tests passed');
