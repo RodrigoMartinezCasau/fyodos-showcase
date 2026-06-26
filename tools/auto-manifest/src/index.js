@@ -629,11 +629,12 @@ async function main() {
           log: logUser,
           logDev,
         });
-        if (
-          envWriteResult &&
-          (envWriteResult.status === 'declined by user' || envWriteResult.status === 'manual')
-        ) {
-          printEnvManualReminder(envWriteResult.writePlan, { logUser, logDev });
+        // The reminder decides what to show: the local-env copy-paste block (only
+        // when the developer declined the local write) AND/OR the deploy-provider
+        // notice for the build-time public key (so the orb is never invisible in
+        // production for a missing var). No-ops when there is nothing to show.
+        if (envWriteResult) {
+          printEnvManualReminder(envWriteResult, { logUser, logDev });
         }
       } catch (e) {
         logDev(`[write-env] skipped: ${e.message}`);
