@@ -192,9 +192,15 @@ ACTIONS: things a user could trigger by voice. ${actionHintLine} CRITICAL RULES:
 - Every action MUST be backed by a REAL function you can see in the provided code. Set "handler" to that real function's name exactly as written in the code.
 - DO NOT invent actions that "apps like this usually have". If you cannot point to the code, leave it out. A hallucinated action is worse than a missed one: it fails in production in front of the user.
 - State can live anywhere: Zustand stores, React Context providers (look for createContext / useReducer / useState exposed via provider value), service modules. Read them all.
-- Skip pure UI plumbing (toggling pickers, onChange of inputs, sheet open/close) and credential entry (passwords cannot be dictated).
+- Skip pure UI plumbing (toggling pickers, onChange of inputs, sheet open/close).
 - Destructive/sensitive operations (delete data, logout, place/cancel orders, spend money) need requireConfirmation + confirmationMessageTemplate.
 - "parameters" only when the user must supply a value by voice.
+
+LOGIN / SIGNUP / CREDENTIAL ACTIONS — special rules (sign-in, sign-up, password reset, social login, 2FA):
+These actions exist FOR logged-out users. They must NEVER be marked requiresAuth (that would block them).
+They must NEVER use requireConfirmation — asking "do you want to sign in?" in a loop is wrong; credential entry IS the safety step. When the user provides email/password (or other required params), execute the action directly with those parameters filled in.
+Mark idempotencyCheck: "alreadyAuthenticated" when the manifest supports it (skip login when already signed in).
+Do NOT treat login/signup as destructive/sensitive for requireConfirmation purposes.
 
 REQUIRES-AUTH — mark which actions need a signed-in user (set contextRequirements.requiresAuth):
 This drives a real safety gate: an action marked requiresAuth: true is NOT executed unless the host app reports the user is signed in, so the agent never attempts inside-the-app operations from a logged-out state (e.g. the user is on the login screen). Decide per action by reading the code:

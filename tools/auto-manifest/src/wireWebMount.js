@@ -144,6 +144,13 @@ function envExpr(framework, kind, ts) {
 function agentJsx(framework, ts, indent = '  ') {
   const keyExpr = envExpr(framework, 'key', ts);
   const urlExpr = envExpr(framework, 'url', ts);
+  // Kept intentionally minimal (apiKey + apiUrl) so the generated JSX is always
+  // valid in every mount context (createRoot render, a bare `return ( … )`
+  // wrapper, fragment wrapping…). The auth/screen connection for apps WITH LOGIN
+  // is documented in the generated src/fyodos/FYODOS_ORB_MOUNT.md ("Apps with
+  // login") rather than injected as code comments — a malformed mount would trip
+  // the build-safety net and REVERT the orb entirely, which is worse than a
+  // clean mount plus a clear doc.
   return (
     `${indent}<FiodosAgent\n` +
     `${indent}  apiKey={${keyExpr}}\n` +
@@ -593,6 +600,32 @@ function writeConsentDoc(appRoot, plan) {
     '',
     'Edits sit between `FYODOS:ORB:START` / `FYODOS:ORB:END` markers. Remove those',
     'blocks (and the Fiodos import) to revert.',
+    '',
+    '## Apps with login (connect auth + screen — the only manual step)',
+    '',
+    'The orb runs with just `apiKey`/`apiUrl`. But only YOUR app knows whether the',
+    'user is signed in and which screen they are on, so for apps with login you',
+    'connect that in one place. Without it the agent can loop ("do you want to sign',
+    "in?\") and can't tell it already signed you in. Add these props to",
+    '`<FiodosAgent/>` (a commented scaffold is already next to the mount):',
+    '',
+    '```tsx',
+    '<FiodosAgent',
+    '  apiKey={/* … */}',
+    '  apiUrl={/* … */}',
+    '  // who is signed in (a function, read fresh every turn):',
+    '  isAuthenticated={() => Boolean(session)}',
+    '  // current screen/route as context for the agent:',
+    '  getCurrentRoute={() => window.location.pathname}',
+    '  // optional one-line human context (session + screen):',
+    "  getUserContextText={() => (session ? 'Session: signed in.' : 'Session: signed out.')}",
+    '/>',
+    '```',
+    '',
+    'If your login function lives in a context/hook (not an exported function), the',
+    'handler wiring left it for you in `src/fyodos/FYODOS_HANDLERS.md` — connect it',
+    'there the same way (one bridge call). Everything else (no-confirmation login,',
+    'sign-in feedback, requiresAuth gating) is handled by the SDK automatically.',
     '',
   ].join('\n');
   writeFile(path.join(dir, 'FYODOS_ORB_MOUNT.md'), doc);

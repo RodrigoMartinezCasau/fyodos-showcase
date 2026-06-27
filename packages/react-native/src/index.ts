@@ -23,6 +23,15 @@ export type { FiodosRuntime } from './provider/FiodosProvider';
 export { useAgent } from './hooks/useAgent';
 export type { AgentExchange, UseAgentOptions, UseAgentResult } from './hooks/useAgent';
 
+// Agent-to-agent: human approval of STRICT actions (uses the app credential,
+// never an external agent token — see the hook's security note).
+export { usePendingExternalApprovals } from './hooks/usePendingExternalApprovals';
+export type {
+  PendingExternalApproval,
+  UsePendingExternalApprovalsOptions,
+  UsePendingExternalApprovalsResult,
+} from './hooks/usePendingExternalApprovals';
+
 // Screen context
 export type { AgentScreenSnapshot, ScreenContextStore } from './context/screenContextStore';
 export { createScreenContextStore } from './context/screenContextStore';
