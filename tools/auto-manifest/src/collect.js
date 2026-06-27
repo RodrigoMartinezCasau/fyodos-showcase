@@ -52,8 +52,15 @@ const PROFILES = {
 const SKIP_FILES = /\.(d\.ts|test\.|spec\.)|babel\.config|metro\.config|tailwind\.config|postcss\.config|jest\.config|eslint/;
 const SKIP_NATIVE_FILES = /\.(g\.dart|freezed\.dart|gr\.dart|mocks\.dart)$|_test\.(dart|kt|swift)$|Test\.kt$|Tests\.swift$/;
 
-/** Rough chars→tokens for budgeting (code averages ~3.6 chars/token). */
-const CHARS_PER_TOKEN = 3.6;
+/** Chars→tokens for budgeting. Source code (esp. TS/TSX/JSX, which is symbol
+ *  dense) tokenizes closer to ~3.0 chars/token than the ~3.6 of prose. Budgeting
+ *  with the optimistic 3.6 let the prompt admit ~540k chars for a nominal "150k
+ *  token" budget, which is really ~165-180k tokens — and once the backend adds
+ *  its fixed 30k output reservation, input + max_tokens crossed Claude's 200k
+ *  context window and the provider rejected the call (surfaced as a 502). Using
+ *  the conservative real ratio keeps real input near the nominal budget so there
+ *  is always headroom for the output. */
+const CHARS_PER_TOKEN = 3.0;
 
 /** Lower tier = higher priority when the budget forces choices. Generalized so
  *  it ranks screens/state/services first across web, RN AND native naming. */
