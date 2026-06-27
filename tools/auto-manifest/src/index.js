@@ -108,6 +108,7 @@ function arg(flag, fallback) {
 // for the target app root.
 const VALUE_FLAGS = new Set([
   '--out', '--model', '--max-input-tokens', '--platform', '--api-key', '--api-url',
+  '--spec', '--analysis-root',
 ]);
 
 /**
@@ -237,7 +238,16 @@ async function main() {
   const explicitModel = arg('--model', '');
   let model = resolveModel(explicitModel || DEFAULT_MODEL);
   const maxInputTokens = Number(arg('--max-input-tokens', '150000'));
+  // Optional, untrusted developer specifications that FOCUS the analysis (which
+  // sub-project to target, what to emphasize/ignore). From --spec or the
+  // FYODOS_ANALYSIS_SPEC env (so the express script / CI can pass it too).
+  // sanitizeUserSpec (in aiAnalyze) caps the length and the prompt subordinates
+  // it to the system rules; empty → the analysis behaves exactly as before.
+  const userSpec = arg('--spec', process.env.FYODOS_ANALYSIS_SPEC || '');
   const useLLM = !process.argv.includes('--no-llm');
+  if (userSpec.trim()) {
+    logDev(`[spec] user specifications provided (${userSpec.trim().length} chars) — focusing the analysis`);
+  }
   fs.mkdirSync(outDir, { recursive: true });
 
   const platformArg = (arg('--platform', '') || '').toLowerCase();
@@ -356,7 +366,7 @@ async function main() {
         'Analyzing your project — may take 1–2 min',
         () => analyzeWithAI({
           appMeta, files: included, omitted, staticRoutes: routes, model, platform,
-          useProxy, apiKey, apiUrl, surface,
+          useProxy, apiKey, apiUrl, surface, userSpec,
         }),
       );
     if (usedModel) model = usedModel;
