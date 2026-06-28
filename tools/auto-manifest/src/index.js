@@ -97,6 +97,7 @@ const { wireWebOrb, reportWireResult, connectOrbRegistries, reportRegistriesResu
 const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
 const { offerWriteEnv, printEnvManualReminder } = require('./writeEnv');
 const { scoreSurface, computeSurface } = require('./scoreSurface');
+const { buildRunRecord, writeChangeRegistry } = require('./changeRegistry');
 
 function arg(flag, fallback) {
   const i = process.argv.indexOf(flag);
@@ -503,6 +504,9 @@ async function main() {
     const assumeYes = process.argv.includes('--yes') || process.argv.includes('--wire-yes');
     const noWire = process.argv.includes('--no-wire');
     let envWriteResult = null;
+    let orbWireResult = null;
+    let handlerWireResult = null;
+    let registryWireResult = null;
     const { runPostWireTest } = require('./postWireTest');
     const selfCorrect = !process.argv.includes('--no-self-correct');
     const corrector = selfCorrect
@@ -549,6 +553,7 @@ async function main() {
           noWire,
           runTest: !process.argv.includes('--no-wire-test'),
         });
+        orbWireResult = result;
         if (!assumeYes) resume();
         report(() => reportWireResult(result, fyodosTermColors(), { quiet: !isVerbose() }));
         orbMounted = result.status === 'added' || result.status === 'already';
@@ -576,6 +581,7 @@ async function main() {
       setLabel(wiringSpinnerLabel(platform));
       if (!assumeYes) pause();
       const handlerResult = await wireHandlers(analysisRoot, handlerOpts);
+      handlerWireResult = handlerResult;
       if (!assumeYes) resume();
       report(() => reportHandlerResult(handlerResult, fyodosTermColors(), { quiet: !isVerbose() }));
 
@@ -593,6 +599,7 @@ async function main() {
         const connected = connectOrbRegistries(analysisRoot, {
           registryFileAbs: handlerResult.registryFile,
         });
+        registryWireResult = connected;
         report(() => reportRegistriesResult(connected, fyodosTermColors(), { quiet: !isVerbose() }));
       }
 
@@ -648,6 +655,27 @@ async function main() {
         }
       } catch (e) {
         logDev(`[write-env] skipped: ${e.message}`);
+      }
+    }
+
+    // ── Change registry (transparency): record every file Fiodos touched ───────
+    // Appends to FYODOS_CHANGES.md and writes .fyodos/changes/<runId>.json.
+    // Runs after orb + handler + env so the record reflects the full pass.
+    if (!noWire) {
+      try {
+        const record = buildRunRecord(analysisRoot, {
+          appName: manifest.appName,
+          manifest,
+          publishMeta,
+          orbResult: orbWireResult,
+          handlerResult: handlerWireResult,
+          registryResult: registryWireResult,
+          envResult: envWriteResult,
+        });
+        const paths = writeChangeRegistry(analysisRoot, record);
+        logUser(`Change log: ${paths.mdRel} (history in .fyodos/changes/)`);
+      } catch (e) {
+        logDev(`[change-registry] could not write: ${e.message}`);
       }
     }
   } else if (publishing) {

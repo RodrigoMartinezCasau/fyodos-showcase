@@ -32,6 +32,16 @@ const {
   WRAPPER_BASENAME,
 } = require('./wireWebMount');
 
+function planSummary(appRoot, plan, createdFiles) {
+  const rel = (f) => path.relative(appRoot, f).replace(/\\/g, '/');
+  return {
+    strategy: plan.strategy,
+    files: (plan.files || []).map(rel),
+    created: (createdFiles || []).map(rel),
+    steps: describePlan(plan),
+  };
+}
+
 function readJsonSafe(file) {
   try {
     return JSON.parse(fs.readFileSync(file, 'utf8'));
@@ -295,7 +305,7 @@ async function wireWebOrb(appRoot, opts = {}) {
       const test = await build();
       if (test.ok || test.stage === 'skipped-no-deps') {
         writeConsentDoc(appRoot, plan);
-        return { status: 'added', file: plan.rel, test };
+        return { status: 'added', file: plan.rel, test, planSummary: planSummary(appRoot, plan, createdFiles) };
       }
       // Build failed with the orb mounted — was the app building WITHOUT it?
       revertAll();
@@ -309,11 +319,11 @@ async function wireWebOrb(appRoot, opts = {}) {
       applyMount(plan);
       verifyMounted(plan);
       writeConsentDoc(appRoot, plan);
-      return { status: 'added', file: plan.rel, test, preexistingFailure: true };
+      return { status: 'added', file: plan.rel, test, preexistingFailure: true, planSummary: planSummary(appRoot, plan, createdFiles) };
     }
 
     writeConsentDoc(appRoot, plan);
-    return { status: 'added', file: plan.rel };
+    return { status: 'added', file: plan.rel, planSummary: planSummary(appRoot, plan, createdFiles) };
   } catch (err) {
     revertAll();
     printSnippet(target, framework, colors, appRoot, err.message || String(err));
