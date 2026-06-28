@@ -13,6 +13,7 @@ import {
   createConsentManager,
   createSafeTelemetry,
   createSanitizer,
+  defaultRouteContextText,
   resolveConfirmationLexicon,
   resolveMessages,
   validateManifest,
@@ -98,7 +99,12 @@ export function FiodosProvider({
     });
     const screenStore = createScreenContextStore({
       getCurrentRoute: () => resolvedConfig.navigation.getCurrentRoute(),
-      routeFallback: resolvedConfig.routeContextFallback,
+      // The integrator's fallback wins; otherwise the orb gets screen awareness
+      // out of the box from the matched manifest route (label + description +
+      // available actions). Null when no route matches → raw route, as today.
+      routeFallback:
+        resolvedConfig.routeContextFallback ??
+        ((route) => defaultRouteContextText(route, resolvedConfig.manifest, messages)),
     });
     const notifyError =
       resolvedConfig.notifyError ?? ((message: string) => Alert.alert(ui.errorTitle, message));

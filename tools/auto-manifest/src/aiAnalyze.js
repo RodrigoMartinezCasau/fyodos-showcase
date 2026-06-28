@@ -89,6 +89,7 @@ AppManifest (all fields required unless noted):
     "intent": string (snake_case, UNIQUE across routes AND actions),
     "label": string, "route": string (opaque route string for the app's navigation adapter — an expo-router href, a URL path, or "BACK"),
     "description": string (one line: WHAT THIS SCREEN SHOWS and what the user can do there),
+    "actionIntents": string[] (OPTIONAL: intents of the actions a user performs FROM this screen — the action handlers actually wired into THIS screen's component/page. Use exact action intent ids from the "actions" array; [] if none. Advisory only, never gates anything),
     "examples": string[] (3-4 natural voice phrases, REQUIRED non-empty)
   }],
   "actions": [{
@@ -215,6 +216,7 @@ This is the context the agent reads to understand the app, so it can reason inst
 - effect: the observable outcome after it runs (state change, navigation, message).
 - relatedIntents: other manifest intents this naturally flows into or from (e.g. add-to-cart → checkout). Use the exact intent ids; [] if none.
 - route description: what the screen displays and what can be done there.
+- route actionIntents: for each screen, the intents of the actions whose handlers are actually wired into THAT screen's component/page (what the user can DO there). Use exact action intent ids; omit or [] when the screen is purely informational/navigational. This is "what you can do here" context — it never restricts the agent.
 - appType/appFlow: the app category and its main end-to-end flow.
 Be precise and concise — quality over volume. Never pad.
 

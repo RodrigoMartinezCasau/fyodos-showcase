@@ -179,6 +179,24 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
     return true;
   });
 
+  // Layer 2 — "what you can do here": keep each route's actionIntents fail-open.
+  // Only intents that survived action verification stay (a dangling intent
+  // pointing at a dropped/hallucinated action is silently removed, deduped).
+  // Empty/invalid → the field is removed entirely (Layer 1 still works).
+  const keptActionIntents = new Set(dedupedActions.map((a) => a.intent));
+  for (const route of dedupedRoutes) {
+    if (!Array.isArray(route.actionIntents)) {
+      delete route.actionIntents;
+      continue;
+    }
+    const seenIntent = new Set();
+    const cleaned = route.actionIntents.filter(
+      (i) => typeof i === 'string' && keptActionIntents.has(i) && !seenIntent.has(i) && seenIntent.add(i),
+    );
+    if (cleaned.length > 0) route.actionIntents = cleaned;
+    else delete route.actionIntents;
+  }
+
   // Schema coercion the model sometimes needs (same as the old engine).
   for (const action of dedupedActions) {
     for (const spec of Object.values(action.parameters || {})) {
