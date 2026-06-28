@@ -260,7 +260,20 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
   for (const route of dedupedRoutes) {
     if (route.route === 'BACK') continue;
     route.examples = sanitizeExamples(route.examples, route.label || route.intent);
-    const bubble = sanitizeBubblePrompt(route.bubblePrompt);
+    let bubble = sanitizeBubblePrompt(route.bubblePrompt);
+    if (!bubble) {
+      try {
+        const { deriveBubblePromptFromContext, resolveMessages } = require('@fiodos/core');
+        bubble = sanitizeBubblePrompt(
+          deriveBubblePromptFromContext(route, resolveMessages('en'), {
+            locale: 'en',
+            actions: dedupedActions,
+          }),
+        );
+      } catch {
+        /* core unavailable — leave bubble unset */
+      }
+    }
     if (bubble) route.bubblePrompt = bubble;
     else delete route.bubblePrompt;
   }

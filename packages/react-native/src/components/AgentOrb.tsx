@@ -152,6 +152,7 @@ export function AgentOrb({
   const bubblePrompt = resolveBubblePrompt(
     matchRouteIntent(currentRoute, config.manifest.routes),
     messages,
+    { locale: config.locale, actions: config.manifest.actions },
   );
   const resolvedBubbleTheme = bubbleTheme ?? resolveBubbleTheme(null);
 
