@@ -25,9 +25,9 @@ export function OrbBubble({
 }) {
   const win = Dimensions.get('window');
   const fontPx = theme.size;
-  const padV = Math.round(fontPx * 0.55);
-  const padH = Math.round(fontPx * 0.92);
-  const approxHeight = fontPx * 1.25 + padV * 2;
+  const padV = Math.round(fontPx * 0.62);
+  const padH = Math.round(fontPx * 0.95);
+  const approxHeight = fontPx + padV * 2;
   const radius = resolveBubbleRadiusPx(theme, approxHeight);
 
   const centerY = orbRect.y + orbRect.h / 2;
@@ -65,8 +65,14 @@ export function OrbBubble({
       ]}
     >
       <Text
-        numberOfLines={2}
-        style={{ color: theme.textColor, fontSize: fontPx, fontWeight: '500', lineHeight: Math.round(fontPx * 1.25) }}
+        numberOfLines={1}
+        style={{
+          color: theme.textColor,
+          fontSize: fontPx,
+          fontWeight: '500',
+          lineHeight: Math.round(fontPx * 1.25),
+          flexShrink: 0,
+        }}
       >
         {text}
       </Text>
@@ -77,7 +83,9 @@ export function OrbBubble({
 const styles = StyleSheet.create({
   bubble: {
     position: 'absolute',
-    maxWidth: 240,
+    maxWidth: 280,
+    flexShrink: 0,
+    alignSelf: 'flex-start',
     shadowColor: '#000',
     shadowOpacity: 0.22,
     shadowRadius: 8,
