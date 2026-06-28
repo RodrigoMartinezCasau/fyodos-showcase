@@ -354,12 +354,75 @@ function buildUserPrompt(appMeta, files, omitted, staticRoutes, surface = null, 
   );
 }
 
+/**
+ * Extract the FIRST complete, balanced JSON object from `text`, scanning from
+ * the first `{` to its matching `}` while respecting string literals and escape
+ * sequences (so braces inside string values don't throw the counter off).
+ * Returns the substring, or null when no balanced object is found.
+ *
+ * This is what makes parsing robust to a model that emits trailing prose (or a
+ * second brace-bearing sentence) after an otherwise valid JSON object — the
+ * cause of "Unexpected non-whitespace character after JSON at position N".
+ */
+function extractBalancedJsonObject(text) {
+  const start = text.indexOf('{');
+  if (start < 0) return null;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (ch === '\\') {
+      if (inString) escaped = true;
+      continue;
+    }
+    if (ch === '"') {
+      inString = !inString;
+      continue;
+    }
+    if (inString) continue;
+    if (ch === '{') {
+      depth += 1;
+    } else if (ch === '}') {
+      depth -= 1;
+      if (depth === 0) return text.slice(start, i + 1);
+    }
+  }
+  return null;
+}
+
 function parseJsonContent(raw) {
   let trimmed = (raw || '').trim();
   if (!trimmed) return {};
+  // Strip a leading/trailing markdown code fence if the model wrapped its JSON.
   if (trimmed.startsWith('```')) {
     trimmed = trimmed.replace(/^```(?:json)?\s*/i, '').replace(/\s*```\s*$/i, '').trim();
   }
+  // 1) Happy path: the response is exactly one JSON value.
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    /* fall through to tolerant extraction */
+  }
+  // 2) Tolerant path: take the FIRST balanced {…} object and ignore anything
+  //    the model appended after it (trailing prose, a second sentence, a stray
+  //    fence). A brace-aware scan beats indexOf('{')+lastIndexOf('}'), which
+  //    OVER-captures when the trailing text itself contains braces — the exact
+  //    failure mode ("Unexpected non-whitespace character after JSON").
+  const balanced = extractBalancedJsonObject(trimmed);
+  if (balanced) {
+    try {
+      return JSON.parse(balanced);
+    } catch {
+      /* fall through to the legacy widest-slice as a last resort */
+    }
+  }
+  // 3) Last resort: widest {…} slice (previous behavior) so we never regress on
+  //    inputs the old path could handle.
   const start = trimmed.indexOf('{');
   const end = trimmed.lastIndexOf('}');
   if (start < 0 || end <= start) throw new Error('Model response is not JSON');
@@ -580,4 +643,7 @@ module.exports = {
   sanitizeUserSpec,
   MAX_USER_SPEC_CHARS,
   manifestSchemaDoc,
+  // Exported so the response parser is unit-testable without a live AI call.
+  parseJsonContent,
+  extractBalancedJsonObject,
 };
