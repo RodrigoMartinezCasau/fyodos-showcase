@@ -31,6 +31,63 @@ function fileHasIdentifier(content, identifier) {
   return re.test(content);
 }
 
+/**
+ * Upper bound on examples kept per route/action. The enriched prompt asks the
+ * model for 5-8 varied phrasings; this cap protects the cacheable system prompt
+ * from a runaway list while leaving generous room for real synonyms.
+ */
+const MAX_EXAMPLES = 10;
+
+/**
+ * Sanitize a manifest item's `examples` array WITHOUT ever dropping the item:
+ * trims, removes empties, deduplicates case-insensitively (first spelling wins),
+ * and caps the count. Fail-open: when the model returned nothing usable, falls
+ * back to a single phrase derived from the label/intent so the core validator's
+ * "non-empty examples" rule still passes (today's contract, never weakened).
+ */
+function sanitizeExamples(raw, fallbackLabel) {
+  const list = Array.isArray(raw) ? raw : [];
+  const seen = new Set();
+  const cleaned = [];
+  for (const entry of list) {
+    if (typeof entry !== 'string') continue;
+    const phrase = entry.replace(/\s+/g, ' ').trim();
+    if (!phrase) continue;
+    const key = phrase.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    cleaned.push(phrase);
+    if (cleaned.length >= MAX_EXAMPLES) break;
+  }
+  if (cleaned.length === 0) {
+    const fallback = String(fallbackLabel || '').replace(/\s+/g, ' ').trim();
+    if (fallback) cleaned.push(fallback);
+  }
+  return cleaned;
+}
+
+/**
+ * Max length (chars) of a route's `bubblePrompt` (the short orb CTA). The prompt
+ * asks for ~6 words; this is a generous hard cap so a runaway sentence can never
+ * bloat the bubble UI or the served manifest.
+ */
+const MAX_BUBBLE_PROMPT = 80;
+
+/**
+ * Sanitize a route's `bubblePrompt` (fail-open, item never dropped): trims,
+ * collapses whitespace, strips wrapping quotes, and caps the length. Returns
+ * undefined when there is nothing usable (the SDK then derives a fallback from
+ * the label/examples), so a bad value never sticks.
+ */
+function sanitizeBubblePrompt(raw) {
+  if (typeof raw !== 'string') return undefined;
+  let s = raw.replace(/\s+/g, ' ').trim();
+  s = s.replace(/^["'«»“”]+|["'«»“”]+$/g, '').trim();
+  if (!s) return undefined;
+  if (s.length > MAX_BUBBLE_PROMPT) s = s.slice(0, MAX_BUBBLE_PROMPT).trim();
+  return s || undefined;
+}
+
 /** Normalize an expo-router href for comparison: strip (groups), trailing /index. */
 function normalizeHref(href) {
   return ('/' + String(href || '')
@@ -197,8 +254,20 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
     else delete route.actionIntents;
   }
 
+  // Examples hygiene (fail-open): trim, dedupe and cap the enriched phrasings on
+  // every surviving route and action. Never drops the item; falls back to the
+  // label so the core validator's non-empty-examples rule still holds.
+  for (const route of dedupedRoutes) {
+    if (route.route === 'BACK') continue;
+    route.examples = sanitizeExamples(route.examples, route.label || route.intent);
+    const bubble = sanitizeBubblePrompt(route.bubblePrompt);
+    if (bubble) route.bubblePrompt = bubble;
+    else delete route.bubblePrompt;
+  }
+
   // Schema coercion the model sometimes needs (same as the old engine).
   for (const action of dedupedActions) {
+    action.examples = sanitizeExamples(action.examples, action.label || action.intent);
     for (const spec of Object.values(action.parameters || {})) {
       if (spec.type === 'integer' || spec.type === 'float') spec.type = 'number';
       else if (!['string', 'number', 'boolean'].includes(spec.type)) spec.type = 'string';
@@ -217,4 +286,4 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
   };
 }
 
-module.exports = { verifyManifest, normalizeHref };
+module.exports = { verifyManifest, normalizeHref, sanitizeExamples, MAX_EXAMPLES };

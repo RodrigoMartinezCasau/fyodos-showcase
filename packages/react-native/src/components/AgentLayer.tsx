@@ -10,7 +10,12 @@
  */
 import React, { useEffect, useState } from 'react';
 import { Keyboard, Platform, StyleSheet, useWindowDimensions, View } from 'react-native';
-import { resolveOrbLayerInsets, type OrbScreenPosition } from '@fiodos/core';
+import {
+  resolveBubbleTheme,
+  resolveOrbLayerInsets,
+  type OrbScreenPosition,
+  type ResolvedBubbleTheme,
+} from '@fiodos/core';
 import { useFiodosRuntime } from '../provider/FiodosProvider';
 import { AgentOrb, type AgentOrbProps } from './AgentOrb';
 
@@ -61,7 +66,8 @@ export function AgentLayer({
   // published, so the orb is never hidden by accident. When the developer turns
   // it off in the dashboard, the orb disappears here on the next poll — no host
   // code change — and reappears when switched back on.
-  const remoteEnabled = useRemoteOrbEnabled();
+  const remote = useRemotePublishedConfig();
+  const remoteEnabled = remote.enabled;
 
   // When the dashboard position is provided, the SDK self-resolves precise insets
   // (normalized → pixels for this exact screen) so "where the developer placed it"
@@ -126,6 +132,8 @@ export function AgentLayer({
         enabled={effectiveVisible}
         textPanelOffset={{ bottom: effectiveBottom + 64, right: effectiveRight }}
         onTextPanelStateChange={setTextPanelOpen}
+        bubbleTheme={remote.bubbleTheme}
+        bubbleEnabled={remote.bubbleEnabled}
         {...orbProps}
       />
     </View>
@@ -139,15 +147,29 @@ const styles = StyleSheet.create({
   },
 });
 
+interface RemotePublishedConfig {
+  /** Master orb visibility (`orbEnabled`). */
+  enabled: boolean;
+  /** Resolved thought-bubble theme (defaults filled). */
+  bubbleTheme: ResolvedBubbleTheme;
+  /** Thought-bubble on/off (`bubbleEnabled`). */
+  bubbleEnabled: boolean;
+}
+
 /**
  * Polls the dashboard-published config (GET /v1/client/config) for the master
- * visibility switch `orbEnabled`, the SAME channel used for orb appearance on
- * web/Flutter/Android. Returns false ONLY when the developer explicitly turned
- * the orb off; true while loading, on error, or when nothing is published.
+ * visibility switch `orbEnabled` and the thought-bubble theme/on-off, the SAME
+ * channel used for orb appearance on web/Flutter/Android. `orbEnabled` is false
+ * ONLY when the developer explicitly turned the orb off; everything defaults to
+ * visible/enabled while loading, on error, or when nothing is published.
  */
-function useRemoteOrbEnabled(pollMs = 12_000): boolean {
+function useRemotePublishedConfig(pollMs = 12_000): RemotePublishedConfig {
   const { config } = useFiodosRuntime();
-  const [enabled, setEnabled] = useState(true);
+  const [state, setState] = useState<RemotePublishedConfig>({
+    enabled: true,
+    bubbleTheme: resolveBubbleTheme(null),
+    bubbleEnabled: true,
+  });
 
   useEffect(() => {
     const fetcher = config.backend.fetchPublishedConfig;
@@ -156,11 +178,17 @@ function useRemoteOrbEnabled(pollMs = 12_000): boolean {
     const load = async () => {
       try {
         const res = await fetcher.call(config.backend);
-        if (!cancelled) {
-          setEnabled(res.published ? res.published.orbEnabled !== false : true);
-        }
+        if (cancelled) return;
+        const pub = res.published;
+        setState({
+          enabled: pub ? pub.orbEnabled !== false : true,
+          bubbleTheme: resolveBubbleTheme(pub?.bubbleTheme),
+          bubbleEnabled: pub ? pub.bubbleEnabled !== false : true,
+        });
       } catch {
-        if (!cancelled) setEnabled(true);
+        if (!cancelled) {
+          setState({ enabled: true, bubbleTheme: resolveBubbleTheme(null), bubbleEnabled: true });
+        }
       }
     };
     void load();
@@ -171,5 +199,5 @@ function useRemoteOrbEnabled(pollMs = 12_000): boolean {
     };
   }, [config.backend, pollMs]);
 
-  return enabled;
+  return state;
 }

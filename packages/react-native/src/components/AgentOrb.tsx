@@ -14,13 +14,16 @@
  */
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Animated, Dimensions, Image, PanResponder, Pressable, StyleSheet, View } from 'react-native';
-import type { OrbDeployment, OrbLogoTransform } from '@fiodos/core';
+import type { OrbDeployment, OrbLogoTransform, ResolvedBubbleTheme } from '@fiodos/core';
 import {
   chipBorderRadius,
   chipIconBaseSizePx,
+  matchRouteIntent,
   normalizeChipIconScale,
   normalizeKeyboardChipIcon,
   normalizeOrbGlowIntensity,
+  resolveBubblePrompt,
+  resolveBubbleTheme,
   resolveChipIconColor,
   resolveInnerBorderStrokeColor,
   resolveOrbBackgroundColor,
@@ -38,6 +41,7 @@ import { resolveImageDataUrlForDisplay, isDisplayableImageUri } from '../utils/i
 import { ActionConfirmationModal } from './ActionConfirmationModal';
 import { AgentTextBubble } from './AgentTextBubble';
 import { ConsentModal } from './ConsentModal';
+import { OrbBubble } from './OrbBubble';
 import { OrbThinkingSpinner } from './OrbThinkingSpinner';
 import { VoiceWaveform } from './VoiceWaveform';
 import { OrbVisual } from './OrbVisual';
@@ -65,6 +69,10 @@ export interface AgentOrbProps {
   textPanelOffset?: { bottom: number; right: number };
   /** Notifies the layer so it does not hide the orb while typing. */
   onTextPanelStateChange?: (open: boolean) => void;
+  /** Published thought-bubble theme. Null/absent → defaults. */
+  bubbleTheme?: ResolvedBubbleTheme | null;
+  /** Dashboard on/off for the thought bubble. Default true. */
+  bubbleEnabled?: boolean;
 }
 
 export function AgentOrb({
@@ -80,8 +88,10 @@ export function AgentOrb({
   textInputEnabled = true,
   textPanelOffset,
   onTextPanelStateChange,
+  bubbleTheme,
+  bubbleEnabled = true,
 }: AgentOrbProps) {
-  const { ui, config } = useFiodosRuntime();
+  const { ui, config, messages } = useFiodosRuntime();
   const t = {
     ...DEFAULT_ORB_THEME,
     ...theme,
@@ -117,6 +127,33 @@ export function AgentOrb({
   // Mic denied/unavailable: tapping still puts the orb in the "active" visual
   // and reveals the keyboard chip — text is always available (Change 1).
   const [micFallbackActive, setMicFallbackActive] = useState(false);
+
+  // Track the current route so the thought bubble re-resolves its CTA on
+  // navigation (RN has no universal nav event → poll the adapter).
+  const [currentRoute, setCurrentRoute] = useState<string | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const read = () => {
+      if (cancelled) return;
+      try {
+        setCurrentRoute(config.navigation.getCurrentRoute());
+      } catch {
+        /* navigation read is best-effort */
+      }
+    };
+    read();
+    const id = setInterval(read, 700);
+    return () => {
+      cancelled = true;
+      clearInterval(id);
+    };
+  }, [config.navigation]);
+
+  const bubblePrompt = resolveBubblePrompt(
+    matchRouteIntent(currentRoute, config.manifest.routes),
+    messages,
+  );
+  const resolvedBubbleTheme = bubbleTheme ?? resolveBubbleTheme(null);
 
   // Subtle haptics on every relevant orb interaction (silent if unsupported).
   const haptics = useRef(createRnOrbHaptics()).current;
@@ -275,6 +312,15 @@ export function AgentOrb({
   const showKeyboardChip =
     textInputEnabled && !textOpen && (phase === 'listening' || micFallbackActive);
   const orbActive = showWaveform || micFallbackActive;
+  // The thought bubble shows ONLY when the orb is idle and free, the dashboard
+  // enabled it, and a CTA resolves for the current screen. Tap → text panel.
+  const showBubble =
+    bubbleEnabled &&
+    !!bubblePrompt &&
+    !textOpen &&
+    !showThinking &&
+    !orbActive &&
+    phase !== 'speaking';
   const chip = t.keyboardChip ?? {};
   const chipSize = chip.size ?? 30;
   const chipShape = chip.shape ?? 'circle';
@@ -442,6 +488,22 @@ export function AgentOrb({
         </Pressable>
         </View>
       </Animated.View>
+      {showBubble && bubblePrompt && orbRect ? (
+        <View pointerEvents="box-none" style={styles.chipOverlay}>
+          <OrbBubble
+            text={bubblePrompt}
+            theme={resolvedBubbleTheme}
+            deployment={deployment}
+            orbRect={orbRect}
+            accessibilityLabel={ui.orbAccessibilityLabel}
+            onPress={() => {
+              haptics.trigger('orbTap');
+              if (textInputEnabled) openTextPanel();
+              else void toggleListening();
+            }}
+          />
+        </View>
+      ) : null}
       {showKeyboardChip && orbRect ? (
         <View pointerEvents="box-none" style={styles.chipOverlay}>
           <Pressable

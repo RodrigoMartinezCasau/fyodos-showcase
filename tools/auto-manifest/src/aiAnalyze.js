@@ -88,9 +88,10 @@ AppManifest (all fields required unless noted):
   "routes": [{
     "intent": string (snake_case, UNIQUE across routes AND actions),
     "label": string, "route": string (opaque route string for the app's navigation adapter — an expo-router href, a URL path, or "BACK"),
-    "description": string (one line: WHAT THIS SCREEN SHOWS and what the user can do there),
+    "description": string (one DISTINCTIVE line: what THIS screen shows and what the user does there, phrased so it can NOT be confused with sibling screens — name the concrete content/entities unique to it. e.g. "Lists the registered people/accounts; from here you open and manage each individual user" — NOT a generic "a screen of the app"),
+    "bubblePrompt": string (SHORT user-facing call-to-action shown in a small "thought bubble" next to the assistant orb WHEN THE USER IS ON THIS SCREEN. One friendly question/offer in the app's language, max ~6 words, ending naturally (often a "?"). Distinct per screen and tied to what the user does HERE — e.g. a cart screen: "¿Finalizar tu compra?"; a users list: "¿Buscar un usuario?"; a login screen: "¿Quieres iniciar sesión?". NOT a description, NOT the label verbatim. Optional — omit if nothing natural fits),
     "actionIntents": string[] (OPTIONAL: intents of the actions a user performs FROM this screen — the action handlers actually wired into THIS screen's component/page. Use exact action intent ids from the "actions" array; [] if none. Advisory only, never gates anything),
-    "examples": string[] (3-4 natural voice phrases, REQUIRED non-empty)
+    "examples": string[] (5-8 natural voice phrases a user might say to reach this screen, REQUIRED non-empty. Include SYNONYMS and PARAPHRASES that do NOT contain the literal label word, so the agent recognizes indirect requests — e.g. for a "Users" screen: "ver usuarios", "la pantalla donde vemos a las personas", "muéstrame las cuentas", "lista de gente registrada", "quiénes están dados de alta". Vary the verb and the noun; cover the obvious phrasing AND at least two oblique ones. Avoid near-duplicates that differ only in a word)
   }],
   "actions": [{
     "intent": string (snake_case, UNIQUE across routes AND actions),
@@ -106,7 +107,7 @@ AppManifest (all fields required unless noted):
     "confirmationMessageTemplate": string (REQUIRED if requireConfirmation true),
     "parameters": { "<name>": {"type": "string"|"number"|"boolean", "required": boolean, "description": string (non-empty)} },
     "contextRequirements": {"requiresVisibleContent"?: bool, "requiresAuth"?: bool} (optional; set requiresAuth: true for actions that need a signed-in user — see the REQUIRES-AUTH rule below),
-    "examples": string[] (3-4 natural voice phrases, REQUIRED non-empty)
+    "examples": string[] (5-8 natural voice phrases a user might say to trigger this action, REQUIRED non-empty. Include SYNONYMS and PARAPHRASES that do NOT rely on the literal label word, so indirect requests are recognized — e.g. for "Empty cart": "vacía el carrito", "quita todo lo que tengo", "borra todos los productos de la cesta". Vary verb and phrasing; avoid near-duplicates)
   }],
   "policies": {"requireConfirmationForDestructive": true, "allowedWithoutAuth": string[], "contextRetentionTurns": 5}
 }
@@ -217,8 +218,17 @@ This is the context the agent reads to understand the app, so it can reason inst
 - relatedIntents: other manifest intents this naturally flows into or from (e.g. add-to-cart → checkout). Use the exact intent ids; [] if none.
 - route description: what the screen displays and what can be done there.
 - route actionIntents: for each screen, the intents of the actions whose handlers are actually wired into THAT screen's component/page (what the user can DO there). Use exact action intent ids; omit or [] when the screen is purely informational/navigational. This is "what you can do here" context — it never restricts the agent.
+- route bubblePrompt: a SHORT, friendly CTA (in the app's language, ~6 words max) the assistant shows beside the orb on THAT screen to invite the user to act — e.g. login screen → "¿Quieres iniciar sesión?", cart → "¿Finalizar tu compra?", users list → "¿Buscar un usuario?". Make it distinct per screen and grounded in what the user does there; it is end-user copy, not a description. Omit when nothing natural fits.
 - appType/appFlow: the app category and its main end-to-end flow.
-Be precise and concise — quality over volume. Never pad.
+
+DISTINCTIVENESS (this is what prevents the agent picking the wrong screen/action):
+- Two screens are EASILY confused when their descriptions are generic. Write each route's description so it names the concrete entities/content unique to THAT screen and could not be copy-pasted onto a sibling. Bad (confusable): "Dashboard screen of the app." Good: "Aggregate overview with KPI cards (totals of users, projects, revenue); it does NOT list individual records." vs "Lists individual user records with per-user detail."
+- EXAMPLES are how the agent maps indirect speech to the right intent. For every route AND action, after the obvious phrasing add at least TWO oblique phrasings that a real user would say WITHOUT the label word (descriptive references to the content, e.g. "where we see the people" for a Users screen, "the page with the totals/summary" for an Overview screen). This directly reduces cross-screen confusion. Make examples DISTINCT across sibling screens — never give two screens an example that would fit both.
+
+SENSITIVE ACTIONS — EXTRA DETAIL (still static, no per-turn change):
+For any action with requireConfirmation true (delete/remove, logout, place/cancel orders, spend money, irreversible changes), make description, preconditions and effect noticeably MORE detailed than for normal actions: spell out exactly what is affected, what is irreversible, and the precise post-state. This richer manual lives in the static prompt so the agent reasons carefully about the stakes; it does NOT change the confirmation flow (the engine still enforces it).
+
+Be precise and DISTINCTIVE. Descriptions stay one tight line each (no padding), but examples should be VARIED and cover several real phrasings (synonyms/paraphrases are wanted, near-duplicate filler is not).
 
 Also return EVIDENCE for every route and action: the file (exact relative path as given in the FILE headers) and symbol (function/property name) in the provided code that justifies it. Evidence is verified mechanically afterwards: an action whose file or symbol does not exist is dropped, and unverifiable items count against you.
 
