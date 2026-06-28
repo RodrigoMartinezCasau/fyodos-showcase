@@ -30,19 +30,17 @@ export function OrbBubble({
   const approxHeight = fontPx + padV * 2;
   const radius = resolveBubbleRadiusPx(theme, approxHeight);
 
-  const centerY = orbRect.y + orbRect.h / 2;
-  // Horizontal: place on the orb's free side. RN can't anchor by the right edge
+  // Horizontal: free side of the orb. RN can't anchor by the right edge
   // without a width, so for the left side we anchor via `right` from the window.
   const horizontal =
     deployment.horizontal === 'left'
       ? { right: Math.max(8, win.width - orbRect.x + 10) }
       : { left: orbRect.x + orbRect.w + 10 };
-  // Vertical: grow toward the screen interior so it reads like a corner thought
-  // bubble — upward when the orb sits low, downward when it sits high.
+  // Vertical: FREE corner — orb low → top edge; orb high → bottom edge.
   const vertical =
     deployment.vertical === 'up'
-      ? { bottom: Math.max(8, win.height - centerY) }
-      : { top: centerY };
+      ? { top: orbRect.y }
+      : { top: Math.max(8, orbRect.y + orbRect.h - approxHeight) };
 
   return (
     <Pressable
