@@ -73,6 +73,12 @@ export interface AgentOrbProps {
   bubbleTheme?: ResolvedBubbleTheme | null;
   /** Dashboard on/off for the thought bubble. Default true. */
   bubbleEnabled?: boolean;
+  /**
+   * Dashboard on/off for the VOICE channel. Default true. When false the orb
+   * neither listens nor speaks: tapping it opens the text keyboard directly
+   * (text turns are silent by default). Animations are unchanged.
+   */
+  voiceInputEnabled?: boolean;
 }
 
 export function AgentOrb({
@@ -90,6 +96,7 @@ export function AgentOrb({
   onTextPanelStateChange,
   bubbleTheme,
   bubbleEnabled = true,
+  voiceInputEnabled = true,
 }: AgentOrbProps) {
   const { ui, config, messages } = useFiodosRuntime();
   const t = {
@@ -286,7 +293,16 @@ export function AgentOrb({
     } catch {
       /* feedback must never break the agent */
     }
-    if (voiceAvailable) {
+    // Voice disabled in the dashboard: the orb never listens or speaks. Tapping
+    // opens the keyboard DIRECTLY (text turns are silent by default), and the
+    // orb's animations stay exactly as before. This branch is intentionally
+    // BEFORE the voiceAvailable check so a working mic is still bypassed.
+    if (!voiceInputEnabled && textInputEnabled) {
+      setMicFallbackActive(false);
+      openTextPanel();
+      return;
+    }
+    if (voiceAvailable && voiceInputEnabled) {
       setMicFallbackActive(false);
       void toggleListening();
       return;

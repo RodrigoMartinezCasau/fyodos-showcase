@@ -134,6 +134,7 @@ export function AgentLayer({
         onTextPanelStateChange={setTextPanelOpen}
         bubbleTheme={remote.bubbleTheme}
         bubbleEnabled={remote.bubbleEnabled}
+        voiceInputEnabled={remote.voiceInputEnabled}
         {...orbProps}
       />
     </View>
@@ -154,6 +155,8 @@ interface RemotePublishedConfig {
   bubbleTheme: ResolvedBubbleTheme;
   /** Thought-bubble on/off (`bubbleEnabled`). */
   bubbleEnabled: boolean;
+  /** Orb voice channel on/off (`voiceInputEnabled`). False → tap opens keyboard. */
+  voiceInputEnabled: boolean;
 }
 
 /**
@@ -169,6 +172,7 @@ function useRemotePublishedConfig(pollMs = 12_000): RemotePublishedConfig {
     enabled: true,
     bubbleTheme: resolveBubbleTheme(null),
     bubbleEnabled: true,
+    voiceInputEnabled: true,
   });
 
   useEffect(() => {
@@ -184,10 +188,16 @@ function useRemotePublishedConfig(pollMs = 12_000): RemotePublishedConfig {
           enabled: pub ? pub.orbEnabled !== false : true,
           bubbleTheme: resolveBubbleTheme(pub?.bubbleTheme),
           bubbleEnabled: pub ? pub.bubbleEnabled !== false : true,
+          voiceInputEnabled: pub ? pub.voiceInputEnabled !== false : true,
         });
       } catch {
         if (!cancelled) {
-          setState({ enabled: true, bubbleTheme: resolveBubbleTheme(null), bubbleEnabled: true });
+          setState({
+            enabled: true,
+            bubbleTheme: resolveBubbleTheme(null),
+            bubbleEnabled: true,
+            voiceInputEnabled: true,
+          });
         }
       }
     };
