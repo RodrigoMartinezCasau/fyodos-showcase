@@ -50,6 +50,11 @@ export interface AgentTextBubbleProps {
   placeholder: string;
   sendLabel: string;
   closeLabel: string;
+  /** Pre-fill when opened from the thought-bubble CTA. */
+  seedText?: string | null;
+  /** Submit the seed as soon as the panel opens. */
+  autoSendSeed?: boolean;
+  onSeedConsumed?: () => void;
 }
 
 export function AgentTextBubble({
@@ -64,6 +69,9 @@ export function AgentTextBubble({
   placeholder,
   sendLabel,
   closeLabel,
+  seedText,
+  autoSendSeed = false,
+  onSeedConsumed,
 }: AgentTextBubbleProps) {
   const t = { ...DEFAULT_MODAL_THEME, ...theme };
   // Send button follows the conversation accent (dashboard), falling back to
@@ -71,13 +79,32 @@ export function AgentTextBubble({
   const sendButtonColor = theme?.primaryButtonColor ?? accentColor;
   const [draft, setDraft] = useState('');
   const inputRef = useRef<TextInput>(null);
+  const seedAppliedRef = useRef(false);
 
   // Open → focus the input so the system keyboard slides up immediately.
   useEffect(() => {
-    if (!visible) return;
+    if (!visible) {
+      seedAppliedRef.current = false;
+      setDraft('');
+      return;
+    }
+    if (seedAppliedRef.current) return;
+    const text = seedText?.trim();
+    if (text) {
+      seedAppliedRef.current = true;
+      setDraft(text);
+      onSeedConsumed?.();
+      if (autoSendSeed && !busy) {
+        const timer = setTimeout(() => {
+          onSend(text);
+          setDraft('');
+        }, 80);
+        return () => clearTimeout(timer);
+      }
+    }
     const timer = setTimeout(() => inputRef.current?.focus(), 80);
     return () => clearTimeout(timer);
-  }, [visible]);
+  }, [visible, seedText, autoSendSeed, busy, onSend, onSeedConsumed]);
 
   if (!visible) return null;
 

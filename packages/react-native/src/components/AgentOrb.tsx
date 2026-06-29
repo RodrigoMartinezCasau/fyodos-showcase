@@ -131,6 +131,7 @@ export function AgentOrb({
   } = useAgent({ enabled });
 
   const [textOpen, setTextOpen] = useState(false);
+  const [textSeed, setTextSeed] = useState<{ text: string; autoSend: boolean } | null>(null);
   // Mic denied/unavailable: tapping still puts the orb in the "active" visual
   // and reveals the keyboard chip — text is always available (Change 1).
   const [micFallbackActive, setMicFallbackActive] = useState(false);
@@ -179,7 +180,10 @@ export function AgentOrb({
   const setTextPanel = useCallback(
     (open: boolean) => {
       setTextOpen(open);
-      if (!open) setMicFallbackActive(false);
+      if (!open) {
+        setMicFallbackActive(false);
+        setTextSeed(null);
+      }
       try {
         onTextPanelStateChange?.(open);
       } catch {
@@ -318,9 +322,11 @@ export function AgentOrb({
     void toggleListening();
   };
 
-  const openTextPanel = () => {
+  const openTextPanel = (opts?: { seed?: string; autoSend?: boolean }) => {
     // Switching channel: close the microphone before showing the keyboard.
     cancelAll();
+    const seed = opts?.seed?.trim();
+    setTextSeed(seed ? { text: seed, autoSend: opts?.autoSend ?? false } : null);
     setTextPanel(true);
   };
 
@@ -440,6 +446,9 @@ export function AgentOrb({
           placeholder={ui.textInputPlaceholder}
           sendLabel={ui.textSendLabel}
           closeLabel={ui.textPanelCloseLabel}
+          seedText={textSeed?.text ?? null}
+          autoSendSeed={textSeed?.autoSend ?? false}
+          onSeedConsumed={() => setTextSeed(null)}
         />
       ) : null}
       <Animated.View
@@ -515,7 +524,7 @@ export function AgentOrb({
             accessibilityLabel={ui.orbAccessibilityLabel}
             onPress={() => {
               haptics.trigger('orbTap');
-              if (textInputEnabled) openTextPanel();
+              if (textInputEnabled) openTextPanel({ seed: bubblePrompt, autoSend: true });
               else void toggleListening();
             }}
           />
