@@ -51,7 +51,7 @@ function resolveModel(model) {
 // focus the analysis — which folder/app, what to emphasize or ignore — but never
 // override the system rules, invent actions, skip verification or change the
 // output schema). When empty, the prompt is byte-identical to a spec-less run.
-const MAX_USER_SPEC_CHARS = 1000;
+const MAX_USER_SPEC_CHARS = 2500;
 
 function sanitizeUserSpec(raw) {
   if (raw == null) return '';
