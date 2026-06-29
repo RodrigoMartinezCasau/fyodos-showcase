@@ -39,7 +39,7 @@ export function OrbBubble({
   const vertical =
     deployment.vertical === 'up'
       ? { top: orbRect.y }
-      : { bottom: Math.max(8, win.height - (orbRect.y + orbRect.h)) };
+      : { top: Math.max(8, orbRect.y + orbRect.h - approxHeight) };
 
   return (
     <Pressable
@@ -54,6 +54,9 @@ export function OrbBubble({
       ]}
     >
       <Text
+        numberOfLines={1}
+        adjustsFontSizeToFit
+        minimumFontScale={0.5}
         style={[
           styles.text,
           {
