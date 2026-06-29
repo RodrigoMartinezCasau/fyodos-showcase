@@ -60,6 +60,7 @@ export function OrbBubble({
           styles.text,
           {
             fontSize: fontPx,
+            lineHeight: Math.round(fontPx * 1.25),
             color: theme.textColor,
             backgroundColor: theme.backgroundColor,
             borderColor: theme.borderColor,
