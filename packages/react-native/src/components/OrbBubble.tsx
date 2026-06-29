@@ -19,7 +19,7 @@ import {
 
 const BUBBLE_MAX_WIDTH = 280;
 const MARQUEE_GAP = 48;
-const MARQUEE_SPEED_PX_PER_S = 60;
+const MARQUEE_SPEED_PX_PER_S = 30;
 
 export function OrbBubble({
   text,
