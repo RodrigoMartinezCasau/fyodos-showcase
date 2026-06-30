@@ -23,6 +23,7 @@ import {
   normalizeKeyboardChipIcon,
   normalizeOrbGlowIntensity,
   resolveBubblePrompt,
+  bubblePromptToAffirmative,
   resolveBubbleTheme,
   resolveChipIconColor,
   resolveInnerBorderStrokeColor,
@@ -524,7 +525,14 @@ export function AgentOrb({
             accessibilityLabel={ui.orbAccessibilityLabel}
             onPress={() => {
               haptics.trigger('orbTap');
-              if (textInputEnabled) openTextPanel({ seed: bubblePrompt });
+              if (textInputEnabled) {
+                openTextPanel({
+                  seed: bubblePromptToAffirmative(bubblePrompt, {
+                    locale: config.locale,
+                    messages,
+                  }),
+                });
+              }
               else void toggleListening();
             }}
           />
