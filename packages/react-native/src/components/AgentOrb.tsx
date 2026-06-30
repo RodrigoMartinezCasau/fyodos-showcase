@@ -524,7 +524,7 @@ export function AgentOrb({
             accessibilityLabel={ui.orbAccessibilityLabel}
             onPress={() => {
               haptics.trigger('orbTap');
-              if (textInputEnabled) openTextPanel({ seed: bubblePrompt, autoSend: true });
+              if (textInputEnabled) openTextPanel({ seed: bubblePrompt });
               else void toggleListening();
             }}
           />
