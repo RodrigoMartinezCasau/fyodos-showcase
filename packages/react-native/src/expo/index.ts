@@ -15,3 +15,7 @@ export type {
   ExpoRouterNavigationAdapter,
 } from './expoRouterNavigation';
 export { createAsyncStorageAdapter } from './asyncStorage';
+
+// High-level one-line orb mount (the RN counterpart of the web <FiodosAgent/>).
+export { FiodosExpoAgent } from './FiodosExpoAgent';
+export type { FiodosExpoAgentProps } from './FiodosExpoAgent';

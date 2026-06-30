@@ -60,6 +60,18 @@ function resolveEnvPlan(appRoot) {
   if (deps['@angular/core'] || has('angular.json')) {
     return { framework: 'angular', file: null, candidates: [], keyVar: null, urlVar: null };
   }
+  // Expo / React Native: the orb reads EXPO_PUBLIC_* (Expo inlines these at
+  // build time and exposes them via process.env). A plain `.env` at the app root
+  // is the convention; we still ensure it is git-ignored like any secret file.
+  if (deps.expo || deps['expo-router'] || deps['react-native']) {
+    return {
+      framework: 'expo',
+      file: '.env',
+      candidates: ['.env.local', '.env.development.local', '.env.development', '.env'],
+      keyVar: 'EXPO_PUBLIC_FYODOS_API_KEY',
+      urlVar: 'EXPO_PUBLIC_FYODOS_API_URL',
+    };
+  }
   if (
     deps['@sveltejs/kit'] ||
     deps.svelte ||

@@ -187,6 +187,32 @@ async function testOfferWriteEnvAddsToExistingGitignore() {
   console.log('PASS offerWriteEnv (next) writes .env.local and ensures it is git-ignored');
 }
 
+// ── Expo / React Native: EXPO_PUBLIC_* in .env, git-ignored, no deploy step ───
+async function testOfferWriteEnvExpo() {
+  const dir = mkapp({
+    'package.json': JSON.stringify({ dependencies: { expo: '~54.0.0', 'expo-router': '~6.0.0', 'react-native': '0.81.5' } }),
+  });
+  const plan = computeEnvWritePlan(dir, KEY, 'https://api.fyodos.com', 'https://api.fyodos.com');
+  assert.strictEqual(plan.framework, 'expo');
+  assert.strictEqual(plan.keyVar, 'EXPO_PUBLIC_FYODOS_API_KEY');
+
+  const res = await offerWriteEnv({
+    appRoot: dir,
+    apiKey: KEY,
+    apiUrl: 'https://api.fyodos.com',
+    defaultApiUrl: 'https://api.fyodos.com',
+    assumeYes: true,
+    log: noop,
+    logDev: noop,
+  });
+  assert.strictEqual(res.status, 'written');
+  assert.ok(read(dir, '.env').includes(`EXPO_PUBLIC_FYODOS_API_KEY=${KEY}`), 'EXPO_PUBLIC key written to .env');
+  assert.ok(gitignoreCovers(read(dir, '.gitignore'), '.env'), '.env git-ignored');
+  // EAS production step is printed by the CLI, not via the web deploy reminder.
+  assert.strictEqual(res.deploy, null, 'expo uses the CLI EAS reminder, not the web provider one');
+  console.log('PASS offerWriteEnv (expo) writes EXPO_PUBLIC key, git-ignores .env, no web deploy reminder');
+}
+
 /**
  * Drive offerWriteEnv through a SIMULATED TTY with scripted answers, capturing
  * every prompt question.
@@ -251,6 +277,7 @@ async function testNoDeployPromptOnlyReminder() {
   testDeployReminderLines();
   await testOfferWriteEnvWritesAndIgnores();
   await testOfferWriteEnvAddsToExistingGitignore();
+  await testOfferWriteEnvExpo();
   await testNoDeployPromptOnlyReminder();
   console.log('ALL writeEnv tests passed');
 })().catch((e) => {

@@ -85,6 +85,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const readline = require('readline');
 const { loadEnv, loadAppEnv } = require('./loadEnv');
 loadEnv();
 
@@ -94,6 +95,8 @@ const { resolveAnalysisRoot } = require('./resolveAnalysisRoot');
 const { analyzeWithAI, correctActionWiring, DEFAULT_MODEL, resolveModel } = require('./aiAnalyze');
 const { verifyManifest } = require('./verify');
 const { wireWebOrb, reportWireResult, connectOrbRegistries, reportRegistriesResult } = require('./wireWeb');
+const { wireReactNativeOrb, reportReactNativeWire } = require('./wireReactNative');
+const { wireFlutterOrb, writeFlutterEnv, reportFlutterWire } = require('./wireFlutter');
 const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
 const { offerWriteEnv, printEnvManualReminder } = require('./writeEnv');
 const { scoreSurface, computeSurface } = require('./scoreSurface');
@@ -157,6 +160,30 @@ function logDev(...args) {
 function logUser(line) {
   const { blue, cyan, reset } = fyodosTermColors();
   console.log(`${cyan}◉${reset} ${blue}Fiodos${reset} · ${line}`);
+}
+
+/**
+ * Ask the developer to confirm before the analysis runs. `yes` continues; any
+ * other answer (or `no`) cancels instantly — the command ends without analyzing.
+ * Non-interactive runs (no TTY: CI, pipes) proceed automatically so automation
+ * is never blocked waiting on stdin.
+ */
+function askProceed() {
+  return new Promise((resolve) => {
+    if (!process.stdin.isTTY) {
+      resolve(true);
+      return;
+    }
+    const { blue, cyan, reset } = fyodosTermColors();
+    const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    rl.question(
+      `${cyan}◉${reset} ${blue}Fiodos${reset} · Analyze and publish this project? (yes/no) `,
+      (answer) => {
+        rl.close();
+        resolve(/^(y|yes|s|si|sí)$/i.test((answer || '').trim()));
+      },
+    );
+  });
 }
 
 /** Spinner copy: "website" for web targets, "app" for mobile/native. */
@@ -224,6 +251,14 @@ async function withSpinner(label, work) {
 }
 
 async function main() {
+  // Consent gate: confirm before doing anything. `yes` continues; `no` (or any
+  // other answer) cancels instantly — no analysis is run, the command just ends.
+  const proceed = await askProceed();
+  if (!proceed) {
+    logUser('Cancelled — no analysis was run.');
+    return;
+  }
+
   // Accept an optional leading `analyze` subcommand: `fiodos analyze <dir>`.
   let positionals = positionalArgs();
   if (positionals[0] === 'analyze') positionals = positionals.slice(1);
@@ -678,12 +713,224 @@ async function main() {
         logDev(`[change-registry] could not write: ${e.message}`);
       }
     }
+  } else if (platform === 'mobile' && publishing) {
+    // ── Mobile (Expo / React Native): mirror the web pipeline, adapted ─────────
+    // Same single command that publishes also mounts the orb (via the SDK's
+    // one-line <FiodosExpoAgent/>), records the install proof so the dashboard
+    // connection screen completes, writes the EXPO_PUBLIC_* env, and prints the
+    // EAS production step — exactly like web, just for an app.
+    loadAppEnv(analysisRoot);
+    const { apiKey, apiUrl } = resolveApiTarget();
+    const noWire = process.argv.includes('--no-wire');
+    let orbWireResult = null;
+    let envWriteResult = null;
+
+    await withSpinner('Publishing to your project', async ({ setLabel, pause, resume }) => {
+      await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true });
+      if (!noWire && !process.argv.includes('--no-orb-wire')) {
+        setLabel(orbMountSpinnerLabel(platform));
+        orbWireResult = wireReactNativeOrb(analysisRoot, {
+          manifest,
+          colors: fyodosTermColors(),
+          noWire,
+        });
+        pause();
+        reportReactNativeWire(orbWireResult, fyodosTermColors(), { quiet: !isVerbose() });
+        resume();
+        // Install proof: only when the orb is genuinely wired into the code. If
+        // we could only print a snippet, we DON'T post — the dashboard then
+        // waits for the runtime heartbeat (FiodosProvider's reportOrbSeen) so a
+        // green tick always reflects a real mount, never a guess.
+        if (
+          apiKey &&
+          (orbWireResult.status === 'added' || orbWireResult.status === 'already')
+        ) {
+          const proof = await postOrbWired({
+            apiKey,
+            apiUrl,
+            file: orbWireResult.file || '',
+            platform: 'mobile',
+            actionsStatus: 'done',
+          });
+          if (proof && proof.ok === false && proof.reason !== 'no-api-key') {
+            logDev(`[orb-wired] mobile install proof not recorded (${proof.status || proof.reason}); dashboard will rely on the runtime ping`);
+          }
+        }
+      }
+    });
+    logUser('Published to your project');
+
+    // API key in the app environment (EXPO_PUBLIC_*) — same consent flow as web.
+    if (!process.argv.includes('--no-write-env')) {
+      try {
+        envWriteResult = await offerWriteEnv({
+          appRoot: analysisRoot,
+          apiKey,
+          apiUrl,
+          defaultApiUrl: DEFAULT_API_URL,
+          assumeYes: process.argv.includes('--write-env-yes'),
+          log: logUser,
+          logDev,
+        });
+        if (envWriteResult) printEnvManualReminder(envWriteResult, { logUser, logDev });
+      } catch (e) {
+        logDev(`[write-env] skipped: ${e.message}`);
+      }
+    }
+
+    // Production (EAS) reminder for the build-time public key. A CLI cannot (and
+    // must not) authenticate into the user's Expo account, so we print the exact
+    // step instead — mirroring the web deploy-provider reminder.
+    if (apiKey) printExpoProductionReminder({ apiKey, appRoot: analysisRoot });
+
+    if (!noWire) {
+      try {
+        const record = buildRunRecord(analysisRoot, {
+          appName: manifest.appName,
+          manifest,
+          publishMeta,
+          orbResult: orbWireResult,
+          envResult: envWriteResult,
+        });
+        const paths = writeChangeRegistry(analysisRoot, record);
+        logUser(`Change log: ${paths.mdRel} (history in .fyodos/changes/)`);
+      } catch (e) {
+        logDev(`[change-registry] could not write: ${e.message}`);
+      }
+    }
+  } else if (platform === 'flutter' && publishing) {
+    // ── Flutter: mirror the web/RN pipeline, adapted to Dart ──────────────────
+    // The Flutter SDK's one-line FiodosAgent self-fetches the published manifest
+    // by API key, so we don't write a manifest file. We publish, wrap lib/main's
+    // home: with FiodosAgent, record the install proof, write the dart-define env
+    // file, and print the run + production commands.
+    loadAppEnv(analysisRoot);
+    const { apiKey, apiUrl } = resolveApiTarget();
+    const noWire = process.argv.includes('--no-wire');
+    let orbWireResult = null;
+    let envWriteResult = null;
+
+    await withSpinner('Publishing to your project', async ({ setLabel, pause, resume }) => {
+      await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true });
+      if (!noWire && !process.argv.includes('--no-orb-wire')) {
+        setLabel(orbMountSpinnerLabel(platform));
+        orbWireResult = wireFlutterOrb(analysisRoot, { colors: fyodosTermColors(), noWire });
+        pause();
+        reportFlutterWire(orbWireResult, fyodosTermColors(), { quiet: !isVerbose() });
+        resume();
+        // Install proof only when the orb is genuinely wired into main.dart. If
+        // we could only print a snippet, we DON'T post — the dashboard then waits
+        // for the runtime heartbeat (FiodosAgent posts orb-seen on warmUp).
+        if (
+          apiKey &&
+          (orbWireResult.status === 'added' || orbWireResult.status === 'already')
+        ) {
+          const proof = await postOrbWired({
+            apiKey,
+            apiUrl,
+            file: orbWireResult.file || '',
+            platform: 'flutter',
+            actionsStatus: 'done',
+          });
+          if (proof && proof.ok === false && proof.reason !== 'no-api-key') {
+            logDev(`[orb-wired] flutter install proof not recorded (${proof.status || proof.reason}); dashboard will rely on the runtime ping`);
+          }
+        }
+      }
+    });
+    logUser('Published to your project');
+
+    // Dart-define env file (git-ignored) so `flutter run` has the key without
+    // hardcoding the secret in committed source.
+    if (apiKey && !process.argv.includes('--no-write-env')) {
+      try {
+        envWriteResult = writeFlutterEnv(analysisRoot, {
+          apiKey,
+          apiUrl,
+          defaultApiUrl: DEFAULT_API_URL,
+        });
+        if (envWriteResult && envWriteResult.written) {
+          logUser(`API key saved to ${envWriteResult.file} (git-ignored).`);
+          if (envWriteResult.gitignore && envWriteResult.gitignore.changed) {
+            logUser(`Added ${envWriteResult.gitignore.pattern} to .gitignore so your key is never pushed to GitHub.`);
+          }
+        }
+      } catch (e) {
+        logDev(`[write-env] flutter skipped: ${e.message}`);
+      }
+    }
+
+    if (apiKey) printFlutterRunReminder({ apiKey, envFile: envWriteResult && envWriteResult.file });
+
+    if (!noWire) {
+      try {
+        const record = buildRunRecord(analysisRoot, {
+          appName: manifest.appName,
+          manifest,
+          publishMeta,
+          orbResult: orbWireResult,
+          envResult: envWriteResult,
+        });
+        const paths = writeChangeRegistry(analysisRoot, record);
+        logUser(`Change log: ${paths.mdRel} (history in .fyodos/changes/)`);
+      } catch (e) {
+        logDev(`[change-registry] could not write: ${e.message}`);
+      }
+    }
   } else if (publishing) {
+    // Native (iOS / Android): the orb ships through the native SDK — there is no
+    // JS/Dart entrypoint to wire here, so we only publish the manifest.
     loadAppEnv(analysisRoot);
     await withSpinner('Publishing to your project', () =>
       publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true }),
     );
     logUser('Published to your project');
+  }
+}
+
+/**
+ * How to run a Flutter app with the orb key (dev) and ship it (production).
+ * Flutter has no auto-loaded .env: the compile-time key is passed via
+ * --dart-define. We never touch the user's build pipeline — we print the exact
+ * commands, mirroring the web deploy reminder and the RN EAS reminder.
+ */
+function printFlutterRunReminder({ apiKey, envFile }) {
+  const file = envFile || 'fyodos.env.json';
+  logUser('Run your app with the orb — pass the key as a compile-time define (2 steps)');
+  console.log('  Step 1 — Dev run (reads the git-ignored env file we just wrote):');
+  console.log(`            flutter run --dart-define-from-file=${file}`);
+  console.log('');
+  console.log('  Step 2 — Production build — pass the same define to your release build / CI:');
+  console.log(`            flutter build apk --dart-define-from-file=${file}`);
+  console.log(`            (or --dart-define=FYODOS_API_KEY=${apiKey})`);
+}
+
+/**
+ * Production (EAS) step for Expo: EXPO_PUBLIC_* vars are inlined by Metro from
+ * the build environment. Local `.env` covers `expo start`, but cloud EAS builds
+ * (which never receive a git-ignored .env) need the key set in EAS env so the
+ * orb is not invisible in TestFlight / Play builds. We never touch the user's
+ * Expo account — we print the exact command + dashboard path.
+ */
+function printExpoProductionReminder({ apiKey, appRoot }) {
+  const usesEas = (() => {
+    try {
+      return fs.existsSync(path.join(appRoot, 'eas.json'));
+    } catch {
+      return false;
+    }
+  })();
+  logUser('Make the orb appear in PRODUCTION builds — add the key to EAS (2 steps)');
+  console.log('  Step 1 — Copy your orb key (this exact value):');
+  console.log(`            ${apiKey}`);
+  console.log('');
+  console.log('  Step 2 — Set it in your EAS build environment:');
+  console.log(`            eas env:create --name EXPO_PUBLIC_FYODOS_API_KEY --value ${apiKey} --environment production`);
+  console.log('            (or expo.dev → your project → Environment variables, then rebuild)');
+  if (!usesEas) {
+    console.log('');
+    console.log('            No eas.json yet? `expo start` already reads your local .env;');
+    console.log('            add the EAS variable when you set up cloud builds.');
   }
 }
 
@@ -979,6 +1226,7 @@ async function postOrbWired({
   apiKey,
   apiUrl,
   file,
+  platform = 'web',
   actionsStatus = 'pending',
   actionsTotal = 0,
   actionsDone = 0,
@@ -990,7 +1238,7 @@ async function postOrbWired({
       headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
       body: JSON.stringify({
         file: file || '',
-        platform: 'web',
+        platform,
         actionsStatus,
         actionsTotal,
         actionsDone,
