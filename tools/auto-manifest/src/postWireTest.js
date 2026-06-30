@@ -103,6 +103,30 @@ function tail(s, n = 60) {
   return lines.slice(-n).join('\n').trim();
 }
 
+/** Compact build failure for the terminal — not the full next/vite log. */
+function summarizeBuildOutput(raw, maxLines = 4) {
+  const lines = String(raw || '').split('\n');
+  const picked = [];
+  const push = (line) => {
+    const t = line.trim();
+    if (!t || picked.includes(t)) return;
+    if (/telemetry|Learn more:/i.test(t)) return;
+    if (/^▲ Next\.js/i.test(t)) return;
+    picked.push(t);
+  };
+  for (const line of lines) {
+    if (
+      /Module not found|Can't resolve|Failed to compile|error TS\d+|SyntaxError|ENOENT/i.test(line)
+    ) {
+      push(line);
+    }
+  }
+  if (picked.length === 0) {
+    for (const line of lines.slice(-maxLines)) push(line);
+  }
+  return picked.slice(0, maxLines).join('\n').trim();
+}
+
 async function runPostWireTest(appRoot, opts = {}) {
   const timeoutMs = opts.timeoutMs || 240000;
   if (!fs.existsSync(path.join(appRoot, 'node_modules'))) {
@@ -136,4 +160,4 @@ async function runPostWireTest(appRoot, opts = {}) {
   return { ok: res.status === 0, stage: chosen.stage, command: chosen.label, output };
 }
 
-module.exports = { runPostWireTest, chooseCommand };
+module.exports = { runPostWireTest, chooseCommand, summarizeBuildOutput, readPkg };

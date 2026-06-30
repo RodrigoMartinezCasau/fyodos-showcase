@@ -739,7 +739,30 @@ function detectPlatform(appRoot, appDir) {
   ) {
     return 'web';
   }
+  // The Fiodos SDK the developer installed states their target platform — the
+  // strongest intent signal in a mixed monorepo whose root has no framework dep
+  // of its own (e.g. EVO: root has @fiodos/react-native, the real Expo app lives
+  // in mobile/mobile/). Without this we'd wrongly default a mobile repo to 'web'
+  // and run the web orb wiring against a sibling Next.js app.
+  const sdkPlatform = fiodosSdkPlatform(deps);
+  if (sdkPlatform) return sdkPlatform;
   return appDir ? 'mobile' : 'web';
+}
+
+/**
+ * Platform implied by the installed Fiodos SDK. Returns 'mobile' | 'web' | null
+ * (null when both or neither are present — no unambiguous signal).
+ */
+function fiodosSdkPlatform(deps) {
+  if (!deps) return null;
+  const mobile = Boolean(deps['@fiodos/react-native']);
+  const web = Boolean(
+    deps['@fiodos/react'] || deps['@fiodos/vue'] || deps['@fiodos/svelte'] ||
+    deps['@fiodos/angular'] || deps['@fiodos/web-core'],
+  );
+  if (mobile && !web) return 'mobile';
+  if (web && !mobile) return 'web';
+  return null;
 }
 
 function readAppMeta(appRoot) {

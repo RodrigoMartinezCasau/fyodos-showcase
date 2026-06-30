@@ -13,7 +13,7 @@
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
-const { runPostWireTest } = require('./postWireTest');
+const { runPostWireTest, summarizeBuildOutput, readPkg } = require('./postWireTest');
 const {
   assessMount,
   describePlan,
@@ -173,8 +173,49 @@ function askYesNo(question) {
   });
 }
 
+const WEB_SDK_BY_FRAMEWORK = {
+  vue: '@fiodos/vue',
+  svelte: '@fiodos/svelte',
+  sveltekit: '@fiodos/svelte',
+  angular: '@fiodos/angular',
+};
+
+function expectedWebSdk(framework) {
+  return WEB_SDK_BY_FRAMEWORK[framework] || '@fiodos/react';
+}
+
+/**
+ * Detects the one misconfiguration that silently breaks the build: the developer
+ * installed the MOBILE SDK (@fiodos/react-native) in a web app. The mount writes
+ * `import { FiodosAgent } from '@fiodos/react'` (or the framework SDK), so the
+ * bundler then dies on "Can't resolve". We catch it up front and print a short,
+ * actionable note instead of dumping the whole build log.
+ *
+ * If no Fiodos SDK is installed at all we stay silent and let the mount proceed
+ * (the dashboard install step / post-wire build covers that path), so this never
+ * blocks a clean integration that simply hasn't run npm install yet.
+ */
+function webSdkMissing(appRoot, framework) {
+  const pkg = readPkg(appRoot);
+  const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+  const expected = expectedWebSdk(framework);
+  if (deps[expected] || deps['@fiodos/web-core']) return null;
+  if (deps['@fiodos/react-native']) {
+    return (
+      `installed @fiodos/react-native, but this web app needs ${expected} — ` +
+      `run npm install ${expected} @fiodos/core`
+    );
+  }
+  return null;
+}
+
 function printSnippet(target, framework, colors, appRoot, reason) {
   const { blue, cyan, dim, reset } = colors;
+  if (reason && reason.includes('@fiodos/react-native')) {
+    console.error(`\n${cyan}◉${reset} ${blue}Fiodos${reset} · ${dim}${reason}${reset}`);
+    console.error(`${dim}Then re-run analyze — the orb mount will be automatic.${reset}\n`);
+    return;
+  }
   const ts = !target || target.ext === '.tsx';
   console.error(`\n${cyan}◉${reset} ${blue}Fiodos${reset} · ${dim}add the orb to your web app (copy this):${reset}`);
   if (reason) {
@@ -252,6 +293,12 @@ async function wireWebOrb(appRoot, opts = {}) {
     return { status: 'printed', reason: plan.reason };
   }
 
+  const sdkGap = webSdkMissing(appRoot, framework);
+  if (sdkGap) {
+    printSnippet(target, framework, colors, appRoot, sdkGap);
+    return { status: 'printed', reason: sdkGap };
+  }
+
   if (!assumeYes) {
     printMountPreview(plan, colors);
   }
@@ -313,7 +360,12 @@ async function wireWebOrb(appRoot, opts = {}) {
       if (baseline.ok) {
         // Built before, fails now → the mount is the regression. Keep it reverted.
         printSnippet(target, framework, colors, appRoot, `mount caused a build regression — reverted (${test.command})`);
-        return { status: 'reverted', file: plan.rel, test, reason: test.output };
+        return {
+          status: 'reverted',
+          file: plan.rel,
+          test,
+          reason: summarizeBuildOutput(test.output),
+        };
       }
       // It was already not building (or not verifiable) before us → keep the orb.
       applyMount(plan);
@@ -348,8 +400,11 @@ function reportWireResult(result, colors = {}, opts = {}) {
       console.error(`${tag} · ${dim || ''}automatic mount not possible${result.reason ? `: ${result.reason}` : ''}. Paste the snippet above.${reset || ''}`);
       break;
     case 'reverted':
-      console.error(`${tag} · ✗ mount reverted — app would not build. Paste the snippet above or fix manually.`);
-      if (result.reason) console.error(`${dim}${result.reason}${reset}`);
+      console.error(`${tag} · ✗ mount reverted — app would not build.`);
+      if (result.reason) {
+        console.error(`${dim}${result.reason}${reset}`);
+      }
+      console.error(`${tag} · ${dim || ''}Fix the issue above, then re-run analyze or paste the snippet.${reset || ''}`);
       break;
     case 'failed':
       console.error(`${tag} · ✗ could not safely edit ${result.file}. Paste the snippet above.`);

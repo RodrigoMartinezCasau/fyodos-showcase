@@ -51,12 +51,49 @@ function platformDepsMatch(deps, platform) {
   return false;
 }
 
-function tryCandidate(appRoot, rel, platform, score) {
+/**
+ * How "complete" / runnable a candidate app folder looks. A monorepo can nest a
+ * thin source wrapper (e.g. mobile/) around the REAL runnable app (mobile/mobile/
+ * with app.json, the expo dep, native ios/android dirs). Conventional-name
+ * matching alone would pick the wrapper; this score lets the real app win.
+ */
+function appCompleteness(dir, platform) {
+  let score = 0;
+  const has = (rel) => fs.existsSync(path.join(dir, rel));
+  if (has('app') || has('src') || has('pages')) score += 2;
+  let pkg = {};
+  try {
+    pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+  } catch {
+    /* ignore */
+  }
+  const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+  const scripts = pkg.scripts || {};
+  if (pkg.main) score += 2;
+  if (platform === 'mobile') {
+    if (has('app.json') || has('app.config.js') || has('app.config.ts')) score += 4;
+    if (deps.expo) score += 4;
+    if (has('ios') || has('android')) score += 2;
+    if (scripts.start || scripts.ios || scripts.android) score += 1;
+  } else if (platform === 'web') {
+    if (
+      has('next.config.js') || has('next.config.ts') || has('next.config.mjs') ||
+      has('vite.config.js') || has('vite.config.ts') || has('index.html') ||
+      has('angular.json') || has('svelte.config.js')
+    ) {
+      score += 4;
+    }
+    if (scripts.build || scripts.dev) score += 1;
+  }
+  return score;
+}
+
+function tryCandidate(appRoot, rel, platform, nameScore) {
   const dir = path.join(appRoot, rel);
   if (!fs.existsSync(dir) || !fs.statSync(dir).isDirectory()) return null;
   const deps = readDeps(path.join(dir, 'package.json'));
   if (!platformDepsMatch(deps, platform)) return null;
-  return { root: dir, rel, score, reason: rel };
+  return { root: dir, rel, nameScore, complete: appCompleteness(dir, platform), reason: rel };
 }
 
 /**
@@ -112,8 +149,15 @@ function resolveAnalysisRoot(appRoot, platform) {
     return { root: abs, scoped: false, reason: 'no sub-app detected' };
   }
 
-  // Prefer higher score, then shorter path (closer to root).
-  candidates.sort((a, b) => b.score - a.score || a.rel.length - b.rel.length);
+  // Prefer the most complete/runnable app first (so a real nested app beats a
+  // thin same-named wrapper), then the conventional-name confidence, then the
+  // shorter path (closer to root).
+  candidates.sort(
+    (a, b) =>
+      b.complete - a.complete ||
+      b.nameScore - a.nameScore ||
+      a.rel.length - b.rel.length,
+  );
   const best = candidates[0];
   return {
     root: best.root,
