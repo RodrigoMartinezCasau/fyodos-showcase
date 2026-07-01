@@ -3,7 +3,11 @@
  * app-branded in the source app (accent color, icon, sizes) is a prop here —
  * exactly the surface a customization dashboard will drive.
  */
-import { FYODOS_DEFAULT_ORB_THEME, FYODOS_DEFAULT_KEYBOARD_CHIP } from '@fiodos/core';
+import {
+  FYODOS_DEFAULT_ORB_THEME,
+  FYODOS_DEFAULT_KEYBOARD_CHIP,
+  DEFAULT_ORB_HAPTIC_INTENSITY,
+} from '@fiodos/core';
 
 export interface AgentModalTheme {
   backdropColor: string;
@@ -66,6 +70,8 @@ export interface AgentOrbTheme {
   speed?: number;
   /** Rim glow strength 0–100. */
   glowIntensity?: number;
+  /** Orb vibration/haptic strength 0–100 (dashboard advanced option). */
+  hapticIntensity?: number;
   /** Inner hairline ring (dashboard). */
   innerBorderColor?: string;
   innerBorderWidth?: number;
@@ -87,6 +93,7 @@ export const DEFAULT_ORB_THEME: AgentOrbTheme = {
   glowKey: FYODOS_DEFAULT_ORB_THEME.glowKey,
   speed: FYODOS_DEFAULT_ORB_THEME.speed,
   glowIntensity: FYODOS_DEFAULT_ORB_THEME.glowIntensity,
+  hapticIntensity: DEFAULT_ORB_HAPTIC_INTENSITY,
   innerBorderColor: FYODOS_DEFAULT_ORB_THEME.innerBorderColor,
   innerBorderWidth: FYODOS_DEFAULT_ORB_THEME.innerBorderWidth,
   waveformColor: FYODOS_DEFAULT_ORB_THEME.waveformColor,

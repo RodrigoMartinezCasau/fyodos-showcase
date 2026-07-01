@@ -166,7 +166,12 @@ export function AgentOrb({
   const resolvedBubbleTheme = bubbleTheme ?? resolveBubbleTheme(null);
 
   // Subtle haptics on every relevant orb interaction (silent if unsupported).
-  const haptics = useRef(createRnOrbHaptics()).current;
+  // Strength follows the dashboard's advanced "vibration intensity" (0–100).
+  // A ref-backed getter lets the (single) haptics engine track the live value
+  // as the published config updates, without being recreated.
+  const hapticIntensityRef = useRef<number | undefined>(t.hapticIntensity);
+  hapticIntensityRef.current = t.hapticIntensity;
+  const haptics = useRef(createRnOrbHaptics(() => hapticIntensityRef.current)).current;
   const lastPhaseRef = useRef<typeof phase | null>(null);
   useEffect(() => {
     const prev = lastPhaseRef.current;
@@ -212,7 +217,14 @@ export function AgentOrb({
     if (!node) return;
     node.measureInWindow((x, y, w, h) => {
       if (!w || !h) return;
-      setOrbRect({ x, y, w, h });
+      // `measureInWindow` returns the LIVE on-screen box (base layout + the
+      // current drag transform). The overlays (bubble/chip) are rendered in a
+      // sibling layer that shares the SAME `pan` transform, so we store the
+      // orb's BASE box (live minus pan); base + pan then reproduces the live
+      // position EVERY FRAME with zero lag while dragging.
+      const panX = (pan.x as unknown as { __getValue: () => number }).__getValue();
+      const panY = (pan.y as unknown as { __getValue: () => number }).__getValue();
+      setOrbRect({ x: x - panX, y: y - panY, w, h });
       const win = Dimensions.get('window');
       const pos = viewportPixelsToOrbScreenPosition({
         centerX: x + w / 2,
@@ -223,7 +235,7 @@ export function AgentOrb({
       });
       setDeployment(resolveOrbDeployment(pos));
     });
-  }, []);
+  }, [pan.x, pan.y]);
 
   // AssistiveTouch-style snap: after a drag the orb glides to the nearest
   // left/right edge (vertical drop position preserved). We measure the orb's
@@ -450,6 +462,12 @@ export function AgentOrb({
           seedText={textSeed?.text ?? null}
           autoSendSeed={textSeed?.autoSend ?? false}
           onSeedConsumed={() => setTextSeed(null)}
+          // iOS shows only ONE native Modal at a time: while the consent modal
+          // is up, hide this panel's Modal so consent can actually appear (else
+          // the screen goes black and the first turn silently stalls). `textOpen`
+          // stays true, so after the user accepts, the resumed turn's reply
+          // lands right back here.
+          suppressed={consentModalVisible}
         />
       ) : null}
       <Animated.View
@@ -516,7 +534,10 @@ export function AgentOrb({
         </View>
       </Animated.View>
       {showBubble && bubblePrompt && orbRect ? (
-        <View pointerEvents="box-none" style={styles.chipOverlay}>
+        <Animated.View
+          pointerEvents="box-none"
+          style={[styles.chipOverlay, { transform: pan.getTranslateTransform() }]}
+        >
           <OrbBubble
             text={bubblePrompt}
             theme={resolvedBubbleTheme}
@@ -536,10 +557,13 @@ export function AgentOrb({
               else void toggleListening();
             }}
           />
-        </View>
+        </Animated.View>
       ) : null}
       {showKeyboardChip && orbRect ? (
-        <View pointerEvents="box-none" style={styles.chipOverlay}>
+        <Animated.View
+          pointerEvents="box-none"
+          style={[styles.chipOverlay, { transform: pan.getTranslateTransform() }]}
+        >
           <Pressable
             onPress={() => {
               haptics.trigger('keyboardChip');
@@ -582,7 +606,7 @@ export function AgentOrb({
               </ChipIconScaled>
             </OutwardDoubleBorder>
           </Pressable>
-        </View>
+        </Animated.View>
       ) : null}
     </>
   );

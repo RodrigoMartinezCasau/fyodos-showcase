@@ -35,6 +35,7 @@ import {
   type OrbLogoTransform,
   type OrbScreenPosition,
   type PublishedClientConfig,
+  type StorageAdapter,
 } from '@fiodos/core';
 import { FiodosProvider } from '../provider/FiodosProvider';
 import { AgentLayer } from '../components/AgentLayer';
@@ -139,7 +140,11 @@ export function FiodosExpoAgent({
     return { navigation, storage, voice, backend, telemetry };
   }, [resolvedUrl, resolvedKey, backFallbackRoute]);
 
-  const { remoteOrb, publishedVoiceActivation } = usePublishedConfig(resolvedUrl, resolvedKey);
+  const { remoteOrb, publishedVoiceActivation, ready: orbReady } = usePublishedConfig(
+    resolvedUrl,
+    resolvedKey,
+    stable.storage,
+  );
 
   const insets = useSafeAreaInsets();
   const { width, height } = useWindowDimensions();
@@ -183,7 +188,11 @@ export function FiodosExpoAgent({
       <ExpoRouterRouteTracker adapter={stable.navigation} />
       {children}
       <AgentLayer
-        visible={visible}
+        // Gate on `orbReady` so the orb only appears once we have a theme to
+        // paint — the dashboard-customized one (instant from local cache on
+        // returning launches) instead of flashing the default for ~1s while the
+        // network responds on a cold start.
+        visible={visible && orbReady}
         bottom={layerInsets.bottom}
         right={layerInsets.right}
         orbProps={{
@@ -198,68 +207,136 @@ export function FiodosExpoAgent({
   );
 }
 
+/** Local-cache key for the last published config (per backend + key). */
+function publishedCacheKey(baseUrl: string, apiKey: string | undefined): string {
+  const id = `${baseUrl}|${apiKey ?? ''}`;
+  // Cheap stable hash so the key is filesystem/storage safe.
+  let h = 0;
+  for (let i = 0; i < id.length; i += 1) h = (h * 31 + id.charCodeAt(i)) | 0;
+  return `fyodos.publishedConfig.v1.${h}`;
+}
+
+/** Process a raw published payload into the orb appearance the UI consumes. */
+async function processPublished(
+  published: PublishedClientConfig & PublishedVoiceActivation,
+): Promise<{ remoteOrb: RemoteOrbAppearance; voice: PublishedVoiceActivation }> {
+  const mapped = mapPublishedConfigToOrbProps(published);
+  const bg = resolveOrbBackgroundColor({
+    colorKey: mapped.theme.colorKey,
+    accentColor: mapped.theme.accentColor,
+    backgroundColor: mapped.theme.backgroundColor,
+  });
+  const logoUri = mapped.logoDataUrl
+    ? await resolveImageDataUrlForDisplay(mapped.logoDataUrl, 'fyodos-orb-logo.png')
+    : null;
+  const chipRaw = mapped.theme.keyboardChip?.iconImageDataUrl ?? null;
+  const chipIconUri = chipRaw
+    ? await resolveImageDataUrlForDisplay(chipRaw, 'fyodos-chip-icon.png')
+    : null;
+  const keyboardChip = mapped.theme.keyboardChip
+    ? { ...mapped.theme.keyboardChip, iconImageDataUrl: chipIconUri }
+    : undefined;
+  return {
+    remoteOrb: {
+      theme: { ...mapped.theme, backgroundColor: bg, keyboardChip },
+      modalTheme: mapped.modalTheme,
+      logoDataUrl: logoUri,
+      logoTransform: mapped.logoTransform,
+      screenPosition: mapped.screenPosition,
+    },
+    voice: {
+      voiceActivationOffered: published.voiceActivationOffered,
+      voiceActivationPhrase: published.voiceActivationPhrase,
+    },
+  };
+}
+
 /**
- * Fetch the dashboard-published orb appearance + voice-activation policy. Refetch
- * when the app returns to the foreground so design changes land without a rebuild.
+ * Fetch the dashboard-published orb appearance + voice-activation policy.
+ *
+ * The published config is also CACHED locally: on launch we hydrate from the
+ * cache FIRST (so the user's customized orb appears immediately, with no flash
+ * of the default theme) and then refetch from the network to pick up any new
+ * design. `ready` flips true as soon as we have something to paint — the cached
+ * design (instant on returning launches), the fresh network design (first ever
+ * launch), or after a short safety timeout (offline first launch) — so the orb
+ * is never shown with the wrong default while the real design is in flight.
  */
 function usePublishedConfig(
   baseUrl: string,
   apiKey: string | undefined,
-): { remoteOrb: RemoteOrbAppearance | null; publishedVoiceActivation: PublishedVoiceActivation | null } {
+  storage: StorageAdapter,
+): {
+  remoteOrb: RemoteOrbAppearance | null;
+  publishedVoiceActivation: PublishedVoiceActivation | null;
+  ready: boolean;
+} {
   const [remoteOrb, setRemoteOrb] = useState<RemoteOrbAppearance | null>(null);
   const [publishedVoiceActivation, setPublishedVoiceActivation] =
     useState<PublishedVoiceActivation | null>(null);
+  const [ready, setReady] = useState(false);
 
   const client = useMemo(
     () => createFiodosBackendClient({ baseUrl, apiKey }),
     [baseUrl, apiKey],
   );
+  const cacheKey = useMemo(() => publishedCacheKey(baseUrl, apiKey), [baseUrl, apiKey]);
 
   useEffect(() => {
     let alive = true;
+    // Network can be slow or absent: never wait forever before showing the orb.
+    const safety = setTimeout(() => {
+      if (alive) setReady(true);
+    }, 2500);
+
+    const apply = async (
+      published: PublishedClientConfig & PublishedVoiceActivation,
+      fromNetwork: boolean,
+    ) => {
+      const { remoteOrb: orb, voice } = await processPublished(published);
+      if (!alive) return;
+      setRemoteOrb(orb);
+      setPublishedVoiceActivation(voice);
+      setReady(true);
+      if (fromNetwork) {
+        try {
+          await storage.setItem(cacheKey, JSON.stringify(published));
+        } catch {
+          /* caching is best-effort */
+        }
+      }
+    };
+
+    // 1) Hydrate from local cache (fast) so the customized orb shows at once.
+    void (async () => {
+      try {
+        const raw = await storage.getItem(cacheKey);
+        if (!alive || !raw) return;
+        const cached = JSON.parse(raw) as PublishedClientConfig & PublishedVoiceActivation;
+        await apply(cached, false);
+      } catch {
+        /* a missing/corrupt cache just falls through to the network */
+      }
+    })();
+
+    // 2) Refetch from the network to pick up the latest published design.
     void (async () => {
       try {
         const res = await client.fetchPublishedConfig?.();
         if (!alive || !res?.published) return;
-        const published = res.published as PublishedClientConfig & PublishedVoiceActivation;
-        const mapped = mapPublishedConfigToOrbProps(published);
-        const bg = resolveOrbBackgroundColor({
-          colorKey: mapped.theme.colorKey,
-          accentColor: mapped.theme.accentColor,
-          backgroundColor: mapped.theme.backgroundColor,
-        });
-        const logoUri = mapped.logoDataUrl
-          ? await resolveImageDataUrlForDisplay(mapped.logoDataUrl, 'fyodos-orb-logo.png')
-          : null;
-        const chipRaw = mapped.theme.keyboardChip?.iconImageDataUrl ?? null;
-        const chipIconUri = chipRaw
-          ? await resolveImageDataUrlForDisplay(chipRaw, 'fyodos-chip-icon.png')
-          : null;
-        const keyboardChip = mapped.theme.keyboardChip
-          ? { ...mapped.theme.keyboardChip, iconImageDataUrl: chipIconUri }
-          : undefined;
-        if (!alive) return;
-        setRemoteOrb({
-          theme: { ...mapped.theme, backgroundColor: bg, keyboardChip },
-          modalTheme: mapped.modalTheme,
-          logoDataUrl: logoUri,
-          logoTransform: mapped.logoTransform,
-          screenPosition: mapped.screenPosition,
-        });
-        setPublishedVoiceActivation({
-          voiceActivationOffered: published.voiceActivationOffered,
-          voiceActivationPhrase: published.voiceActivationPhrase,
-        });
+        await apply(res.published as PublishedClientConfig & PublishedVoiceActivation, true);
       } catch (e) {
         if (typeof __DEV__ !== 'undefined' && __DEV__) {
           console.warn('[fyodos] published config fetch failed', e instanceof Error ? e.message : e);
         }
       }
     })();
+
     return () => {
       alive = false;
+      clearTimeout(safety);
     };
-  }, [client]);
+  }, [client, storage, cacheKey]);
 
-  return { remoteOrb, publishedVoiceActivation };
+  return { remoteOrb, publishedVoiceActivation, ready };
 }

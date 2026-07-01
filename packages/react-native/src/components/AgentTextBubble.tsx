@@ -55,6 +55,16 @@ export interface AgentTextBubbleProps {
   /** Submit the seed as soon as the panel opens. */
   autoSendSeed?: boolean;
   onSeedConsumed?: () => void;
+  /**
+   * Temporarily hide the panel's native Modal WITHOUT unmounting it (the draft
+   * and exchange are preserved). Used when another native Modal must take over
+   * the screen — iOS only presents ONE Modal at a time, so a second one (e.g.
+   * the consent modal) opened while this is visible would not appear (the
+   * screen just goes black and the turn silently stalls). The parent flips this
+   * on while that modal is up and off again afterwards, so the reply still
+   * lands here.
+   */
+  suppressed?: boolean;
 }
 
 export function AgentTextBubble({
@@ -72,6 +82,7 @@ export function AgentTextBubble({
   seedText,
   autoSendSeed = false,
   onSeedConsumed,
+  suppressed = false,
 }: AgentTextBubbleProps) {
   const t = { ...DEFAULT_MODAL_THEME, ...theme };
   // Send button follows the conversation accent (dashboard), falling back to
@@ -116,7 +127,7 @@ export function AgentTextBubble({
   };
 
   return (
-    <Modal visible transparent animationType="fade" onRequestClose={onClose}>
+    <Modal visible={!suppressed} transparent animationType="fade" onRequestClose={onClose}>
       {/* Tapping outside the bubble closes it; the app stays visible behind. */}
       <Pressable style={styles.backdrop} onPress={onClose} accessibilityLabel={closeLabel} />
       {/* The conversation bar is ALWAYS anchored to the bottom of the screen,
