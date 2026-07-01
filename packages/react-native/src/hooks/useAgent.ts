@@ -37,6 +37,8 @@ import {
   defaultWakePhrasesForLocale,
   type AgentAction,
   type AgentScreenContext,
+  type AgentTurnResult,
+  type ChainStepInfo,
 } from '@fiodos/core';
 import { isAgentApiError } from '../api/errors';
 import { buildManifestPayload } from '../api/backendClient';
@@ -46,6 +48,9 @@ import { useSpeechSession } from '../voice/useSpeechSession';
 import { useWakeWordActivation } from '../voice/useWakeWordActivation';
 
 declare const __DEV__: boolean;
+
+const sleep = (ms: number): Promise<void> =>
+  new Promise((resolve) => setTimeout(resolve, ms));
 
 type PendingConfirmation = {
   action: AgentAction;
@@ -142,6 +147,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     consent,
     executor,
     timings,
+    chaining,
     screenStore,
     notifyError,
     getTtsVoice,
@@ -187,6 +193,26 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
   const beginConfirmationWindowRef = useRef<(() => Promise<void>) | null>(null);
   const confirmPendingActionRef = useRef<(() => Promise<void>) | null>(null);
   const cancelPendingActionRef = useRef<(() => void) | null>(null);
+  // ── Autonomous chaining state (Phase 2: pause/resume across confirmation) ──
+  // A chain that pauses on a sensitive action parks its state here; the
+  // confirmation handler resumes it via runChainLoopRef after the user confirms.
+  const chainStateRef = useRef<{
+    userMessage: string;
+    step: number;
+    lastStep?: ChainStepInfo;
+    visitedKeys: Set<string>;
+    pendingKey?: string;
+    pendingStep?: ChainStepInfo;
+  } | null>(null);
+  const runChainLoopRef = useRef<
+    | ((state: {
+        userMessage: string;
+        step: number;
+        lastStep?: ChainStepInfo;
+        visitedKeys: Set<string>;
+      }) => Promise<void>)
+    | null
+  >(null);
   const pendingConfirmationMessageRef = useRef<string | null>(null);
   useEffect(() => {
     pendingConfirmationMessageRef.current = pendingConfirmationMessage;
@@ -408,50 +434,195 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
         }
         config.onTurnCompleted?.();
 
-        const latencyMs = Date.now() - startedAt;
-        // What gets spoken at the end: by default the LLM reply with its TTS.
-        // If an execute action is idempotent or fails, the LLM reply would be
-        // false → speak the handler's real message with device TTS instead.
-        let spokenReply = reply;
-        let spokenAudio: string | null | undefined = audioBase64;
+        const screenContextAtInvocation: AgentScreenContext =
+          screenSnapshotAtInvocation?.context ?? {};
 
-        if (action && action.type === 'navigate') {
-          const actionStartedAt = Date.now();
-          const navResult = await executor.execute(action);
-          telemetry.logEvent({
-            eventType: navResult.success ? 'navigation_executed' : 'navigation_failed',
-            userMessage: msg,
-            intentDetected: action.intent ?? null,
-            actionExecuted: { type: action.type, intent: action.intent ?? null },
-            currentRoute: routeAtInvocation,
-            latencyMs,
-            latencySttMs: sttLatencyMs,
-            latencyActionMs: Date.now() - actionStartedAt,
-            wasTruncated,
-            contextChars,
-            redactionsApplied: redactions,
-          });
-        } else if (action && action.type === 'execute') {
-          const executeContext: AgentScreenContext =
-            screenSnapshotAtInvocation?.context ?? {};
-          // Confirmation source of truth: the MANIFEST, never the LLM
-          // (double validation — the backend instructs, the client enforces).
-          const manifestAction = manifest.actions.find((a) => a.intent === action.intent);
-          const needsConfirmation = manifestAction?.requireConfirmation === true;
+        // Resolve ONE backend turn's action into what gets spoken and whether
+        // the autonomous chain may advance. A pending sensitive confirmation is
+        // staged as a side-effect (refs) and ALWAYS pauses the chain. Shared by
+        // the first turn and every continuation so both follow the exact same
+        // security path (manifest is the source of truth for confirmation).
+        const applyAction = async (
+          res: AgentTurnResult,
+          actx: {
+            routeAtInvocation: string | null;
+            sttLatencyMs: number | null;
+            startedAt: number;
+            screenContext: AgentScreenContext;
+            redactions: string[];
+            contextChars: number;
+          },
+        ): Promise<{
+          spokenReply: string;
+          spokenAudio: string | null | undefined;
+          canContinue: boolean;
+          lastStep?: ChainStepInfo;
+          actionKey?: string;
+          hasPending?: boolean;
+          pendingInProgress?: boolean;
+          pendingStep?: ChainStepInfo;
+          pendingKey?: string;
+        }> => {
+          const { reply: aReply, audioBase64: aAudio, action, wasTruncated } = res;
+          const latencyMs = Date.now() - actx.startedAt;
+          // What gets spoken: by default the LLM reply with its TTS. If an
+          // execute action is idempotent or fails, the LLM reply would be false
+          // → speak the handler's real message with device TTS instead.
+          let spokenReply = aReply;
+          let spokenAudio: string | null | undefined = aAudio;
+          let canContinue = false;
+          let lastStep: ChainStepInfo | undefined;
+          let actionKey: string | undefined;
+          let hasPending = false;
+          let pendingInProgress = false;
+          let pendingStep: ChainStepInfo | undefined;
+          let pendingKey: string | undefined;
 
-          if (needsConfirmation) {
-            // Precheck (context + idempotency) BEFORE bothering with the
-            // modal: asking to apply an already-applied state answers
-            // directly.
-            const pre = await executor.precheck(action, executeContext);
-            if (pre.kind === 'done') {
-              const preResult = pre.result;
+          if (action && action.type === 'navigate') {
+            const actionStartedAt = Date.now();
+            const navResult = await executor.execute(action);
+            telemetry.logEvent({
+              eventType: navResult.success ? 'navigation_executed' : 'navigation_failed',
+              userMessage: msg,
+              intentDetected: action.intent ?? null,
+              actionExecuted: { type: action.type, intent: action.intent ?? null },
+              currentRoute: actx.routeAtInvocation,
+              latencyMs,
+              latencySttMs: actx.sttLatencyMs,
+              latencyActionMs: Date.now() - actionStartedAt,
+              wasTruncated,
+              contextChars: actx.contextChars,
+              redactionsApplied: actx.redactions,
+            });
+            if (navResult.success) {
+              lastStep = {
+                type: 'navigate',
+                intent: action.intent ?? '',
+                label: manifest.routes.find((r) => r.intent === action.intent)?.label,
+                success: true,
+              };
+              actionKey = `navigate:${action.intent ?? ''}`;
+              canContinue = res.taskStatus === 'in_progress';
+            }
+          } else if (action && action.type === 'execute') {
+            const executeContext: AgentScreenContext = actx.screenContext;
+            // Confirmation source of truth: the MANIFEST, never the LLM
+            // (double validation — the backend instructs, the client enforces).
+            const manifestAction = manifest.actions.find((a) => a.intent === action.intent);
+            const needsConfirmation = manifestAction?.requireConfirmation === true;
+
+            if (needsConfirmation) {
+              // Precheck (context + idempotency) BEFORE bothering with the
+              // modal: asking to apply an already-applied state answers
+              // directly.
+              const pre = await executor.precheck(action, executeContext);
+              if (pre.kind === 'done') {
+                const preResult = pre.result;
+                telemetry.logEvent({
+                  eventType: preResult.recoverable
+                    ? 'action_needs_context'
+                    : preResult.idempotent
+                      ? 'action_idempotent'
+                      : preResult.success
+                        ? 'action_executed'
+                        : 'action_failed',
+                  userMessage: msg,
+                  intentDetected: action.intent ?? null,
+                  actionExecuted: {
+                    type: action.type,
+                    intent: action.intent ?? null,
+                    ...(preResult.error ? { error: preResult.error } : {}),
+                  },
+                  currentRoute: actx.routeAtInvocation,
+                  latencyMs,
+                  latencySttMs: actx.sttLatencyMs,
+                  wasTruncated,
+                  contextChars: actx.contextChars,
+                  redactionsApplied: actx.redactions,
+                });
+                // Recoverable (screen/context) gap: keep the assistant's guiding
+                // reply ("which item?" / it will navigate), never override it
+                // with a refusal. Only terminal results speak the engine message.
+                if (preResult.message && !preResult.recoverable) {
+                  spokenReply = preResult.message;
+                  spokenAudio = null;
+                }
+              } else {
+                // Canonical question from the manifest; LLM's only as fallback.
+                const confirmationMessage =
+                  manifestAction?.confirmationMessageTemplate ??
+                  action.confirmationMessage ??
+                  messages.confirmationFallbackQuestion;
+                // Voice resolution mode is dashboard/manifest-governed:
+                // 'disabled' actions can ONLY be confirmed by tapping.
+                const voiceMode = manifestAction?.voiceConfirmation ?? 'standard';
+                const strictPhrase =
+                  voiceMode === 'strict'
+                    ? (manifestAction?.confirmationPhrase ??
+                      formatMessage(messages.strictConfirmationPhraseTemplate, {
+                        label: (manifestAction?.label ?? action.intent ?? '').toLowerCase(),
+                      }))
+                    : null;
+                pendingConfirmationRef.current = {
+                  action,
+                  context: executeContext,
+                  userMessage: msg,
+                  routeAtInvocation: actx.routeAtInvocation,
+                  latencyMs,
+                  latencySttMs: actx.sttLatencyMs,
+                  wasTruncated,
+                  contextChars: actx.contextChars,
+                  redactions: actx.redactions,
+                  remainingConfirmations: manifestAction?.doubleConfirmation === true ? 2 : 1,
+                  voiceMode,
+                  strictPhrase,
+                  silent: silentTurnRef.current,
+                };
+                confirmationReaskedRef.current = false;
+                setPendingConfirmationMessage(confirmationMessage);
+                // Strict actions: surface the exact phrase in the modal too, so
+                // the user can DISCOVER it (until now it was only spoken). This
+                // is display-only and never weakens the strict requirement.
+                setPendingConfirmationVoiceHint(
+                  voiceMode === 'strict' && strictPhrase && !silentTurnRef.current
+                    ? formatMessage(messages.strictConfirmationModalHint, { phrase: strictPhrase })
+                    : null,
+                );
+                // Countable, content-free analytics: a sensitive confirmation was
+                // requested (completion is tracked when the action runs).
+                telemetry.logEvent({
+                  eventType: 'action_confirmation_requested',
+                  intentDetected: action.intent ?? null,
+                  sessionId: sessionIdRef.current,
+                  currentRoute: actx.routeAtInvocation,
+                });
+                devLog(turnId, 'confirmation modal shown', `${action.intent} (voice=${voiceMode})`);
+                // The question is spoken (the prompt instructs the LLM that its
+                // reply BE the question; if it strayed, the modal still shows
+                // the canonical text). The chain PAUSES here: canContinue stays
+                // false, so no autonomous step runs until the user confirms.
+                spokenReply = aReply;
+                // If the model wants to keep going after this sensitive step,
+                // the chain will RESUME once the user confirms (Phase 2).
+                hasPending = true;
+                pendingInProgress = res.taskStatus === 'in_progress';
+                pendingStep = {
+                  type: 'execute',
+                  intent: action.intent ?? '',
+                  label: manifestAction?.label,
+                  success: true,
+                };
+                pendingKey = `execute:${action.intent ?? ''}`;
+              }
+            } else {
+              const actionStartedAt = Date.now();
+              const execResult = await executor.execute(action, executeContext);
               telemetry.logEvent({
-                eventType: preResult.recoverable
+                eventType: execResult.recoverable
                   ? 'action_needs_context'
-                  : preResult.idempotent
+                  : execResult.idempotent
                     ? 'action_idempotent'
-                    : preResult.success
+                    : execResult.success
                       ? 'action_executed'
                       : 'action_failed',
                 userMessage: msg,
@@ -459,152 +630,284 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
                 actionExecuted: {
                   type: action.type,
                   intent: action.intent ?? null,
-                  ...(preResult.error ? { error: preResult.error } : {}),
+                  ...(execResult.error ? { error: execResult.error } : {}),
                 },
-                currentRoute: routeAtInvocation,
+                currentRoute: actx.routeAtInvocation,
                 latencyMs,
-                latencySttMs: sttLatencyMs,
+                latencySttMs: actx.sttLatencyMs,
+                latencyActionMs: Date.now() - actionStartedAt,
                 wasTruncated,
-                contextChars,
-                redactionsApplied: redactions,
+                contextChars: actx.contextChars,
+                redactionsApplied: actx.redactions,
               });
-              // Recoverable (screen/context) gap: keep the assistant's guiding
-              // reply ("which item?" / it will navigate), never override it
-              // with a refusal. Only terminal results speak the engine message.
-              if (preResult.message && !preResult.recoverable) {
-                spokenReply = preResult.message;
+              if (execResult.recoverable) {
+                // Screen/context gap that the agent can resolve by guiding or
+                // navigating: keep the assistant's reply, never speak a refusal.
+              } else if (
+                execResult.success &&
+                execResult.message &&
+                typeof execResult.data?.ttsVoiceOverride === 'string'
+              ) {
+                // Voice-change pattern: the feedback must sound WITH the new
+                // voice (the LLM audio carries the old one). Short synthesis;
+                // if it fails, speakReply degrades to device TTS.
+                spokenReply = execResult.message;
+                spokenAudio = await backend.previewTts(
+                  execResult.data.ttsVoiceOverride,
+                  execResult.message,
+                );
+              } else if (execResult.message) {
+                // FEEDBACK GUARANTEE: when the handler reports a real outcome
+                // (success, idempotent or failure), speak ITS message instead of
+                // the LLM's optimistic "Done" — the handler is the ground truth
+                // that the action actually completed. Force device TTS (the LLM
+                // audio no longer matches the spoken text).
+                spokenReply = execResult.message;
                 spokenAudio = null;
               }
-            } else {
-              // Canonical question from the manifest; LLM's only as fallback.
-              const confirmationMessage =
-                manifestAction?.confirmationMessageTemplate ??
-                action.confirmationMessage ??
-                messages.confirmationFallbackQuestion;
-              // Voice resolution mode is dashboard/manifest-governed:
-              // 'disabled' actions can ONLY be confirmed by tapping.
-              const voiceMode = manifestAction?.voiceConfirmation ?? 'standard';
-              const strictPhrase =
-                voiceMode === 'strict'
-                  ? (manifestAction?.confirmationPhrase ??
-                    formatMessage(messages.strictConfirmationPhraseTemplate, {
-                      label: (manifestAction?.label ?? action.intent ?? '').toLowerCase(),
-                    }))
-                  : null;
-              pendingConfirmationRef.current = {
-                action,
-                context: executeContext,
-                userMessage: msg,
-                routeAtInvocation,
-                latencyMs,
-                latencySttMs: sttLatencyMs,
-                wasTruncated,
-                contextChars,
-                redactions,
-                remainingConfirmations: manifestAction?.doubleConfirmation === true ? 2 : 1,
-                voiceMode,
-                strictPhrase,
-                silent: silentTurnRef.current,
-              };
-              confirmationReaskedRef.current = false;
-              setPendingConfirmationMessage(confirmationMessage);
-              // Strict actions: surface the exact phrase in the modal too, so
-              // the user can DISCOVER it (until now it was only spoken). This
-              // is display-only and never weakens the strict requirement.
-              setPendingConfirmationVoiceHint(
-                voiceMode === 'strict' && strictPhrase && !silentTurnRef.current
-                  ? formatMessage(messages.strictConfirmationModalHint, { phrase: strictPhrase })
-                  : null,
-              );
-              // Countable, content-free analytics: a sensitive confirmation was
-              // requested (completion is tracked when the action runs).
-              telemetry.logEvent({
-                eventType: 'action_confirmation_requested',
-                intentDetected: action.intent ?? null,
-                sessionId: sessionIdRef.current,
-                currentRoute: routeAtInvocation,
-              });
-              devLog(turnId, 'confirmation modal shown', `${action.intent} (voice=${voiceMode})`);
-              // The question is spoken (the prompt instructs the LLM that its
-              // reply BE the question; if it strayed, the modal still shows
-              // the canonical text).
-              spokenReply = reply;
+              if (execResult.success && !execResult.recoverable) {
+                lastStep = {
+                  type: 'execute',
+                  intent: action.intent ?? '',
+                  label: manifestAction?.label,
+                  success: true,
+                };
+                actionKey = `execute:${action.intent ?? ''}`;
+                canContinue = res.taskStatus === 'in_progress';
+              }
             }
           } else {
-            const actionStartedAt = Date.now();
-            const execResult = await executor.execute(action, executeContext);
             telemetry.logEvent({
-              eventType: execResult.recoverable
-                ? 'action_needs_context'
-                : execResult.idempotent
-                  ? 'action_idempotent'
-                  : execResult.success
-                    ? 'action_executed'
-                    : 'action_failed',
+              eventType: 'question_only',
               userMessage: msg,
-              intentDetected: action.intent ?? null,
-              actionExecuted: {
-                type: action.type,
-                intent: action.intent ?? null,
-                ...(execResult.error ? { error: execResult.error } : {}),
-              },
-              currentRoute: routeAtInvocation,
+              currentRoute: actx.routeAtInvocation,
               latencyMs,
-              latencySttMs: sttLatencyMs,
-              latencyActionMs: Date.now() - actionStartedAt,
+              latencySttMs: actx.sttLatencyMs,
               wasTruncated,
-              contextChars,
-              redactionsApplied: redactions,
+              contextChars: actx.contextChars,
+              redactionsApplied: actx.redactions,
             });
-            if (execResult.recoverable) {
-              // Screen/context gap that the agent can resolve by guiding or
-              // navigating: keep the assistant's reply, never speak a refusal.
-            } else if (
-              execResult.success &&
-              execResult.message &&
-              typeof execResult.data?.ttsVoiceOverride === 'string'
-            ) {
-              // Voice-change pattern: the feedback must sound WITH the new
-              // voice (the LLM audio carries the old one). Short synthesis;
-              // if it fails, speakReply degrades to device TTS.
-              spokenReply = execResult.message;
-              spokenAudio = await backend.previewTts(
-                execResult.data.ttsVoiceOverride,
-                execResult.message,
-              );
-            } else if (execResult.message) {
-              // FEEDBACK GUARANTEE: when the handler reports a real outcome
-              // (success, idempotent or failure), speak ITS message instead of
-              // the LLM's optimistic "Done" — the handler is the ground truth
-              // that the action actually completed. Force device TTS (the LLM
-              // audio no longer matches the spoken text).
-              spokenReply = execResult.message;
-              spokenAudio = null;
-            }
           }
-        } else {
+          return {
+            spokenReply,
+            spokenAudio,
+            canContinue,
+            lastStep,
+            actionKey,
+            hasPending,
+            pendingInProgress,
+            pendingStep,
+            pendingKey,
+          };
+        };
+
+        // ── Autonomous continuation loop (opt-in; OFF by default) ────────────
+        // Extracted so confirmPendingAction can RESUME this exact chain after a
+        // sensitive step is confirmed. Every continuation goes through the SAME
+        // applyAction path, so disabled capabilities, confidentiality and
+        // sensitive confirmations all still apply per step.
+        const runChainLoop = async (cs: {
+          userMessage: string;
+          step: number;
+          lastStep?: ChainStepInfo;
+          visitedKeys: Set<string>;
+        }): Promise<void> => {
+          let step = cs.step;
+          let lastStep = cs.lastStep;
+          const visitedKeys = cs.visitedKeys;
+          while (step < chaining.maxSteps) {
+            step += 1;
+            if (chaining.dwellMs > 0) await sleep(chaining.dwellMs);
+            if (pendingConfirmationRef.current) return; // paused elsewhere
+
+            const stepStartedAt = Date.now();
+            const routeNow = navigation.getCurrentRoute();
+            const snap = screenStore.getSnapshot();
+            const rawCtx2 = combineContexts(
+              config.getUserContextText?.() ?? null,
+              screenStore.getText(),
+              {
+                truncationSuffix: messages.contextTruncationSuffix,
+                maxChars: config.contextMaxChars,
+              },
+            );
+            const { sanitized: san2, redactions: red2 } = rawCtx2
+              ? sanitizer(rawCtx2)
+              : { sanitized: null, redactions: [] as string[] };
+            const conv2 = prepareConversationForTurn(conversationRef.current);
+            setPhaseSafe('thinking');
+            const ctrl = new AbortController();
+            abortRef.current = ctrl;
+
+            let stepResult: AgentTurnResult;
+            try {
+              stepResult = await backend.sendTurn(
+                {
+                  message: cs.userMessage,
+                  language: config.locale,
+                  voice: getTtsVoice(),
+                  screenContext: san2 ?? undefined,
+                  currentRoute: routeNow ?? undefined,
+                  conversationHistory: conv2.history,
+                  conversationSummary: conv2.summary ?? undefined,
+                  sessionId: sessionIdRef.current,
+                  isContinuation: true,
+                  chainStep: step,
+                  lastStep,
+                  ...buildManifestPayload(manifest),
+                },
+                { signal: ctrl.signal },
+              );
+            } catch (e) {
+              const interrupted = ctrl.signal.aborted;
+              if (!interrupted) {
+                if (isAgentApiError(e) && e.code === 'timeout') notifyError(ui.turnFailed);
+                else notifyApiError(e);
+              }
+              setPhaseSafe('idle');
+              telemetry.logEvent({
+                eventType: 'agent_chain_aborted',
+                sessionId: sessionIdRef.current,
+                chainStep: step,
+                chainAbortReason: interrupted ? 'user_interrupt' : 'error',
+              });
+              return;
+            }
+            if (ctrl.signal.aborted) {
+              telemetry.logEvent({
+                eventType: 'agent_chain_aborted',
+                sessionId: sessionIdRef.current,
+                chainStep: step,
+                chainAbortReason: 'user_interrupt',
+              });
+              return;
+            }
+            if (!stepResult.reply.trim()) {
+              telemetry.logEvent({
+                eventType: 'agent_chain_completed',
+                sessionId: sessionIdRef.current,
+                chainStep: step,
+              });
+              return;
+            }
+
+            const oc = await applyAction(stepResult, {
+              routeAtInvocation: routeNow,
+              sttLatencyMs: null,
+              startedAt: stepStartedAt,
+              screenContext: snap?.context ?? {},
+              redactions: red2,
+              contextChars: san2?.length ?? 0,
+            });
+            setLastExchange({ userText: cs.userMessage, replyText: oc.spokenReply });
+            recordConversationExchange(conversationRef.current, cs.userMessage, oc.spokenReply);
+            await speakReply(oc.spokenReply, oc.spokenAudio);
+            telemetry.logEvent({
+              eventType: 'agent_chain_step',
+              intentDetected: oc.lastStep?.intent ?? oc.pendingStep?.intent ?? null,
+              sessionId: sessionIdRef.current,
+              chainStep: step,
+            });
+
+            // A sensitive action surfaced: ALWAYS pause for confirmation. Park
+            // the chain so confirmPendingAction can resume it (only if the model
+            // wants to keep going); a rejection stops it cleanly.
+            if (pendingConfirmationRef.current) {
+              chainStateRef.current = oc.pendingInProgress
+                ? {
+                    userMessage: cs.userMessage,
+                    step,
+                    lastStep,
+                    visitedKeys,
+                    pendingKey: oc.pendingKey,
+                    pendingStep: oc.pendingStep,
+                  }
+                : null;
+              await beginConfirmationWindowRef.current?.();
+              return;
+            }
+            // No-progress guard: repeating a step already taken stops the chain.
+            if (oc.actionKey && visitedKeys.has(oc.actionKey)) {
+              telemetry.logEvent({
+                eventType: 'agent_chain_aborted',
+                sessionId: sessionIdRef.current,
+                chainStep: step,
+                chainAbortReason: 'no_progress',
+              });
+              return;
+            }
+            if (oc.actionKey) visitedKeys.add(oc.actionKey);
+            if (!oc.canContinue) {
+              telemetry.logEvent({
+                eventType: 'agent_chain_completed',
+                sessionId: sessionIdRef.current,
+                chainStep: step,
+              });
+              return;
+            }
+            lastStep = oc.lastStep;
+          }
+          // Hit the hard step cap while still wanting to continue.
           telemetry.logEvent({
-            eventType: 'question_only',
-            userMessage: msg,
-            currentRoute: routeAtInvocation,
-            latencyMs,
-            latencySttMs: sttLatencyMs,
-            wasTruncated,
-            contextChars,
-            redactionsApplied: redactions,
+            eventType: 'agent_chain_aborted',
+            sessionId: sessionIdRef.current,
+            chainStep: step,
+            chainAbortReason: 'max_steps',
           });
-        }
+        };
+        // Expose the loop so confirmPendingAction can resume this exact chain.
+        if (chaining.enabled) runChainLoopRef.current = runChainLoop;
+
+        const first = await applyAction(result, {
+          routeAtInvocation,
+          sttLatencyMs,
+          startedAt,
+          screenContext: screenContextAtInvocation,
+          redactions,
+          contextChars,
+        });
 
         // The bubble shows the exchange in text (voice and text turns alike).
-        setLastExchange({ userText: msg, replyText: spokenReply });
-        recordConversationExchange(conversationRef.current, msg, spokenReply);
-        await speakReply(spokenReply, spokenAudio);
+        setLastExchange({ userText: msg, replyText: first.spokenReply });
+        recordConversationExchange(conversationRef.current, msg, first.spokenReply);
+        await speakReply(first.spokenReply, first.spokenAudio);
         // Voice confirmation: after speaking the question, listen for the
         // reply for a few seconds. The modal stays visible as the tactile
         // fallback and its decision always wins. Respects the action's
         // voice mode ('disabled' → tap only) and silent text mode.
         if (pendingConfirmationRef.current) {
           await beginConfirmationWindowRef.current?.();
+          // If the first step is a sensitive action AND the model wants to keep
+          // going, park the chain so it RESUMES after the user confirms.
+          if (chaining.enabled && first.pendingInProgress) {
+            telemetry.logEvent({
+              eventType: 'agent_chain_started',
+              sessionId: sessionIdRef.current,
+              chainStep: 1,
+            });
+            chainStateRef.current = {
+              userMessage: msg,
+              step: 1,
+              lastStep: first.pendingStep,
+              visitedKeys: new Set<string>(),
+              pendingKey: first.pendingKey,
+              pendingStep: first.pendingStep,
+            };
+          }
+        } else if (chaining.enabled && first.canContinue) {
+          telemetry.logEvent({
+            eventType: 'agent_chain_started',
+            sessionId: sessionIdRef.current,
+            chainStep: 1,
+          });
+          const visitedKeys = new Set<string>();
+          if (first.actionKey) visitedKeys.add(first.actionKey);
+          await runChainLoop({
+            userMessage: msg,
+            step: 1,
+            lastStep: first.lastStep,
+            visitedKeys,
+          });
         }
       } catch (e) {
         if (controller.signal.aborted) return;
@@ -626,6 +929,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     },
     [
       backend,
+      chaining,
       config,
       enabled,
       executor,
@@ -1239,7 +1543,37 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
       setLastExchange((prev) => (prev ? { ...prev, replyText: result.message! } : prev));
       await speakActionFeedback(result.message);
     }
+
+    // RESUME the autonomous chain if this sensitive action paused one — the
+    // human confirmation requirement is fully preserved: the chain only
+    // advances past a sensitive step AFTER the user confirmed and it executed.
+    const chainState = chainStateRef.current;
+    if (chainState) {
+      chainStateRef.current = null;
+      if (result.success && chaining.enabled) {
+        telemetry.logEvent({
+          eventType: 'agent_chain_step',
+          intentDetected: action.intent ?? null,
+          sessionId: sessionIdRef.current,
+          chainStep: chainState.step,
+        });
+        if (chainState.pendingKey) chainState.visitedKeys.add(chainState.pendingKey);
+        await runChainLoopRef.current?.({
+          userMessage: chainState.userMessage,
+          step: chainState.step,
+          lastStep: chainState.pendingStep ?? chainState.lastStep,
+          visitedKeys: chainState.visitedKeys,
+        });
+      } else if (!result.success) {
+        telemetry.logEvent({
+          eventType: 'agent_chain_aborted',
+          sessionId: sessionIdRef.current,
+          chainAbortReason: 'error',
+        });
+      }
+    }
   }, [
+    chaining,
     endConfirmationVoiceWindow,
     executor,
     messages.doubleConfirmationQuestion,
@@ -1256,6 +1590,16 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     pendingConfirmationRef.current = null;
     setPendingConfirmationMessage(null);
     setPendingConfirmationVoiceHint(null);
+    // Declining a sensitive action stops any chain it was part of, cleanly.
+    const chainState = chainStateRef.current;
+    chainStateRef.current = null;
+    if (chainState) {
+      telemetry.logEvent({
+        eventType: 'agent_chain_aborted',
+        sessionId: sessionIdRef.current,
+        chainAbortReason: 'user_interrupt',
+      });
+    }
     if (!pending) return;
     telemetry.logEvent({
       eventType: 'action_cancelled',

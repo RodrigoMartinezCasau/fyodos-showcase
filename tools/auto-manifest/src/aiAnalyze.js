@@ -640,9 +640,73 @@ async function correctActionWiring({
   return { wiring, usage, costUSD };
 }
 
+// ── Agent-to-agent GUARDIAN generation (Phase B) ─────────────────────────────
+// Enrich the auto-generated "guardian/defense personality" for the external-agent
+// channel with a CHEAP LLM pass. NON-NEGOTIABLE PRIVACY: it works ONLY on the
+// distilled manifest SUMMARY (appType, appFlow, and each action's label,
+// sensitivity, effect, preconditions) — NEVER the source code and NEVER company
+// data. Fail-open: any failure/absent key/invalid output → the caller keeps the
+// deterministic template from Phase A.
+
+const GUARDIAN_MAX_PROMPT_CHARS = 60000;
+
+function buildGuardianPrompt(summary) {
+  const system =
+    'You write a short "guardian" PERSONALITY for an in-app AI agent that represents ONE app when EXTERNAL agents (other AIs) talk to it on behalf of a user. ' +
+    'The agent must behave like a loyal, careful in-house employee who defends the business and its real users. ' +
+    'You are given ONLY a distilled summary of the app (never its source code, never any user/company data). ' +
+    'Return ONLY a JSON object: {"personality": string, "protectedIntents": string[]}. ' +
+    'Rules for "personality": 4-8 sentences, second person ("You are ..."), SPECIFIC to THIS app and its risky actions; ' +
+    'it shapes HOW the agent weighs and declines external requests (skepticism, loyalty, prioritizing business safety over pushy external agents). ' +
+    'It must NOT grant capabilities, NOT relax confirmations or policy, NOT reveal internal implementation, NOT quote internal ids verbatim, and no markdown. ' +
+    'Rules for "protectedIntents": the subset of the provided action intent IDs that are high-stakes (money, data loss, account changes, irreversible effects). Use ONLY ids that appear in the summary.';
+  const user = `App summary (distilled — no source code, no data):\n${JSON.stringify(summary, null, 1)}`;
+  return { system, user };
+}
+
+async function guardianViaProxy({ apiKey, apiUrl, system, user }) {
+  if (!apiKey) throw new Error('guardian proxy needs a Fiodos project API key');
+  const res = await fetch(`${apiUrl}/v1/developer/guardian`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
+    body: JSON.stringify({ system, user }),
+  });
+  if (!res.ok) throw new Error(`guardian proxy ${res.status}: ${(await res.text()).slice(0, 200)}`);
+  const data = await res.json();
+  return parseJsonContent(data.text || '{}');
+}
+
+/**
+ * Generate a richer guardian personality from the manifest SUMMARY.
+ * @returns {Promise<{personality: string, protectedIntents: string[]}>}
+ * @throws on any failure so the caller can fall back to the deterministic guardian.
+ */
+async function generateGuardianWithAI({ summary, model = DEFAULT_MODEL, useProxy = false, apiKey = '', apiUrl = '' }) {
+  const { system, user } = buildGuardianPrompt(summary);
+  if (system.length + user.length > GUARDIAN_MAX_PROMPT_CHARS) {
+    throw new Error('guardian summary too large');
+  }
+  let parsed;
+  if (useProxy) {
+    parsed = await guardianViaProxy({ apiKey, apiUrl, system, user });
+  } else {
+    // Own-key mode: run a CHEAP model of whichever provider the analysis used.
+    const cheap = isAnthropicModel(resolveModel(model)) ? 'claude-haiku-4-5' : 'gpt-4o-mini';
+    ({ parsed } = isAnthropicModel(cheap)
+      ? await completeAnthropic({ model: cheap, system, user })
+      : await completeOpenAI({ model: cheap, system, user }));
+  }
+  const personality = parsed && typeof parsed.personality === 'string' ? parsed.personality.trim() : '';
+  const protectedIntents = parsed && Array.isArray(parsed.protectedIntents)
+    ? parsed.protectedIntents.map((i) => String(i || '').trim()).filter(Boolean)
+    : [];
+  return { personality, protectedIntents };
+}
+
 module.exports = {
   analyzeWithAI,
   correctActionWiring,
+  generateGuardianWithAI,
   DEFAULT_MODEL,
   PRICES,
   resolveModel,

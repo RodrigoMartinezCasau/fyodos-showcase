@@ -24,8 +24,8 @@ import {
   type Sanitizer,
   type TelemetryAdapter,
 } from '@fiodos/core';
-import type { AgentTimings, FiodosAgentConfig } from '../config/types';
-import { DEFAULT_AGENT_TIMINGS } from '../config/types';
+import type { AgentChaining, AgentTimings, FiodosAgentConfig } from '../config/types';
+import { DEFAULT_AGENT_CHAINING, DEFAULT_AGENT_TIMINGS } from '../config/types';
 import { resolveUiMessages } from '../i18n/resolve';
 import type { AgentUiMessages } from '../i18n/types';
 import {
@@ -56,6 +56,7 @@ export interface FiodosRuntime {
   consent: ConsentManager;
   executor: ActionExecutor;
   timings: AgentTimings;
+  chaining: AgentChaining;
   screenStore: ScreenContextStore;
   notifyError: (message: string) => void;
   getTtsVoice: () => string | undefined;
@@ -111,6 +112,15 @@ export function FiodosProvider({
     const getTtsVoice = () =>
       typeof resolvedConfig.ttsVoice === 'function' ? resolvedConfig.ttsVoice() : resolvedConfig.ttsVoice;
 
+    // Chaining is clamped defensively: never below 1 step, never above the
+    // agreed ceiling of 6, so an over-eager config can't run away.
+    const chainingMerged = { ...DEFAULT_AGENT_CHAINING, ...config.chaining };
+    const chaining: AgentChaining = {
+      enabled: chainingMerged.enabled === true,
+      maxSteps: Math.max(1, Math.min(6, Math.floor(chainingMerged.maxSteps || 6))),
+      dwellMs: Math.max(0, Math.min(3_000, Math.floor(chainingMerged.dwellMs ?? 450))),
+    };
+
     return {
       config: resolvedConfig,
       messages,
@@ -121,6 +131,7 @@ export function FiodosProvider({
       consent,
       executor,
       timings: { ...DEFAULT_AGENT_TIMINGS, ...config.timings },
+      chaining,
       screenStore,
       notifyError,
       getTtsVoice,

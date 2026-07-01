@@ -54,6 +54,28 @@ export const DEFAULT_AGENT_TIMINGS: AgentTimings = {
   minTranscriptChars: 2,
 };
 
+/**
+ * Autonomous multi-step chaining. OFF by default: with `enabled: false` the orb
+ * behaves exactly as before (one action per turn). When ON, after a successful
+ * navigate/execute whose backend `task_status` is "in_progress", the orb takes
+ * the next step on its own — capped at `maxSteps`, with no-progress detection,
+ * and sensitive-confirmation pauses (which ALWAYS require the user).
+ */
+export interface AgentChaining {
+  /** Master switch. Default false (retrocompatible). */
+  enabled: boolean;
+  /** Hard cap on steps per user request (safety). Default 6. */
+  maxSteps: number;
+  /** Pause between chained steps so the user can see each screen (ms). */
+  dwellMs: number;
+}
+
+export const DEFAULT_AGENT_CHAINING: AgentChaining = {
+  enabled: false,
+  maxSteps: 6,
+  dwellMs: 450,
+};
+
 /** Verdict of the app's per-turn gate (quota, plan limits…). */
 export type TurnGateVerdict =
   | { ok: true }
@@ -138,6 +160,8 @@ export interface FiodosAgentConfig {
   consentVersion?: number;
   /** Timing overrides. */
   timings?: Partial<AgentTimings>;
+  /** Autonomous multi-step chaining. OFF unless explicitly enabled. */
+  chaining?: Partial<AgentChaining>;
 
   /**
    * Wake-word voice activation ("Oye, …" / "Hello, …").

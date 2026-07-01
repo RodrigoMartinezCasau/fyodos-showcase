@@ -146,6 +146,20 @@ export function createFiodosBackendClient(options: FiodosBackendClientOptions): 
       if (request.sessionId?.trim()) {
         body.session_id = request.sessionId.trim();
       }
+      // Autonomous chaining (opt-in). Older backends ignore these; older SDKs
+      // never set them (retrocompatible).
+      if (request.isContinuation) {
+        body.is_continuation = true;
+        if (typeof request.chainStep === 'number') body.chain_step = request.chainStep;
+        if (request.lastStep) {
+          body.last_step = {
+            type: request.lastStep.type,
+            intent: request.lastStep.intent,
+            ...(request.lastStep.label ? { label: request.lastStep.label } : {}),
+            success: request.lastStep.success,
+          };
+        }
+      }
 
       const res = await fetchWithTimeout(
         `${baseUrl}/assistant/chat`,
@@ -160,17 +174,23 @@ export function createFiodosBackendClient(options: FiodosBackendClientOptions): 
         audio_base64?: string | null;
         action?: unknown;
         was_truncated?: boolean;
+        task_status?: unknown;
       };
       try {
         data = (await res.json()) as typeof data;
       } catch {
         throw new AgentApiError('invalid_response');
       }
+      const taskStatus =
+        data.task_status === 'in_progress' || data.task_status === 'blocked'
+          ? data.task_status
+          : 'complete';
       return {
         reply: (data.reply ?? '').trim(),
         audioBase64: data.audio_base64 ?? null,
         action: parseAgentAction(data.action),
         wasTruncated: data.was_truncated === true,
+        taskStatus,
       };
     },
 
