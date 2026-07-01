@@ -32,7 +32,7 @@ import {
   viewportPixelsToOrbScreenPosition,
   ORB_LAYOUT_MARGIN,
 } from '@fiodos/core';
-import { createRnOrbHaptics } from '../haptics';
+import { createRnOrbHaptics, type OrbHapticsFactory } from '../haptics';
 import { ChipIconNative } from './ChipIconNative';
 import { ChipIconScaled } from './ChipIconScaled';
 import { OutwardDoubleBorder, resolveRnOutwardBorderLayout } from './OutwardDoubleBorder';
@@ -60,6 +60,12 @@ export interface AgentOrbProps {
   logoTransform?: Partial<OrbLogoTransform> | null;
   /** Press feedback hook (e.g. haptics). */
   onPressFeedback?: () => void;
+  /**
+   * Override the orb haptics engine. Defaults to the baseline RN `Vibration`
+   * engine; the Expo entry injects a gentler, intensity-scaled expo-haptics
+   * engine here. Receives an intensity getter (0–100, live from the config).
+   */
+  hapticsFactory?: OrbHapticsFactory;
   /** Override the consent copy (recommended: name your AI providers). */
   consentParagraphs?: string[];
   /** Show the keyboard chip / text bubble channel. Default true. */
@@ -90,6 +96,7 @@ export function AgentOrb({
   logoDataUrl,
   logoTransform,
   onPressFeedback,
+  hapticsFactory,
   consentParagraphs,
   consentWakeWordParagraph,
   textInputEnabled = true,
@@ -171,7 +178,9 @@ export function AgentOrb({
   // as the published config updates, without being recreated.
   const hapticIntensityRef = useRef<number | undefined>(t.hapticIntensity);
   hapticIntensityRef.current = t.hapticIntensity;
-  const haptics = useRef(createRnOrbHaptics(() => hapticIntensityRef.current)).current;
+  const haptics = useRef(
+    (hapticsFactory ?? createRnOrbHaptics)(() => hapticIntensityRef.current),
+  ).current;
   const lastPhaseRef = useRef<typeof phase | null>(null);
   useEffect(() => {
     const prev = lastPhaseRef.current;

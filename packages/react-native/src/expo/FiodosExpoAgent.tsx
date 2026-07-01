@@ -51,6 +51,7 @@ import {
   ExpoRouterRouteTracker,
 } from './expoRouterNavigation';
 import { createExpoVoiceAdapter } from './expoVoiceAdapter';
+import { createExpoOrbHaptics } from './expoOrbHaptics';
 
 declare const __DEV__: boolean;
 // Expo injects EXPO_PUBLIC_* into process.env at build time; the SDK builds
@@ -201,6 +202,9 @@ export function FiodosExpoAgent({
           logoDataUrl: remoteOrb?.logoDataUrl ?? null,
           logoTransform: remoteOrb?.logoTransform ?? null,
           consentParagraphs,
+          // Gentle, intensity-scaled haptics on iOS/Android (expo-haptics),
+          // falling back to the baseline Vibration engine when unavailable.
+          hapticsFactory: createExpoOrbHaptics,
         }}
       />
     </FiodosProvider>
