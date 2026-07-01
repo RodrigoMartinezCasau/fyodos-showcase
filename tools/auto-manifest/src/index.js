@@ -457,12 +457,12 @@ async function main() {
   // ── 4b-bis. Agent-to-agent: auto-generate the GUARDIAN defense personality.
   // From the app's own detected actions (their sensitivity), NOT the company's
   // data, produce a "loyal defender" personality injected into the external
-  // channel so the agent protects the business against external agents. Phase A
-  // is DETERMINISTIC (template from restrict/requireConfirmation actions); the
-  // LLM-quality pass comes later. Advisory + additive + fail-open: on any doubt
-  // it produces a safe baseline (or nothing), and the channel keeps its current
-  // protections regardless.
-  generateExternalGuardian(manifest);
+  // channel so the agent protects the business against external agents. It
+  // ALWAYS sets the DETERMINISTIC template (Phase A) as a safe default, then —
+  // when AI is available — tries to enrich it from the manifest SUMMARY only
+  // (Phase B; never source code/data). Additive + fail-open: on any failure the
+  // deterministic guardian stands and the channel keeps its current protections.
+  await generateExternalGuardian(manifest, { useLLM, model });
 
   // ── 4c. Product-surface scoring (conservative, default-OFF for clear noise).
   // Existence is already proven; this asks the SEPARATE question "is this part
