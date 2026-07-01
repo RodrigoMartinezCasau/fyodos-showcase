@@ -2,6 +2,7 @@ import {
   buildVoiceActivationConsentParagraph,
   buildWakePhrasesForLocale,
   formatWakePhraseDisplay,
+  mergeWakePhraseVariants,
   resolveVoiceActivationPolicies,
   type AppManifest,
   type VoiceActivationPolicySource,
@@ -39,8 +40,16 @@ export function resolveVoiceActivationConfig(
   options: ResolveVoiceActivationOptions,
 ): ResolvedVoiceActivationConfig {
   const { manifest, locale, published } = options;
-  const { offered, phraseName } = resolveVoiceActivationPolicies(manifest, published);
-  const phrases = buildWakePhrasesForLocale(phraseName, locale);
+  const { offered, phraseName, extraPhrases } = resolveVoiceActivationPolicies(
+    manifest,
+    published,
+  );
+  // Locale phrases + hidden phonetic variants published by the dashboard
+  // (likely STT mis-transcriptions of the wake word) — all count as triggers.
+  const phrases = mergeWakePhraseVariants(
+    buildWakePhrasesForLocale(phraseName, locale),
+    extraPhrases,
+  );
   const displayPhrase = formatWakePhraseDisplay(phraseName, locale);
 
   return {

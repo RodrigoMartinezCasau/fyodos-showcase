@@ -36,8 +36,14 @@ export interface AgentTextBubbleProps {
   onSend: (text: string) => void;
   /** Cancel the in-flight turn (pressing STOP while busy). */
   onCancel?: () => void;
-  /** Recent exchanges (up to 3) while session memory is active. */
+  /** Paged window of recent exchanges while session memory is active. */
   exchanges: AgentExchange[];
+  /** Older messages exist beyond the mounted window (scroll up to load them). */
+  hasOlderExchanges?: boolean;
+  /** An older page is being loaded — show the loading row at the top. */
+  loadingOlderExchanges?: boolean;
+  /** Page one more block of older session messages in (scroll-to-top). */
+  onLoadOlder?: () => void;
   /** A turn is in flight: the send button becomes a STOP button. */
   busy: boolean;
   accentColor: string;
@@ -73,6 +79,9 @@ export function AgentTextBubble({
   onSend,
   onCancel,
   exchanges,
+  hasOlderExchanges = false,
+  loadingOlderExchanges = false,
+  onLoadOlder,
   busy,
   accentColor,
   theme,
@@ -93,9 +102,32 @@ export function AgentTextBubble({
   const scrollRef = useRef<ScrollView>(null);
   const seedAppliedRef = useRef(false);
 
-  useEffect(() => {
-    scrollRef.current?.scrollToEnd({ animated: true });
-  }, [exchanges, busy]);
+  // Scroll bookkeeping for the paged history: new messages scroll to the end,
+  // but when an older page is PREPENDED (scroll-to-top pagination) the reading
+  // position stays anchored instead of jumping back to the bottom.
+  const exchangesSignature = exchanges
+    .map((ex) => `${ex.userText}\u0000${ex.replyText}`)
+    .join('\u0001');
+  const renderedSigRef = useRef('');
+  const contentHeightRef = useRef(0);
+  const scrollOffsetRef = useRef(0);
+  const handleContentSizeChange = (_w: number, h: number) => {
+    const prev = renderedSigRef.current;
+    if (exchangesSignature !== prev) {
+      const prepended =
+        prev.length > 0 &&
+        exchangesSignature.length > prev.length &&
+        exchangesSignature.endsWith(prev);
+      renderedSigRef.current = exchangesSignature;
+      if (prepended) {
+        const fromBottom = contentHeightRef.current - scrollOffsetRef.current;
+        scrollRef.current?.scrollTo({ y: Math.max(0, h - fromBottom), animated: false });
+      } else {
+        scrollRef.current?.scrollToEnd({ animated: true });
+      }
+    }
+    contentHeightRef.current = h;
+  };
 
   // Open → focus the input so the system keyboard slides up immediately.
   useEffect(() => {
@@ -154,29 +186,52 @@ export function AgentTextBubble({
             },
           ]}
         >
+          {/* Close button overlaid at the corner — in line with the first message,
+              exactly like the dashboard preview (no extra header row/space). */}
+          <Pressable
+            onPress={onClose}
+            accessibilityRole="button"
+            accessibilityLabel={closeLabel}
+            hitSlop={8}
+            style={styles.closeBtn}
+          >
+            <Text style={[styles.closeIcon, { color: t.bodyColor }]}>×</Text>
+          </Pressable>
           <ScrollView
             ref={scrollRef}
             style={styles.exchangeScroll}
             contentContainerStyle={styles.exchange}
-            onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+            showsVerticalScrollIndicator={false}
+            scrollEventThrottle={16}
+            onScroll={(e) => {
+              const y = e.nativeEvent.contentOffset.y;
+              scrollOffsetRef.current = y;
+              // Reaching the top with older messages available pages the next block in.
+              if (y <= 12 && hasOlderExchanges && !loadingOlderExchanges) {
+                onLoadOlder?.();
+              }
+            }}
+            onContentSizeChange={handleContentSizeChange}
           >
-            <View style={styles.headerRow}>
-              <Pressable
-                onPress={onClose}
-                accessibilityRole="button"
-                accessibilityLabel={closeLabel}
-                hitSlop={8}
-                style={styles.closeBtn}
-              >
-                <Text style={[styles.closeIcon, { color: t.bodyColor }]}>×</Text>
-              </Pressable>
-            </View>
+            {loadingOlderExchanges ? (
+              <View style={styles.olderLoaderRow}>
+                <ActivityIndicator size="small" color={t.bodyColor} />
+              </View>
+            ) : null}
             {exchanges.map((ex, index) => (
               <View
                 key={`${index}-${ex.userText}`}
                 style={[styles.exchangeBlock, index < exchanges.length - 1 ? styles.exchangeBlockGap : null]}
               >
-                <Text style={[styles.userText, { color: t.bodyColor }]} selectable>
+                <Text
+                  style={[
+                    styles.userText,
+                    { color: t.bodyColor },
+                    // First row shares the line with the overlaid × — keep clear of it.
+                    index === 0 ? styles.userTextFirst : null,
+                  ]}
+                  selectable
+                >
                   {ex.userText}
                 </Text>
                 {ex.replyText ? (
@@ -264,11 +319,12 @@ const styles = StyleSheet.create({
     elevation: 8,
   },
   closeBtn: {
-    flexShrink: 0,
-    width: 32,
-    height: 32,
-    marginTop: -10,
-    marginRight: -8,
+    position: 'absolute',
+    top: 4,
+    right: 6,
+    zIndex: 1,
+    width: 28,
+    height: 28,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -277,21 +333,11 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     opacity: 0.75,
   },
-  headerRow: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    alignItems: 'flex-start',
-  },
   exchangeBlock: {
     gap: 8,
   },
   exchangeBlockGap: {
     marginBottom: 10,
-  },
-  userRow: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
-    gap: 6,
   },
   exchangeScroll: {
     flexGrow: 0,
@@ -307,12 +353,19 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     opacity: 0.75,
   },
+  userTextFirst: {
+    paddingRight: 22,
+  },
   replyText: {
     fontSize: 15,
     lineHeight: 21,
   },
   busyRow: {
     paddingVertical: 8,
+    alignItems: 'center',
+  },
+  olderLoaderRow: {
+    paddingBottom: 6,
     alignItems: 'center',
   },
   inputRow: {

@@ -177,6 +177,8 @@ export interface FiodosAgentConfig {
   publishedVoiceActivation?: {
     voiceActivationOffered?: boolean;
     voiceActivationPhrase?: string;
+    /** Hidden phonetic variants generated at publish time (extra triggers). */
+    voiceActivationPhrases?: string[];
   };
 }
 

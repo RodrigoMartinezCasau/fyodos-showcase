@@ -86,6 +86,11 @@ export interface AgentOrbProps {
    * (text turns are silent by default). Animations are unchanged.
    */
   voiceInputEnabled?: boolean;
+  /**
+   * Idle context retention from the dashboard (minutes; 0 = never clear;
+   * null/undefined = the 30-minute default).
+   */
+  conversationRetentionMinutes?: number | null;
 }
 
 export function AgentOrb({
@@ -105,6 +110,7 @@ export function AgentOrb({
   bubbleTheme,
   bubbleEnabled = true,
   voiceInputEnabled = true,
+  conversationRetentionMinutes = null,
 }: AgentOrbProps) {
   const { ui, config, messages } = useFiodosRuntime();
   const t = {
@@ -126,6 +132,10 @@ export function AgentOrb({
     submitTextTurn,
     lastExchange,
     recentExchanges,
+    hasOlderExchanges,
+    loadingOlderExchanges,
+    loadOlderExchanges,
+    resetExchangeWindow,
     cancelAll,
     consentModalVisible,
     acceptConsent,
@@ -137,7 +147,7 @@ export function AgentOrb({
     cancelPendingAction,
     wakeWordListening,
     voiceAvailable,
-  } = useAgent({ enabled });
+  } = useAgent({ enabled, conversationRetentionMinutes });
 
   const [textOpen, setTextOpen] = useState(false);
   const [textSeed, setTextSeed] = useState<{ text: string; autoSend: boolean } | null>(null);
@@ -450,7 +460,11 @@ export function AgentOrb({
       {textInputEnabled ? (
         <AgentTextBubble
           visible={textOpen}
-          onClose={() => setTextPanel(false)}
+          onClose={() => {
+            setTextPanel(false);
+            // Collapse the paged history back to the initial page for next open.
+            resetExchangeWindow();
+          }}
           onSend={(text) => {
             haptics.trigger('send');
             void submitTextTurn(text);
@@ -460,6 +474,9 @@ export function AgentOrb({
             cancelAll();
           }}
           exchanges={recentExchanges}
+          hasOlderExchanges={hasOlderExchanges}
+          loadingOlderExchanges={loadingOlderExchanges}
+          onLoadOlder={loadOlderExchanges}
           busy={showThinking}
           accentColor={t.accentColor}
           theme={modalTheme}

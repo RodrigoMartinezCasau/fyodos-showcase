@@ -135,6 +135,7 @@ export function AgentLayer({
         bubbleTheme={remote.bubbleTheme}
         bubbleEnabled={remote.bubbleEnabled}
         voiceInputEnabled={remote.voiceInputEnabled}
+        conversationRetentionMinutes={remote.conversationRetentionMinutes}
         {...orbProps}
       />
     </View>
@@ -157,6 +158,11 @@ interface RemotePublishedConfig {
   bubbleEnabled: boolean;
   /** Orb voice channel on/off (`voiceInputEnabled`). False → tap opens keyboard. */
   voiceInputEnabled: boolean;
+  /**
+   * Idle context retention in minutes (`conversationRetentionMinutes`).
+   * 0 = never clear; null = not published (the SDK's 30-minute default).
+   */
+  conversationRetentionMinutes: number | null;
 }
 
 /**
@@ -173,6 +179,7 @@ function useRemotePublishedConfig(pollMs = 12_000): RemotePublishedConfig {
     bubbleTheme: resolveBubbleTheme(null),
     bubbleEnabled: true,
     voiceInputEnabled: true,
+    conversationRetentionMinutes: null,
   });
 
   useEffect(() => {
@@ -189,6 +196,10 @@ function useRemotePublishedConfig(pollMs = 12_000): RemotePublishedConfig {
           bubbleTheme: resolveBubbleTheme(pub?.bubbleTheme),
           bubbleEnabled: pub ? pub.bubbleEnabled !== false : true,
           voiceInputEnabled: pub ? pub.voiceInputEnabled !== false : true,
+          conversationRetentionMinutes:
+            typeof pub?.conversationRetentionMinutes === 'number'
+              ? pub.conversationRetentionMinutes
+              : null,
         });
       } catch {
         if (!cancelled) {
@@ -197,6 +208,7 @@ function useRemotePublishedConfig(pollMs = 12_000): RemotePublishedConfig {
             bubbleTheme: resolveBubbleTheme(null),
             bubbleEnabled: true,
             voiceInputEnabled: true,
+            conversationRetentionMinutes: null,
           });
         }
       }

@@ -26,8 +26,10 @@
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  buildBubbleExchanges,
+  buildBubbleExchangeWindow,
+  BUBBLE_PAGE_EXCHANGES,
   classifyConfirmationReply,
+  conversationRetentionOptions,
   classifyStrictConfirmationReply,
   combineContexts,
   createConversationSession,
@@ -84,6 +86,11 @@ export interface AgentExchange {
 
 export interface UseAgentOptions {
   enabled?: boolean;
+  /**
+   * Idle context retention from the dashboard (minutes; 0 = never clear;
+   * null/undefined = the 30-minute default).
+   */
+  conversationRetentionMinutes?: number | null;
 }
 
 /**
@@ -114,8 +121,16 @@ export interface UseAgentResult {
   submitTextTurn: (text: string, options?: { speak?: boolean }) => Promise<void>;
   /** Current exchange (user message + agent reply) for the text bubble UI. */
   lastExchange: AgentExchange | null;
-  /** Up to 3 recent user+reply pairs while session memory is active. */
+  /** Paged window of recent user+reply pairs while session memory is active. */
   recentExchanges: AgentExchange[];
+  /** Older messages exist beyond the mounted window (scroll up to load them). */
+  hasOlderExchanges: boolean;
+  /** An older page is being loaded (show the loading row at the top). */
+  loadingOlderExchanges: boolean;
+  /** Page one more block of older session messages into the bubble. */
+  loadOlderExchanges: () => void;
+  /** Collapse the bubble history back to the initial page (bubble closed). */
+  resetExchangeWindow: () => void;
   cancelAll: () => void;
   consentModalVisible: boolean;
   acceptConsent: () => Promise<void>;
@@ -138,7 +153,10 @@ function devLog(invocationId: number, step: string, extra?: string): void {
   );
 }
 
-export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResult {
+export function useAgent({
+  enabled = true,
+  conversationRetentionMinutes = null,
+}: UseAgentOptions = {}): UseAgentResult {
   const runtime = useFiodosRuntime();
   const {
     config,
@@ -232,6 +250,10 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
   const consentEntryRef = useRef<ConsentEntry | null>(null);
   /** In-memory session conversation (bounded window + summary for token cost). */
   const conversationRef = useRef(createConversationSession());
+  // Idle retention from the dashboard, kept in a ref so async turn flows always
+  // read the latest published value (undefined = 30-minute default).
+  const conversationOptionsRef = useRef<ReturnType<typeof conversationRetentionOptions>>(undefined);
+  conversationOptionsRef.current = conversationRetentionOptions(conversationRetentionMinutes);
   /**
    * Opaque conversation/session id for analytics correlation (NEVER content).
    * Stable for this hook instance — lets the backend count distinct sessions.
@@ -407,7 +429,11 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
         const contextChars = sanitized?.length ?? 0;
         if (redactions.length) devLog(turnId, 'context redacted', redactions.join(','));
 
-        const conversation = prepareConversationForTurn(conversationRef.current);
+        const conversation = prepareConversationForTurn(
+          conversationRef.current,
+          Date.now(),
+          conversationOptionsRef.current,
+        );
 
         const result = await backend.sendTurn(
           {
@@ -737,7 +763,11 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
             const { sanitized: san2, redactions: red2 } = rawCtx2
               ? sanitizer(rawCtx2)
               : { sanitized: null, redactions: [] as string[] };
-            const conv2 = prepareConversationForTurn(conversationRef.current);
+            const conv2 = prepareConversationForTurn(
+              conversationRef.current,
+              Date.now(),
+              conversationOptionsRef.current,
+            );
             setPhaseSafe('thinking');
             const ctrl = new AbortController();
             abortRef.current = ctrl;
@@ -803,7 +833,13 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
               contextChars: san2?.length ?? 0,
             });
             setLastExchange({ userText: cs.userMessage, replyText: oc.spokenReply });
-            recordConversationExchange(conversationRef.current, cs.userMessage, oc.spokenReply);
+            recordConversationExchange(
+              conversationRef.current,
+              cs.userMessage,
+              oc.spokenReply,
+              Date.now(),
+              conversationOptionsRef.current,
+            );
             await speakReply(oc.spokenReply, oc.spokenAudio);
             telemetry.logEvent({
               eventType: 'agent_chain_step',
@@ -872,7 +908,13 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
 
         // The bubble shows the exchange in text (voice and text turns alike).
         setLastExchange({ userText: msg, replyText: first.spokenReply });
-        recordConversationExchange(conversationRef.current, msg, first.spokenReply);
+        recordConversationExchange(
+          conversationRef.current,
+          msg,
+          first.spokenReply,
+          Date.now(),
+          conversationOptionsRef.current,
+        );
         await speakReply(first.spokenReply, first.spokenAudio);
         // Voice confirmation: after speaking the question, listen for the
         // reply for a few seconds. The modal stays visible as the tactile
@@ -1624,10 +1666,51 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     cancelPendingActionRef.current = cancelPendingAction;
   }, [confirmPendingAction, cancelPendingAction]);
 
-  const recentExchanges = useMemo(
-    () => buildBubbleExchanges(conversationRef.current, lastExchange),
-    [lastExchange],
+  // ── Paged bubble history ─────────────────────────────────────────────────────
+  // The bubble mounts one page (5 exchanges) and grows a page at a time when the
+  // user scrolls to the top; loading is deferred behind a short spinner so old
+  // messages stream in on demand and never all mount at once.
+  const [exchangeWindowSize, setExchangeWindowSize] = useState(BUBBLE_PAGE_EXCHANGES);
+  const [loadingOlderExchanges, setLoadingOlderExchanges] = useState(false);
+  const loadOlderTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(
+    () => () => {
+      if (loadOlderTimerRef.current) clearTimeout(loadOlderTimerRef.current);
+    },
+    [],
   );
+
+  const exchangeWindow = useMemo(
+    () =>
+      buildBubbleExchangeWindow(
+        conversationRef.current,
+        lastExchange,
+        exchangeWindowSize,
+        conversationRetentionOptions(conversationRetentionMinutes),
+      ),
+    [lastExchange, exchangeWindowSize, conversationRetentionMinutes],
+  );
+  const recentExchanges = exchangeWindow.exchanges;
+  const hasOlderExchanges = exchangeWindow.hasOlder;
+
+  const loadOlderExchanges = useCallback(() => {
+    if (loadOlderTimerRef.current || !hasOlderExchanges) return;
+    setLoadingOlderExchanges(true);
+    loadOlderTimerRef.current = setTimeout(() => {
+      loadOlderTimerRef.current = null;
+      setExchangeWindowSize((size) => size + BUBBLE_PAGE_EXCHANGES);
+      setLoadingOlderExchanges(false);
+    }, 350);
+  }, [hasOlderExchanges]);
+
+  const resetExchangeWindow = useCallback(() => {
+    if (loadOlderTimerRef.current) {
+      clearTimeout(loadOlderTimerRef.current);
+      loadOlderTimerRef.current = null;
+    }
+    setLoadingOlderExchanges(false);
+    setExchangeWindowSize(BUBBLE_PAGE_EXCHANGES);
+  }, []);
 
   return {
     phase,
@@ -1641,6 +1724,10 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     submitTextTurn,
     lastExchange,
     recentExchanges,
+    hasOlderExchanges,
+    loadingOlderExchanges,
+    loadOlderExchanges,
+    resetExchangeWindow,
     cancelAll,
     consentModalVisible,
     acceptConsent,

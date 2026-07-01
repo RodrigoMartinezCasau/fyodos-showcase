@@ -80,6 +80,8 @@ interface RemoteOrbAppearance {
 interface PublishedVoiceActivation {
   voiceActivationOffered?: boolean;
   voiceActivationPhrase?: string;
+  /** Hidden phonetic variants generated at publish time (extra triggers). */
+  voiceActivationPhrases?: string[];
 }
 
 export interface FiodosExpoAgentProps {
@@ -251,6 +253,7 @@ async function processPublished(
     voice: {
       voiceActivationOffered: published.voiceActivationOffered,
       voiceActivationPhrase: published.voiceActivationPhrase,
+      voiceActivationPhrases: published.voiceActivationPhrases,
     },
   };
 }
