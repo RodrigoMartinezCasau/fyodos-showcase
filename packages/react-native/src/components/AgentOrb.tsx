@@ -125,6 +125,7 @@ export function AgentOrb({
     toggleListening,
     submitTextTurn,
     lastExchange,
+    recentExchanges,
     cancelAll,
     consentModalVisible,
     acceptConsent,
@@ -458,7 +459,7 @@ export function AgentOrb({
             haptics.trigger('orbTap');
             cancelAll();
           }}
-          exchange={lastExchange}
+          exchanges={recentExchanges}
           busy={showThinking}
           accentColor={t.accentColor}
           theme={modalTheme}

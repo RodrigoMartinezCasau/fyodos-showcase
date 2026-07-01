@@ -36,8 +36,8 @@ export interface AgentTextBubbleProps {
   onSend: (text: string) => void;
   /** Cancel the in-flight turn (pressing STOP while busy). */
   onCancel?: () => void;
-  /** Current exchange (typed or spoken) shown in text. */
-  exchange: AgentExchange | null;
+  /** Recent exchanges (up to 3) while session memory is active. */
+  exchanges: AgentExchange[];
   /** A turn is in flight: the send button becomes a STOP button. */
   busy: boolean;
   accentColor: string;
@@ -72,7 +72,7 @@ export function AgentTextBubble({
   onClose,
   onSend,
   onCancel,
-  exchange,
+  exchanges,
   busy,
   accentColor,
   theme,
@@ -90,7 +90,12 @@ export function AgentTextBubble({
   const sendButtonColor = theme?.primaryButtonColor ?? accentColor;
   const [draft, setDraft] = useState('');
   const inputRef = useRef<TextInput>(null);
+  const scrollRef = useRef<ScrollView>(null);
   const seedAppliedRef = useRef(false);
+
+  useEffect(() => {
+    scrollRef.current?.scrollToEnd({ animated: true });
+  }, [exchanges, busy]);
 
   // Open → focus the input so the system keyboard slides up immediately.
   useEffect(() => {
@@ -149,11 +154,13 @@ export function AgentTextBubble({
             },
           ]}
         >
-          <ScrollView style={styles.exchangeScroll} contentContainerStyle={styles.exchange}>
-            <View style={styles.userRow}>
-              <Text style={[styles.userText, { color: t.bodyColor, flex: 1 }]} selectable>
-                {exchange?.userText ?? ''}
-              </Text>
+          <ScrollView
+            ref={scrollRef}
+            style={styles.exchangeScroll}
+            contentContainerStyle={styles.exchange}
+            onContentSizeChange={() => scrollRef.current?.scrollToEnd({ animated: true })}
+          >
+            <View style={styles.headerRow}>
               <Pressable
                 onPress={onClose}
                 accessibilityRole="button"
@@ -164,11 +171,21 @@ export function AgentTextBubble({
                 <Text style={[styles.closeIcon, { color: t.bodyColor }]}>×</Text>
               </Pressable>
             </View>
-            {exchange?.replyText ? (
-              <Text style={[styles.replyText, { color: t.titleColor }]} selectable>
-                {exchange.replyText}
-              </Text>
-            ) : null}
+            {exchanges.map((ex, index) => (
+              <View
+                key={`${index}-${ex.userText}`}
+                style={[styles.exchangeBlock, index < exchanges.length - 1 ? styles.exchangeBlockGap : null]}
+              >
+                <Text style={[styles.userText, { color: t.bodyColor }]} selectable>
+                  {ex.userText}
+                </Text>
+                {ex.replyText ? (
+                  <Text style={[styles.replyText, { color: t.titleColor }]} selectable>
+                    {ex.replyText}
+                  </Text>
+                ) : null}
+              </View>
+            ))}
           </ScrollView>
           {busy ? (
             <View style={styles.busyRow}>
@@ -259,6 +276,17 @@ const styles = StyleSheet.create({
     fontSize: 18,
     lineHeight: 18,
     opacity: 0.75,
+  },
+  headerRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    alignItems: 'flex-start',
+  },
+  exchangeBlock: {
+    gap: 8,
+  },
+  exchangeBlockGap: {
+    marginBottom: 10,
   },
   userRow: {
     flexDirection: 'row',

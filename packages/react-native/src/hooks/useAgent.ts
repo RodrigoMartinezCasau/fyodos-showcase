@@ -24,8 +24,9 @@
  * - Negation wins ties in voice confirmation; ambiguous re-asks ONCE.
  * - Tap decision (modal) always wins over the voice window.
  */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  buildBubbleExchanges,
   classifyConfirmationReply,
   classifyStrictConfirmationReply,
   combineContexts,
@@ -113,6 +114,8 @@ export interface UseAgentResult {
   submitTextTurn: (text: string, options?: { speak?: boolean }) => Promise<void>;
   /** Current exchange (user message + agent reply) for the text bubble UI. */
   lastExchange: AgentExchange | null;
+  /** Up to 3 recent user+reply pairs while session memory is active. */
+  recentExchanges: AgentExchange[];
   cancelAll: () => void;
   consentModalVisible: boolean;
   acceptConsent: () => Promise<void>;
@@ -1621,6 +1624,11 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     cancelPendingActionRef.current = cancelPendingAction;
   }, [confirmPendingAction, cancelPendingAction]);
 
+  const recentExchanges = useMemo(
+    () => buildBubbleExchanges(conversationRef.current, lastExchange),
+    [lastExchange],
+  );
+
   return {
     phase,
     isListening,
@@ -1632,6 +1640,7 @@ export function useAgent({ enabled = true }: UseAgentOptions = {}): UseAgentResu
     toggleListening,
     submitTextTurn,
     lastExchange,
+    recentExchanges,
     cancelAll,
     consentModalVisible,
     acceptConsent,
