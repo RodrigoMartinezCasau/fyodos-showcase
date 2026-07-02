@@ -15,8 +15,6 @@
 const fs = require('fs');
 const path = require('path');
 
-const CLI_VERSION = require('../package.json').version;
-
 function normRel(appRoot, absOrRel) {
   const rel = path.isAbsolute(absOrRel) ? path.relative(appRoot, absOrRel) : absOrRel;
   return String(rel || '').replace(/\\/g, '/');
@@ -366,10 +364,11 @@ function computeDelta(appRoot, current) {
  * Build a structured record for one installer run from the phase results.
  */
 function buildRunRecord(appRoot, ctx) {
+  // Deliberately no CLI version / internal metrics in the record: the registry
+  // documents WHAT changed in the client's repo, nothing about our tooling.
   const record = {
     runId: makeRunId(),
     timestamp: new Date().toISOString(),
-    cliVersion: CLI_VERSION,
     appName: ctx.appName || path.basename(appRoot),
     manifest: {
       actionCount: (ctx.manifest?.actions || []).length,
@@ -421,7 +420,6 @@ function renderRunSection(record) {
   const L = [];
   L.push(`## Run ${record.timestamp}`);
   L.push('');
-  L.push(`- CLI: \`@fiodos/cli@${record.cliVersion}\``);
   L.push(`- App: \`${record.appName}\``);
   L.push(`- Manifest: ${record.manifest.actionCount} action(s), ${record.manifest.routeCount} route(s)`);
   L.push(`- Run id: \`${record.runId}\``);
@@ -512,7 +510,6 @@ function writeChangeRegistry(appRoot, runRecord) {
   index.runs.unshift({
     runId: runRecord.runId,
     timestamp: runRecord.timestamp,
-    cliVersion: runRecord.cliVersion,
     jsonFile: `${runRecord.runId}.json`,
     summary: briefSummary(runRecord),
   });

@@ -9,6 +9,7 @@
   "main": "src/index.js",
   "files": [
     "src",
+    "!src/prompts.dev.js",
     "LICENSE",
     "README.md"
   ],

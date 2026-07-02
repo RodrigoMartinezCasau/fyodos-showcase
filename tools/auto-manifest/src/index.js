@@ -554,9 +554,14 @@ async function main() {
     let registryWireResult = null;
     const { runPostWireTest } = require('./postWireTest');
     const selfCorrect = !process.argv.includes('--no-self-correct');
+    // Corrections follow the same key model as the analysis: hosted (proxy)
+    // by default, the developer's own provider key with --own-ai-key.
+    const correctorUseProxy = !process.argv.includes('--own-ai-key');
     const corrector = selfCorrect
       ? async (args) => {
-          const { wiring: fixed } = await correctActionWiring({ ...args, model, platform });
+          const { wiring: fixed } = await correctActionWiring({
+            ...args, model, platform, useProxy: correctorUseProxy, apiKey, apiUrl,
+          });
           return fixed;
         }
       : null;
