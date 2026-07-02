@@ -44,6 +44,8 @@ function styleForLevel(level: OrbHapticImpactLevel): string | null {
       return 'light';
     case 'medium':
       return 'medium';
+    case 'heavy':
+      return 'heavy';
     default:
       return 'light';
   }
