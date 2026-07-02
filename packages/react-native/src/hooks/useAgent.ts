@@ -34,8 +34,10 @@ import {
   combineContexts,
   createConversationSession,
   formatMessage,
+  persistConversationSession,
   prepareConversationForTurn,
   recordConversationExchange,
+  restoreConversationSession,
   stripWakePhrase,
   defaultWakePhrasesForLocale,
   type AgentAction,
@@ -254,6 +256,41 @@ export function useAgent({
   // read the latest published value (undefined = 30-minute default).
   const conversationOptionsRef = useRef<ReturnType<typeof conversationRetentionOptions>>(undefined);
   conversationOptionsRef.current = conversationRetentionOptions(conversationRetentionMinutes);
+  const retentionMinutesRef = useRef<number | null>(null);
+  retentionMinutesRef.current =
+    typeof conversationRetentionMinutes === 'number' ? conversationRetentionMinutes : null;
+  // Bumped when the persisted conversation is rehydrated, so the exchange
+  // window recomputes even though lastExchange did not change.
+  const [conversationEpoch, setConversationEpoch] = useState(0);
+
+  // ── Conversation persistence (survives app restarts) ────────────────────────
+  const persistConversation = useCallback(() => {
+    void persistConversationSession(
+      config.storage,
+      config.manifest.appId,
+      conversationRef.current,
+      retentionMinutesRef.current,
+    );
+  }, [config.storage, config.manifest.appId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const restored = await restoreConversationSession(config.storage, config.manifest.appId);
+      if (cancelled || !restored) return;
+      const current = conversationRef.current;
+      // Never clobber turns the user already made while the restore resolved.
+      if (current.turns.length > 0 || current.uiArchive?.length) return;
+      current.turns = restored.turns;
+      current.summary = restored.summary;
+      current.uiArchive = restored.uiArchive;
+      current.lastActivityAt = restored.lastActivityAt;
+      setConversationEpoch((n) => n + 1);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [config.storage, config.manifest.appId]);
   /**
    * Opaque conversation/session id for analytics correlation (NEVER content).
    * Stable for this hook instance — lets the backend count distinct sessions.
@@ -840,6 +877,7 @@ export function useAgent({
               Date.now(),
               conversationOptionsRef.current,
             );
+            persistConversation();
             await speakReply(oc.spokenReply, oc.spokenAudio);
             telemetry.logEvent({
               eventType: 'agent_chain_step',
@@ -915,6 +953,7 @@ export function useAgent({
           Date.now(),
           conversationOptionsRef.current,
         );
+        persistConversation();
         await speakReply(first.spokenReply, first.spokenAudio);
         // Voice confirmation: after speaking the question, listen for the
         // reply for a few seconds. The modal stays visible as the tactile
@@ -1688,7 +1727,8 @@ export function useAgent({
         exchangeWindowSize,
         conversationRetentionOptions(conversationRetentionMinutes),
       ),
-    [lastExchange, exchangeWindowSize, conversationRetentionMinutes],
+    // conversationEpoch: recompute after the persisted session is rehydrated.
+    [lastExchange, exchangeWindowSize, conversationRetentionMinutes, conversationEpoch],
   );
   const recentExchanges = exchangeWindow.exchanges;
   const hasOlderExchanges = exchangeWindow.hasOlder;
