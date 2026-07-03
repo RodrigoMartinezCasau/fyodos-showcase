@@ -21,6 +21,7 @@ import {
   type ConversationTurn,
 } from '@fiodos/core';
 import { AgentApiError } from './errors';
+import { SDK_VERSION, SDK_PACKAGE } from '../version';
 
 export interface FiodosBackendClientOptions {
   baseUrl: string;
@@ -238,10 +239,17 @@ export function createFiodosBackendClient(options: FiodosBackendClientOptions): 
     async reportOrbSeen(platform = 'mobile'): Promise<void> {
       // Best-effort: prove the orb booted in the running app so the dashboard
       // onboarding can confirm a real install. Never throws / never blocks.
+      // sdkVersion/sdkPackage let the dashboard surface an "update available"
+      // notice when the running orb is older than the latest published SDK
+      // (mirrors @fiodos/react and @fiodos/web-core).
       try {
         await fetchWithTimeout(
           `${baseUrl}/v1/client/orb-seen`,
-          { method: 'POST', headers: buildHeaders(), body: JSON.stringify({ platform }) },
+          {
+            method: 'POST',
+            headers: buildHeaders(),
+            body: JSON.stringify({ platform, sdkVersion: SDK_VERSION, sdkPackage: SDK_PACKAGE }),
+          },
           5_000,
         );
       } catch {

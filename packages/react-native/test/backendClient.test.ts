@@ -80,6 +80,19 @@ test('sendTurn posts the contract body and parses the response', async () => {
   assert.equal(result.wasTruncated, false);
 });
 
+test('reportOrbSeen sends sdkVersion/sdkPackage so the dashboard can detect outdated orbs', async () => {
+  const calls = mockFetch(() => ({ status: 200, body: { ok: true } }));
+  const client = createFiodosBackendClient({ baseUrl: 'https://api.example.com', apiKey: 'k-123' });
+  await client.reportOrbSeen('mobile');
+
+  assert.equal(calls[0]?.url, 'https://api.example.com/v1/client/orb-seen');
+  const sent = JSON.parse(calls[0]!.init.body) as Record<string, unknown>;
+  assert.equal(sent.platform, 'mobile');
+  assert.equal(sent.sdkPackage, '@fiodos/react-native');
+  assert.equal(typeof sent.sdkVersion, 'string');
+  assert.ok((sent.sdkVersion as string).length > 0);
+});
+
 test('HTTP statuses map to stable machine codes (no language matching)', async () => {
   const cases: Array<{ status: number; body: unknown; code: string }> = [
     { status: 401, body: {}, code: 'unauthorized' },

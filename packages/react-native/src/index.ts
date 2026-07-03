@@ -16,6 +16,7 @@ export type {
   TurnGateVerdict,
 } from './config/types';
 export { DEFAULT_AGENT_TIMINGS } from './config/types';
+export { SDK_VERSION, SDK_PACKAGE } from './version';
 
 // Provider + orchestrator
 export { FiodosProvider, useFiodosRuntime } from './provider/FiodosProvider';
