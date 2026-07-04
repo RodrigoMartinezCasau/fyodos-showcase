@@ -105,6 +105,12 @@ export interface FiodosAgentConfig {
   telemetry?: TelemetryAdapter;
   /** Host auth check, required by manifest actions declaring requiresAuth. */
   isAuthenticated?: () => boolean;
+  /**
+   * Host end-user identity. Conversation memory is namespaced per identity
+   * (hashed LOCALLY, never sent by this module): logout/account switches swap
+   * to that identity's own conversation instead of leaking the previous one.
+   */
+  getUserId?: () => string | null;
 
   // ── Language / catalogs ────────────────────────────────────────────────────
   messages?: {

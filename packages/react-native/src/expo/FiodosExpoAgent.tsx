@@ -23,7 +23,7 @@
  * app-specific actions are wired separately). Requires the app to have
  * react-native-safe-area-context mounted above it (standard in Expo apps).
  */
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useWindowDimensions } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import {
@@ -103,6 +103,13 @@ export interface FiodosExpoAgentProps {
   isAuthenticated?: () => boolean;
   /** Stable per-user context the agent should know (in the agent's language). */
   getUserContextText?: () => string | null;
+  /**
+   * Host end-user identity. Conversation memory is namespaced per identity
+   * (hashed locally on the device): logout/account switches swap to that
+   * identity's own conversation instead of leaking the previous one. Also sent
+   * as x-user-id for rate limiting / telemetry correlation.
+   */
+  getUserId?: () => string | null;
   /** Consent paragraphs shown before first use. */
   consentParagraphs?: string[];
   /** App-level orb visibility (auth, hidden routes…). Default true. */
@@ -123,6 +130,7 @@ export function FiodosExpoAgent({
   registries,
   isAuthenticated,
   getUserContextText,
+  getUserId,
   consentParagraphs,
   visible = true,
   backFallbackRoute,
@@ -131,6 +139,12 @@ export function FiodosExpoAgent({
   const resolvedKey = apiKey ?? process.env.EXPO_PUBLIC_FYODOS_API_KEY;
   const resolvedUrl = baseUrl ?? process.env.EXPO_PUBLIC_FYODOS_API_URL ?? DEFAULT_API_URL;
 
+  // Live identity resolver behind a stable ref: hosts often pass an inline
+  // arrow function, which must not re-create the adapters on every render.
+  const getUserIdRef = useRef(getUserId);
+  getUserIdRef.current = getUserId;
+  const stableGetUserId = useCallback(() => getUserIdRef.current?.() ?? null, []);
+
   // Adapters + backend are stable for the lifetime of the mount.
   const stable = useMemo(() => {
     const navigation = createExpoRouterNavigationAdapter(
@@ -138,10 +152,18 @@ export function FiodosExpoAgent({
     );
     const storage = createAsyncStorageAdapter();
     const voice = createExpoVoiceAdapter({});
-    const backend = createFiodosBackendClient({ baseUrl: resolvedUrl, apiKey: resolvedKey });
-    const telemetry = createFiodosTelemetry({ baseUrl: resolvedUrl, apiKey: resolvedKey });
+    const backend = createFiodosBackendClient({
+      baseUrl: resolvedUrl,
+      apiKey: resolvedKey,
+      getUserId: stableGetUserId,
+    });
+    const telemetry = createFiodosTelemetry({
+      baseUrl: resolvedUrl,
+      apiKey: resolvedKey,
+      getUserId: stableGetUserId,
+    });
     return { navigation, storage, voice, backend, telemetry };
-  }, [resolvedUrl, resolvedKey, backFallbackRoute]);
+  }, [resolvedUrl, resolvedKey, backFallbackRoute, stableGetUserId]);
 
   const { remoteOrb, publishedVoiceActivation, ready: orbReady } = usePublishedConfig(
     resolvedUrl,
@@ -181,9 +203,10 @@ export function FiodosExpoAgent({
       telemetry: stable.telemetry,
       isAuthenticated,
       getUserContextText,
+      getUserId: stableGetUserId,
       publishedVoiceActivation: publishedVoiceActivation ?? undefined,
     }),
-    [manifest, locale, sttLocale, stable, registries, isAuthenticated, getUserContextText, publishedVoiceActivation],
+    [manifest, locale, sttLocale, stable, registries, isAuthenticated, getUserContextText, stableGetUserId, publishedVoiceActivation],
   );
 
   return (

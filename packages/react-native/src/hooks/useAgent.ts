@@ -25,10 +25,13 @@
  * - Tap decision (modal) always wins over the voice window.
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { AppState } from 'react-native';
 import {
   buildBubbleExchangeWindow,
   BUBBLE_PAGE_EXCHANGES,
   classifyConfirmationReply,
+  clearPersistedConversation,
+  conversationIdentityKey,
   conversationRetentionOptions,
   classifyStrictConfirmationReply,
   combineContexts,
@@ -134,6 +137,12 @@ export interface UseAgentResult {
   /** Collapse the bubble history back to the initial page (bubble closed). */
   resetExchangeWindow: () => void;
   cancelAll: () => void;
+  /**
+   * Wipes the CURRENT identity's conversation: live memory, panel and the
+   * persisted blob. Hook it to the app's logout for a hard wipe (by default a
+   * logout only parks the conversation under the user's private local key).
+   */
+  resetConversation: () => void;
   consentModalVisible: boolean;
   acceptConsent: () => Promise<void>;
   declineConsent: () => void;
@@ -264,33 +273,77 @@ export function useAgent({
   const [conversationEpoch, setConversationEpoch] = useState(0);
 
   // ── Conversation persistence (survives app restarts) ────────────────────────
+  // The conversation belongs to (app, identity). The identity is a LOCAL hash
+  // of the host's getUserId(); it never leaves the device. A change (login /
+  // logout / account switch) swaps the whole conversation.
+  const identityRef = useRef(conversationIdentityKey(config.getUserId?.()));
   const persistConversation = useCallback(() => {
     void persistConversationSession(
       config.storage,
       config.manifest.appId,
       conversationRef.current,
       retentionMinutesRef.current,
+      'public',
+      identityRef.current,
     );
   }, [config.storage, config.manifest.appId]);
 
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      const restored = await restoreConversationSession(config.storage, config.manifest.appId);
-      if (cancelled || !restored) return;
-      const current = conversationRef.current;
-      // Never clobber turns the user already made while the restore resolved.
-      if (current.turns.length > 0 || current.uiArchive?.length) return;
-      current.turns = restored.turns;
-      current.summary = restored.summary;
-      current.uiArchive = restored.uiArchive;
-      current.lastActivityAt = restored.lastActivityAt;
-      setConversationEpoch((n) => n + 1);
-    })();
-    return () => {
-      cancelled = true;
-    };
+  const restoreForCurrentIdentity = useCallback(async (): Promise<void> => {
+    const identityAtStart = identityRef.current;
+    const restored = await restoreConversationSession(
+      config.storage,
+      config.manifest.appId,
+      Date.now(),
+      'public',
+      identityAtStart,
+    );
+    // The identity may have changed again while the read resolved.
+    if (!restored || identityRef.current !== identityAtStart) return;
+    const current = conversationRef.current;
+    // Never clobber turns the user already made while the restore resolved.
+    if (current.turns.length > 0 || current.uiArchive?.length) return;
+    current.turns = restored.turns;
+    current.summary = restored.summary;
+    current.uiArchive = restored.uiArchive;
+    current.lastActivityAt = restored.lastActivityAt;
+    setConversationEpoch((n) => n + 1);
   }, [config.storage, config.manifest.appId]);
+
+  /**
+   * Re-evaluates the host identity and, when it changed, swaps conversations:
+   * the outgoing identity's session is saved under ITS private key (so a user
+   * who logs back in recovers it, honouring "never clear"), all in-memory
+   * state and UI are wiped, and the incoming identity's own session (usually
+   * empty) is restored. An anonymous user after a logout always starts clean —
+   * the previous user's transcript is never inherited.
+   */
+  const syncConversationIdentity = useCallback((): boolean => {
+    const next = conversationIdentityKey(config.getUserId?.());
+    if (next === identityRef.current) return false;
+    // 1. Park the outgoing identity's session under its own key.
+    persistConversation();
+    // 2. Wipe every trace from memory and the panel.
+    conversationRef.current = createConversationSession();
+    identityRef.current = next;
+    setLastExchange(null);
+    setConversationEpoch((n) => n + 1);
+    // 3. Bring in the new identity's own session, if any.
+    void restoreForCurrentIdentity();
+    return true;
+  }, [config, persistConversation, restoreForCurrentIdentity]);
+
+  useEffect(() => {
+    void restoreForCurrentIdentity();
+  }, [restoreForCurrentIdentity]);
+
+  // Logout/login usually happens on another screen: re-check identity when the
+  // app returns to the foreground, besides before every turn.
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      if (state === 'active') syncConversationIdentity();
+    });
+    return () => sub.remove();
+  }, [syncConversationIdentity]);
   /**
    * Opaque conversation/session id for analytics correlation (NEVER content).
    * Stable for this hook instance — lets the backend count distinct sessions.
@@ -419,6 +472,10 @@ export function useAgent({
         notifyError(ui.sttTooShort);
         return;
       }
+
+      // Identity gate: if the host user changed since the last turn (login,
+      // logout, account switch), swap conversations BEFORE recording anything.
+      syncConversationIdentity();
 
       setPhaseSafe('thinking');
       abortRef.current?.abort();
@@ -1479,6 +1536,26 @@ export function useAgent({
     setPhaseSafe('idle');
   }, [endConfirmationVoiceWindow, setPhaseSafe, speech, stopSpeech]);
 
+  /**
+   * Explicit reset for the CURRENT identity: aborts anything in flight and
+   * destroys both the live memory and the persisted blob. For hosts that want
+   * a logout to wipe the transcript entirely (instead of parking it under the
+   * user's private key), call this from the logout handler BEFORE the identity
+   * flips to anonymous.
+   */
+  const resetConversation = useCallback(() => {
+    cancelAll();
+    conversationRef.current = createConversationSession();
+    setLastExchange(null);
+    setConversationEpoch((n) => n + 1);
+    void clearPersistedConversation(
+      config.storage,
+      config.manifest.appId,
+      'public',
+      identityRef.current,
+    );
+  }, [cancelAll, config.storage, config.manifest.appId]);
+
   useEffect(
     () => () => {
       pendingEndRef.current = false;
@@ -1769,6 +1846,7 @@ export function useAgent({
     loadOlderExchanges,
     resetExchangeWindow,
     cancelAll,
+    resetConversation,
     consentModalVisible,
     acceptConsent,
     declineConsent,
