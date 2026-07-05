@@ -184,6 +184,17 @@ export function useAgent({
     notifyError,
     getTtsVoice,
   } = runtime;
+  // Device capability flags advertised on each turn (never user data).
+  const platformCapabilities = useCallback(() => {
+    let autofill = false;
+    try {
+      autofill = config.credentialAutofill?.isSupported() === true;
+    } catch {
+      autofill = false;
+    }
+    return autofill ? { credentialAutofill: true } : undefined;
+  }, [config.credentialAutofill]);
+
   const { voice, backend, navigation, manifest } = {
     voice: config.voice,
     backend: config.backend,
@@ -539,6 +550,7 @@ export function useAgent({
             conversationHistory: conversation.history,
             conversationSummary: conversation.summary ?? undefined,
             sessionId: sessionIdRef.current,
+            platformCapabilities: platformCapabilities(),
             ...buildManifestPayload(manifest),
           },
           { signal: controller.signal },
@@ -881,6 +893,7 @@ export function useAgent({
                   isContinuation: true,
                   chainStep: step,
                   lastStep,
+                  platformCapabilities: platformCapabilities(),
                   ...buildManifestPayload(manifest),
                 },
                 { signal: ctrl.signal },

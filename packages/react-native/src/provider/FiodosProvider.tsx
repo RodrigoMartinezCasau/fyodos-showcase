@@ -97,6 +97,7 @@ export function FiodosProvider({
       navigation: resolvedConfig.navigation,
       messages,
       isAuthenticated: resolvedConfig.isAuthenticated,
+      credentialAutofill: resolvedConfig.credentialAutofill,
     });
     const screenStore = createScreenContextStore({
       getCurrentRoute: () => resolvedConfig.navigation.getCurrentRoute(),

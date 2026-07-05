@@ -11,6 +11,7 @@ import type {
   AgentMessages,
   AppManifest,
   ConfirmationLexicon,
+  CredentialAutofillAdapter,
   MessageCatalog,
   NavigationAdapter,
   Sanitizer,
@@ -105,6 +106,15 @@ export interface FiodosAgentConfig {
   telemetry?: TelemetryAdapter;
   /** Host auth check, required by manifest actions declaring requiresAuth. */
   isAuthenticated?: () => boolean | null | undefined;
+  /**
+   * Platform saved-credential service powering the built-in SMART SIGN-IN
+   * flow. React Native has no built-in default (keychain access needs a
+   * native module): plug an adapter backed by e.g. react-native-keychain /
+   * expo-secure-store + expo-local-authentication and the orb will fill the
+   * app's login action from it (after the OS biometric prompt) instead of
+   * collecting credentials in chat.
+   */
+  credentialAutofill?: CredentialAutofillAdapter | null;
   /**
    * Host end-user identity. Conversation memory is namespaced per identity
    * (hashed LOCALLY, never sent by this module): logout/account switches swap

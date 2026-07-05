@@ -147,6 +147,10 @@ export function createFiodosBackendClient(options: FiodosBackendClientOptions): 
       if (request.sessionId?.trim()) {
         body.session_id = request.sessionId.trim();
       }
+      // Device capability flags (retrocompatible: old backends ignore them).
+      if (request.platformCapabilities?.credentialAutofill) {
+        body.platform_capabilities = { credential_autofill: true };
+      }
       // Autonomous chaining (opt-in). Older backends ignore these; older SDKs
       // never set them (retrocompatible).
       if (request.isContinuation) {
