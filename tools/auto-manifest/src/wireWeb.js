@@ -27,6 +27,8 @@ const {
   registryRelImport,
   addRegistriesToMountSource,
   addRegistriesToBootstrapSource,
+  addSessionToMountSource,
+  addSessionToBootstrapSource,
   buildEntryBootstrapBlock,
   IMPORT_NAME,
   WRAPPER_BASENAME,
@@ -499,6 +501,104 @@ function connectOrbRegistries(appRoot, opts = {}) {
   }
 }
 
+/**
+ * Third pass — connect the generated SESSION module to the mounted orb, so the
+ * agent KNOWS whether the user is signed in (requiresAuth gate) and keys the
+ * conversation memory per user. Mirrors connectOrbRegistries: idempotent,
+ * reversible, never overrides a developer-wired isAuthenticated.
+ */
+function connectOrbSession(appRoot, opts = {}) {
+  const { sessionFileAbs } = opts;
+  if (!sessionFileAbs || !fs.existsSync(sessionFileAbs)) return { status: 'no-session-file' };
+
+  const framework = detectFramework(appRoot);
+  const target = detectTarget(appRoot, framework);
+  if (!target || !target.file) return { status: 'no-target' };
+
+  const bootstrapKinds = new Set(['vue-entry', 'svelte-entry', 'sveltekit-hooks']);
+  if (bootstrapKinds.has(target.kind)) {
+    let source;
+    try {
+      source = fs.readFileSync(target.file, 'utf8');
+    } catch {
+      return { status: 'not-mounted' };
+    }
+    const importPath = registryRelImport(target.file, sessionFileAbs);
+    const fileRel = path.relative(appRoot, target.file);
+    const backups = backupFiles([target.file]);
+    try {
+      const res = addSessionToBootstrapSource(source, importPath);
+      if (!res.changed) {
+        return { status: res.reason === 'already' ? 'already' : res.reason || 'not-mounted', file: fileRel };
+      }
+      fs.writeFileSync(target.file, res.source);
+      return { status: 'connected', file: fileRel };
+    } catch (e) {
+      revertFiles(backups);
+      return { status: 'failed', file: fileRel, error: e };
+    }
+  }
+
+  const reactKinds = new Set(['vite', 'next-pages', 'next-app']);
+  if (!reactKinds.has(target.kind)) return { status: 'unsupported-framework', framework };
+
+  let mountFile = target.file;
+  if (target.kind === 'next-app') {
+    const dir = path.dirname(target.file);
+    mountFile =
+      [path.join(dir, `${WRAPPER_BASENAME}.tsx`), path.join(dir, `${WRAPPER_BASENAME}.jsx`)].find((f) =>
+        fs.existsSync(f),
+      ) || null;
+    if (!mountFile) return { status: 'not-mounted' };
+  }
+
+  let source;
+  try {
+    source = fs.readFileSync(mountFile, 'utf8');
+  } catch {
+    return { status: 'not-mounted' };
+  }
+  if (!/<FiodosAgent\b/.test(source)) return { status: 'not-mounted' };
+
+  const importPath = registryRelImport(mountFile, sessionFileAbs);
+  const fileRel = path.relative(appRoot, mountFile);
+  const backups = backupFiles([mountFile]);
+  try {
+    const res = addSessionToMountSource(source, importPath);
+    if (!res.changed) {
+      return { status: res.reason || 'not-mounted', file: fileRel };
+    }
+    fs.writeFileSync(mountFile, res.source);
+    return { status: 'connected', file: fileRel };
+  } catch (e) {
+    revertFiles(backups);
+    return { status: 'failed', file: fileRel, error: e };
+  }
+}
+
+function reportSessionConnectResult(result, colors = {}, opts = {}) {
+  const quiet = opts.quiet !== false;
+  if (!result) return;
+  const { blue, cyan, dim, reset } = colors;
+  const tag = `${cyan || ''}◉${reset || ''} ${blue || ''}Fiodos${reset || ''}`;
+  switch (result.status) {
+    case 'connected':
+      console.error(`${tag} · session connected to the orb mount (${result.file})`);
+      break;
+    case 'already':
+      if (!quiet) console.error(`${tag} · ${dim || ''}session already connected to the mount${reset || ''}`);
+      break;
+    case 'dev-wired':
+      if (!quiet) {
+        console.error(`${tag} · ${dim || ''}the mount already has its own isAuthenticated — left as is${reset || ''}`);
+      }
+      break;
+    default:
+      if (!quiet) console.error(`${tag} · ${dim || ''}session not connected to the mount (${result.status})${reset || ''}`);
+      break;
+  }
+}
+
 function reportRegistriesResult(result, colors = {}, opts = {}) {
   const quiet = opts.quiet !== false;
   if (!result) return;
@@ -530,6 +630,8 @@ module.exports = {
   reportWireResult,
   connectOrbRegistries,
   reportRegistriesResult,
+  connectOrbSession,
+  reportSessionConnectResult,
   detectFramework,
   detectTarget,
 };

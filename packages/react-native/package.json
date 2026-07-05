@@ -1,6 +1,6 @@
 {
   "name": "@fiodos/react-native",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "description": "Fiodos agent React Native bindings — orchestrator hook, UI components, navigation/voice/storage adapters and HTTP client over @fiodos/core.",
   "license": "SEE LICENSE IN LICENSE",
   "publishConfig": {
@@ -28,7 +28,7 @@
     "test": "node --import tsx --test test/*.test.ts"
   },
   "dependencies": {
-    "@fiodos/core": "^0.1.9"
+    "@fiodos/core": "^0.1.10"
   },
   "peerDependencies": {
     "@react-native-async-storage/async-storage": "*",

@@ -160,7 +160,19 @@ For EVERY action, also return a "wiring" entry describing how a separate module 
     "requiredSymbols":[{"name":"todoSignalsService","file":"src/app/.../todo-add-new-entry-form.component.ts"},{"name":"updateTodos","file":"src/app/services/todo-signals.service.ts"}] }
 - "requiredSymbols": list every identifier your "call"/"invoke"/"imports" depend on together with the file it lives in. These are verified mechanically; if any is missing, that action is flagged for review rather than wired wrong.
 - NEVER reference secrets, env vars, or network calls. Only app state/data operations.
-- The confirmation flow is enforced by the engine BEFORE your handler runs, so never add your own confirmation logic; just perform the action.`;
+- The confirmation flow is enforced by the engine BEFORE your handler runs, so never add your own confirmation logic; just perform the action.
+
+SESSION (auth awareness — how the agent KNOWS whether the user is signed in):
+Also return a top-level "session" block. This wires isAuthenticated/getUserId into the orb AUTOMATICALLY — without it every requiresAuth action is blocked and the agent cannot key conversation memory per user. Rules:
+- If the app truly has NO login/session concept (pure marketing/landing), return {"hasLogin": false, "reason": "<why>"} and nothing else.
+- Prefer "strategy": "module" when the CURRENT session state is reachable from a standalone module: an exported store (e.g. zustand: Boolean(useAuthStore.getState().user)), an exported function that reads the persisted session (e.g. Boolean(loadSession())), an exported service singleton, etc. Provide "imports" (same shape as wiring imports) and:
+  · "isAuthenticatedCall": a single JS expression that is truthy EXACTLY when a user is signed in.
+  · "userIdCall": a single JS expression returning a STABLE opaque user identifier (id or email) or null when signed out. Strongly recommended: it keys the per-user private conversation memory (hashed locally by the SDK, never sent anywhere).
+- Use "strategy": "bridge" when the session ONLY lives in component state (React context/provider value, Vue provide/inject, an Angular auth service the component injects) with no module-reachable source. Fill "bridge" exactly like an action bridge: "file" (the component that HOLDS the live session), a unique "anchor" line in the same scope, "scope", plus:
+  · "isAuthenticatedInvoke": expression valid at the anchor, truthy when signed in (e.g. Boolean(session)).
+  · "userIdInvoke": expression returning the stable id or null (e.g. session?.user?.id ?? null). Optional.
+- NEVER reference tokens, passwords or secrets — only the PRESENCE of a session and an opaque id the app already exposes.
+- "requiredSymbols" as in wiring. Everything is verified mechanically; if unverifiable, the session is honestly left for review instead of wired blind.`;
 }
 
 function buildSystemPrompt(platform, userSpec = '') {
@@ -245,6 +257,23 @@ Answer ONLY valid JSON (no markdown fences, no commentary). Start with { and end
       "requiredSymbols": [{"name": "<identifier that MUST exist>", "file": "<repo-relative file>"}],
       "bridgeReason": "<ONLY when strategy=bridge: why no module-reachable target exists>"
     }
+  },
+  "session": {
+    "hasLogin": true,
+    "strategy": "module" | "bridge",
+    "imports": [{"kind": "named"|"default"|"namespace", "name": "<local name>", "from": "<repo-relative file>"}],
+    "isAuthenticatedCall": "<MODULE only: expression truthy exactly when signed in>",
+    "userIdCall": "<MODULE only: expression returning a stable user id or null (optional)>",
+    "bridge": {
+      "file": "<BRIDGE only: component holding the live session>",
+      "scope": "statement" | "class-field",
+      "anchor": "<EXACT, UNIQUE existing line in that file, same scope as the session>",
+      "isAuthenticatedInvoke": "<expression truthy when signed in>",
+      "userIdInvoke": "<expression returning the stable id or null (optional)>",
+      "imports": []
+    },
+    "requiredSymbols": [{"name": "<identifier>", "file": "<repo-relative file>"}],
+    "reason": "<where the session lives; or with hasLogin false, why the app has no login>"
   },
   "uncertain": ["<anything you were not sure about, honestly>"]
 }`;

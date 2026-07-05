@@ -94,10 +94,14 @@ const { collectFiles } = require('./collect');
 const { resolveAnalysisRoot } = require('./resolveAnalysisRoot');
 const { analyzeWithAI, correctActionWiring, generateGuardianWithAI, DEFAULT_MODEL, resolveModel } = require('./aiAnalyze');
 const { verifyManifest } = require('./verify');
-const { wireWebOrb, reportWireResult, connectOrbRegistries, reportRegistriesResult } = require('./wireWeb');
-const { wireReactNativeOrb, reportReactNativeWire } = require('./wireReactNative');
+const {
+  wireWebOrb, reportWireResult, connectOrbRegistries, reportRegistriesResult,
+  connectOrbSession, reportSessionConnectResult,
+} = require('./wireWeb');
+const { wireReactNativeOrb, reportReactNativeWire, connectRnSession } = require('./wireReactNative');
 const { wireFlutterOrb, writeFlutterEnv, reportFlutterWire } = require('./wireFlutter');
 const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
+const { wireSession, reportSessionResult } = require('./wireSession');
 const { offerWriteEnv, printEnvManualReminder } = require('./writeEnv');
 const { scoreSurface, computeSurface } = require('./scoreSurface');
 const { buildRunRecord, writeChangeRegistry } = require('./changeRegistry');
@@ -113,6 +117,8 @@ function arg(flag, fallback) {
 const VALUE_FLAGS = new Set([
   '--out', '--model', '--max-input-tokens', '--platform', '--api-key', '--api-url',
   '--spec', '--analysis-root',
+  // from-odata (closed-software mode)
+  '--app-id', '--app-name', '--app-description', '--auth-ref', '--entities',
 ]);
 
 /**
@@ -251,6 +257,42 @@ async function withSpinner(label, work) {
 }
 
 async function main() {
+  // ── Closed-software mode: `fiodos from-odata <metadata.xml|url>` ────────────
+  // Generates the manifest from a third-party system's OData $metadata (schema,
+  // not source code), so the consent gate about code analysis does not apply.
+  {
+    const pos = positionalArgs();
+    if (pos[0] === 'from-odata') {
+      const target = pos[1];
+      if (!target) {
+        console.error('Usage: fiodos from-odata <metadata.xml | https://…/$metadata> --app-id <id> --app-name <name> [--entities a,b] [--auth-ref name] [--out dir] [--publish --api-key fyd_…]');
+        process.exit(1);
+      }
+      const { runFromOData } = require('./odata');
+      const safeName = path.basename(target).replace(/[^a-z0-9_-]/gi, '_') || 'odata';
+      const outDirOData = arg('--out', path.join(os.tmpdir(), 'fiodos', 'analysis', safeName));
+      const entitiesArg = arg('--entities', '');
+      await runFromOData({
+        target,
+        outDir: outDirOData,
+        opts: {
+          appId: arg('--app-id', `odata.${safeName}`),
+          appName: arg('--app-name', 'Third-party system'),
+          appDescription: arg('--app-description', ''),
+          authRef: arg('--auth-ref', 'default'),
+          entities: entitiesArg ? entitiesArg.split(',').map((s) => s.trim()).filter(Boolean) : [],
+          publish: process.argv.includes('--publish'),
+        },
+        io: {
+          logUser,
+          logDev,
+          publish: (manifest, meta) => publishManifest(manifest, meta),
+        },
+      });
+      return;
+    }
+  }
+
   // Consent gate: confirm before doing anything. `yes` continues; `no` (or any
   // other answer) cancels instantly — no analysis is run, the command just ends.
   const proceed = await askProceed();
@@ -353,6 +395,9 @@ async function main() {
   let provenance;
   let evidence = {};
   let wiring = {};
+  // The AI's "session" block: WHERE the app's auth/session state lives, so the
+  // orb's isAuthenticated/getUserId are wired automatically (no manual step).
+  let sessionWiring = null;
   let analysisMeta = { engine: 'auto-manifest-v3-ai-first', model: null, costUSD: 0 };
   // Signed proof returned by the hosted-analysis proxy: it tells the publish
   // step the quota was already consumed at /v1/developer/analyze (no double
@@ -410,6 +455,7 @@ async function main() {
     const proposed = parsed.manifest || {};
     evidence = parsed.evidence || {};
     wiring = parsed.wiring || {};
+    sessionWiring = parsed.session || null;
     logDev(`[ai] model=${model} proposed routes=${(proposed.routes || []).length} ` +
       `actions=${(proposed.actions || []).length} in ${(elapsedMs / 1000).toFixed(1)}s`);
     logDev(`[ai] tokens in=${usage.prompt_tokens} out=${usage.completion_tokens} cost=$${costUSD.toFixed(4)}`);
@@ -427,7 +473,7 @@ async function main() {
     logUser('Analysis complete');
 
     fs.writeFileSync(path.join(outDir, 'evidence.json'), JSON.stringify({
-      evidence, wiring, uncertain: parsed.uncertain || [],
+      evidence, wiring, session: sessionWiring, uncertain: parsed.uncertain || [],
     }, null, 2));
     fs.writeFileSync(path.join(outDir, 'usage.json'), JSON.stringify({
       model, elapsedMs, usage,
@@ -552,6 +598,7 @@ async function main() {
     let orbWireResult = null;
     let handlerWireResult = null;
     let registryWireResult = null;
+    let sessionWireResult = null;
     const { runPostWireTest } = require('./postWireTest');
     const selfCorrect = !process.argv.includes('--no-self-correct');
     // Corrections follow the same key model as the analysis: hosted (proxy)
@@ -653,6 +700,52 @@ async function main() {
         report(() => reportRegistriesResult(connected, fyodosTermColors(), { quiet: !isVerbose() }));
       }
 
+      // Third pass — SESSION wiring. Connect the orb to the app's real auth
+      // state so the agent KNOWS whether the user is signed in (requiresAuth
+      // gate) and keys conversation memory per user. Fully automatic: same AI
+      // proposal + mechanical verification + reversible edits + build safety
+      // net as handler wiring. NO manual step.
+      //   · consent: the handler-wiring "yes" covers code edits, so we reuse
+      //     it. If the developer said NO to handler wiring, we respect that
+      //     and skip session edits too.
+      if (sessionWiring && !process.argv.includes('--no-orb-wire')) {
+        const handlerDeclined =
+          handlerResult &&
+          (handlerResult.status === 'declined' || handlerResult.status === 'declined-noninteractive');
+        if (!handlerDeclined) {
+          // Only an APPLIED handler wiring proves the developer said "yes" to
+          // code edits in every path; anything else makes wireSession ask its
+          // own single [yes/no] (or decline on a non-TTY) — never edit silently.
+          const handlerConsented =
+            handlerResult &&
+            (handlerResult.status === 'applied' || handlerResult.status === 'applied-untested');
+          const sessionResult = await wireSession(analysisRoot, {
+            session: sessionWiring,
+            colors: fyodosTermColors(),
+            quiet: !isVerbose(),
+            assumeYes: assumeYes || Boolean(handlerConsented),
+            noWire,
+            framework: 'web',
+            appName: manifest.appName,
+            runTest: !process.argv.includes('--no-wire-test'),
+            testRunner: runPostWireTest,
+          });
+          sessionWireResult = sessionResult;
+          report(() => reportSessionResult(sessionResult, fyodosTermColors(), { quiet: !isVerbose() }));
+          if (
+            orbMounted &&
+            (sessionResult.status === 'applied' || sessionResult.status === 'applied-untested')
+          ) {
+            const connectedSession = connectOrbSession(analysisRoot, {
+              sessionFileAbs: sessionResult.sessionFile,
+            });
+            report(() =>
+              reportSessionConnectResult(connectedSession, fyodosTermColors(), { quiet: !isVerbose() }),
+            );
+          }
+        }
+      }
+
       // Finalize the install proof: now that the (slow) action wiring is done,
       // tell the dashboard the terminal status so its "actions connected" tick
       // turns green for real — never before wiring actually finished. Only do
@@ -720,6 +813,7 @@ async function main() {
           orbResult: orbWireResult,
           handlerResult: handlerWireResult,
           registryResult: registryWireResult,
+          sessionResult: sessionWireResult,
           envResult: envWriteResult,
         });
         const paths = writeChangeRegistry(analysisRoot, record);
@@ -739,6 +833,7 @@ async function main() {
     const noWire = process.argv.includes('--no-wire');
     let orbWireResult = null;
     let envWriteResult = null;
+    let sessionWireResult = null;
 
     await withSpinner('Publishing to your project', async ({ setLabel, pause, resume }) => {
       await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true });
@@ -769,6 +864,42 @@ async function main() {
           });
           if (proof && proof.ok === false && proof.reason !== 'no-api-key') {
             logDev(`[orb-wired] mobile install proof not recorded (${proof.status || proof.reason}); dashboard will rely on the runtime ping`);
+          }
+        }
+
+        // SESSION wiring (auth awareness) — same automatic pass as web. RN has
+        // no cheap full-build check, so the safety net is the mechanical symbol
+        // verification + the esbuild parse check on every edited file.
+        if (
+          sessionWiring &&
+          (orbWireResult.status === 'added' || orbWireResult.status === 'already')
+        ) {
+          const sessionResult = await wireSession(analysisRoot, {
+            session: sessionWiring,
+            colors: fyodosTermColors(),
+            quiet: !isVerbose(),
+            assumeYes: true, // the orb-mount consent already covered code edits on mobile
+            noWire,
+            framework: 'mobile',
+            appName: manifest.appName,
+            runTest: false,
+          });
+          sessionWireResult = sessionResult;
+          pause();
+          reportSessionResult(sessionResult, fyodosTermColors(), { quiet: !isVerbose() });
+          resume();
+          if (sessionResult.status === 'applied' || sessionResult.status === 'applied-untested') {
+            const connectedSession = connectRnSession(analysisRoot, {
+              sessionFileAbs: sessionResult.sessionFile,
+              colors: fyodosTermColors(),
+            });
+            if (connectedSession.status === 'connected') {
+              pause();
+              console.error(`${fyodosTermColors().cyan}◉${fyodosTermColors().reset} ${fyodosTermColors().blue}Fiodos${fyodosTermColors().reset} · session connected to the orb mount (${connectedSession.file})`);
+              resume();
+            } else {
+              logDev(`[session] RN mount connection: ${connectedSession.status}${connectedSession.reason ? ` (${connectedSession.reason})` : ''}`);
+            }
           }
         }
       }
@@ -805,6 +936,7 @@ async function main() {
           manifest,
           publishMeta,
           orbResult: orbWireResult,
+          sessionResult: sessionWireResult,
           envResult: envWriteResult,
         });
         const paths = writeChangeRegistry(analysisRoot, record);

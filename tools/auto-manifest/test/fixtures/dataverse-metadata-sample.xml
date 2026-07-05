@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="utf-8"?>
+<edmx:Edmx Version="4.0" xmlns:edmx="http://docs.oasis-open.org/odata/ns/edmx">
+  <edmx:DataServices>
+    <Schema Namespace="Microsoft.Dynamics.CRM" Alias="mscrm" xmlns="http://docs.oasis-open.org/odata/ns/edm">
+      <EntityType Name="account">
+        <Key>
+          <PropertyRef Name="accountid"/>
+        </Key>
+        <Property Name="accountid" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="name" Type="Edm.String" Nullable="false"/>
+        <Property Name="telephone1" Type="Edm.String"/>
+        <Property Name="revenue" Type="Edm.Decimal"/>
+        <Property Name="_ownerid_value" Type="Edm.Guid"/>
+      </EntityType>
+      <EntityType Name="opportunity">
+        <Key>
+          <PropertyRef Name="opportunityid"/>
+        </Key>
+        <Property Name="opportunityid" Type="Edm.Guid" Nullable="false"/>
+        <Property Name="name" Type="Edm.String" Nullable="false"/>
+        <Property Name="estimatedvalue" Type="Edm.Decimal"/>
+      </EntityType>
+      <Action Name="WinOpportunity" IsBound="true">
+        <Parameter Name="entity" Type="mscrm.opportunity" Nullable="false"/>
+        <Parameter Name="Status" Type="Edm.Int32" Nullable="false"/>
+        <Parameter Name="Description" Type="Edm.String"/>
+      </Action>
+      <Action Name="SendEmailReminder">
+        <Parameter Name="Subject" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="Recipient" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="DeleteAuditData">
+        <Parameter Name="EndDate" Type="Edm.String" Nullable="false"/>
+      </Action>
+      <Action Name="AddToQueue" IsBound="true">
+        <Parameter Name="entity" Type="mscrm.queue" Nullable="false"/>
+        <Parameter Name="Target" Type="mscrm.crmbaseentity" Nullable="false"/>
+      </Action>
+      <Function Name="WhoAmI">
+        <ReturnType Type="mscrm.WhoAmIResponse" Nullable="false"/>
+      </Function>
+      <Function Name="GetTimeZoneCodeByLocalizedName">
+        <Parameter Name="LocalizedStandardName" Type="Edm.String" Nullable="false"/>
+        <Parameter Name="LocaleId" Type="Edm.Int32" Nullable="false"/>
+        <ReturnType Type="mscrm.GetTimeZoneCodeByLocalizedNameResponse"/>
+      </Function>
+      <Function Name="RetrieveVersion" IsBound="true">
+        <Parameter Name="entity" Type="mscrm.account" Nullable="false"/>
+      </Function>
+      <EntityContainer Name="System">
+        <EntitySet Name="accounts" EntityType="Microsoft.Dynamics.CRM.account"/>
+        <EntitySet Name="opportunities" EntityType="Microsoft.Dynamics.CRM.opportunity"/>
+      </EntityContainer>
+    </Schema>
+  </edmx:DataServices>
+</edmx:Edmx>

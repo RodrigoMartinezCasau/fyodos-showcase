@@ -100,7 +100,7 @@ export interface FiodosExpoAgentProps {
    * screens from the manifest, custom actions are added later). */
   registries?: ActionRegistries;
   /** Host auth check for manifest actions that declare requiresAuth. */
-  isAuthenticated?: () => boolean;
+  isAuthenticated?: () => boolean | null | undefined;
   /** Stable per-user context the agent should know (in the agent's language). */
   getUserContextText?: () => string | null;
   /**

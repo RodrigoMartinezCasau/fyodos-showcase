@@ -165,6 +165,7 @@ function unwireOrb(source) {
     if (/FYODOS:ORB/.test(line)) return true; // `// …` or `{/* … */}` markers
     if (/^import\s+\{?\s*FiodosExpoAgent\b/.test(t)) return true;
     if (/^import\s+fyodosManifest\b/.test(t)) return true;
+    if (/^import\s+\{\s*fyodosIsAuthenticated\b/.test(t)) return true; // session pass import
     if (/^<FiodosExpoAgent\b[^]*>$/.test(t)) return true; // our single-line open tag
     if (/^<\/FiodosExpoAgent>$/.test(t)) return true;
     return false;
@@ -258,6 +259,56 @@ function wireReactNativeOrb(appRoot, { manifest, colors = {}, noWire = false } =
   return { status: 'added', file: layout.rel };
 }
 
+/**
+ * Connect the generated SESSION module to the wired <FiodosExpoAgent> tag:
+ * adds `isAuthenticated={fyodosIsAuthenticated}` and `getUserId={fyodosGetUserId}`
+ * plus the import. Mirrors the web mount session pass. Idempotent; never
+ * overrides a developer-wired isAuthenticated; validated with the same parse
+ * safety net as the orb wrap.
+ */
+function connectRnSession(appRoot, { sessionFileAbs, colors = {} } = {}) {
+  if (!sessionFileAbs || !fs.existsSync(sessionFileAbs)) return { status: 'no-session-file' };
+  const layout = findRootLayout(appRoot);
+  if (!layout) return { status: 'not-mounted' };
+
+  let source;
+  try {
+    source = fs.readFileSync(layout.abs, 'utf8');
+  } catch (e) {
+    return { status: 'skipped', reason: `read-failed: ${e.message}` };
+  }
+  const tagRe = /<FiodosExpoAgent\b[^>]*>/;
+  const m = source.match(tagRe);
+  if (!m) return { status: 'not-mounted' };
+  const tag = m[0];
+  if (/isAuthenticated=\{fyodosIsAuthenticated\}/.test(tag)) return { status: 'already', file: layout.rel };
+  if (/\bisAuthenticated=/.test(tag)) return { status: 'dev-wired', file: layout.rel };
+
+  let specifier = path.relative(path.dirname(layout.abs), sessionFileAbs).split(path.sep).join('/');
+  specifier = specifier.replace(/\.(tsx?|jsx?)$/, '');
+  if (!specifier.startsWith('.')) specifier = `./${specifier}`;
+
+  const newTag = tag.replace(
+    />$/,
+    ' isAuthenticated={fyodosIsAuthenticated} getUserId={fyodosGetUserId}>',
+  );
+  let next = source.replace(tag, newTag);
+  const importLine = `import { fyodosIsAuthenticated, fyodosGetUserId } from '${specifier}';`;
+  if (!next.includes(importLine)) {
+    next = insertImportsAfterLastImport(next, importLine);
+  }
+
+  if (!parsesAsTsx(next, layout.rel)) {
+    return { status: 'skipped', file: layout.rel, reason: 'session props would not parse — left untouched' };
+  }
+  try {
+    fs.writeFileSync(layout.abs, next);
+  } catch (e) {
+    return { status: 'skipped', reason: `write-failed: ${e.message}` };
+  }
+  return { status: 'connected', file: layout.rel };
+}
+
 function reportReactNativeWire(result, colors = {}, { quiet = false } = {}) {
   const { blue, cyan, dim, reset } = colors;
   if (!result) return;
@@ -271,6 +322,7 @@ function reportReactNativeWire(result, colors = {}, { quiet = false } = {}) {
 module.exports = {
   wireReactNativeOrb,
   reportReactNativeWire,
+  connectRnSession,
   // exported for tests
   buildWiredLayout,
   unwireOrb,

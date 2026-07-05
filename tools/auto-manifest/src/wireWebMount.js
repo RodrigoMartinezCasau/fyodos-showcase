@@ -83,19 +83,32 @@ function insertBlockAfterLastImport(source, block) {
 // FYODOS:ORB markers → idempotent (re-runs strip & rewrite) and reversible.
 const BOOTSTRAP_ALIAS = '__fiodosCreateAgent';
 const BOOTSTRAP_REGISTRY_EXPORT = 'fyodosGeneratedRegistries';
+// Exports of the generated session module (see wireSession.js). Connected to
+// the mount automatically so auth awareness needs NO manual step.
+const SESSION_IS_AUTH_EXPORT = 'fyodosIsAuthenticated';
+const SESSION_USER_ID_EXPORT = 'fyodosGetUserId';
 
 function buildEntryBootstrapBlock(opts = {}) {
-  const { registryImportPath } = opts;
+  const { registryImportPath, sessionImportPath } = opts;
   const lines = [];
   lines.push(ORB_SCRIPT_START);
   lines.push(`import { createFiodosAgent as ${BOOTSTRAP_ALIAS} } from '@fiodos/web-core';`);
   if (registryImportPath) {
     lines.push(`import { ${BOOTSTRAP_REGISTRY_EXPORT} } from '${registryImportPath}';`);
   }
+  if (sessionImportPath) {
+    lines.push(
+      `import { ${SESSION_IS_AUTH_EXPORT}, ${SESSION_USER_ID_EXPORT} } from '${sessionImportPath}';`,
+    );
+  }
   lines.push(`${BOOTSTRAP_ALIAS}({`);
   lines.push('  apiKey: import.meta.env.VITE_FYODOS_API_KEY,');
   lines.push('  baseUrl: import.meta.env.VITE_FYODOS_API_URL,');
   if (registryImportPath) lines.push(`  registries: ${BOOTSTRAP_REGISTRY_EXPORT},`);
+  if (sessionImportPath) {
+    lines.push(`  isAuthenticated: ${SESSION_IS_AUTH_EXPORT},`);
+    lines.push(`  getUserId: ${SESSION_USER_ID_EXPORT},`);
+  }
   lines.push('  mount: true,');
   lines.push('});');
   lines.push(ORB_SCRIPT_END);
@@ -123,8 +136,35 @@ function addRegistriesToBootstrapSource(source, registryImportPath) {
   if (/\n\s*registries:\s/.test(source.slice(source.indexOf(ORB_SCRIPT_START)))) {
     return { changed: false, source, reason: 'already' };
   }
+  // Preserve a session connection a previous pass already added to the block.
+  const sessionImportPath = extractBootstrapImportPath(source, SESSION_IS_AUTH_EXPORT);
   const stripped = stripMarkedRegion(source, ORB_SCRIPT_START, ORB_SCRIPT_END).replace(/\n{3,}$/, '\n');
-  const block = buildEntryBootstrapBlock({ registryImportPath });
+  const block = buildEntryBootstrapBlock({ registryImportPath, sessionImportPath });
+  const next = insertBlockAfterLastImport(stripped.trimEnd(), block);
+  return { changed: true, source: next.endsWith('\n') ? next : `${next}\n` };
+}
+
+// Import path of the module that exports `name` inside our bootstrap block (or null).
+function extractBootstrapImportPath(source, name) {
+  const startIdx = source.indexOf(ORB_SCRIPT_START);
+  if (startIdx === -1) return null;
+  const endIdx = source.indexOf(ORB_SCRIPT_END, startIdx);
+  const block = source.slice(startIdx, endIdx === -1 ? undefined : endIdx);
+  const m = block.match(new RegExp(`import\\s*\\{[^}]*\\b${name}\\b[^}]*\\}\\s*from\\s*['"]([^'"]+)['"]`));
+  return m ? m[1] : null;
+}
+
+// Idempotently rewrite an existing entry-bootstrap block to carry the generated
+// SESSION connection (third pass, after session wiring). Preserves the
+// registries the second pass added. Returns { changed, source, reason? }.
+function addSessionToBootstrapSource(source, sessionImportPath) {
+  if (!source.includes(ORB_SCRIPT_START)) return { changed: false, source, reason: 'not-mounted' };
+  if (/\n\s*isAuthenticated:\s/.test(source.slice(source.indexOf(ORB_SCRIPT_START)))) {
+    return { changed: false, source, reason: 'already' };
+  }
+  const registryImportPath = extractBootstrapImportPath(source, BOOTSTRAP_REGISTRY_EXPORT);
+  const stripped = stripMarkedRegion(source, ORB_SCRIPT_START, ORB_SCRIPT_END).replace(/\n{3,}$/, '\n');
+  const block = buildEntryBootstrapBlock({ registryImportPath, sessionImportPath });
   const next = insertBlockAfterLastImport(stripped.trimEnd(), block);
   return { changed: true, source: next.endsWith('\n') ? next : `${next}\n` };
 }
@@ -193,6 +233,41 @@ function addRegistriesToMountSource(source, exportName, importPath) {
   const newTag = tag.replace(/\n?[ \t]*\/>$/, `\n${propIndent}registries={${exportName}}\n${baseIndent}/>`);
   let next = source.replace(tag, newTag);
   const importLine = `import { ${exportName} } from '${importPath}';`;
+  if (!next.includes(importLine)) {
+    next = insertImportAfterLastImport(next, importLine);
+  }
+  return { changed: true, source: next };
+}
+
+// Idempotently connect the generated SESSION module to the mounted
+// <FiodosAgent/>: adds `isAuthenticated={fyodosIsAuthenticated}` and
+// `getUserId={fyodosGetUserId}` + the import. Skips (never overrides) a mount
+// where the developer already wired their own isAuthenticated. Same
+// reversibility model as addRegistriesToMountSource.
+function addSessionToMountSource(source, importPath) {
+  const tagRe = /([ \t]*)<FiodosAgent\b[\s\S]*?\/>/;
+  const m = source.match(tagRe);
+  if (!m) return { changed: false, source, reason: 'not-mounted' };
+  const tag = m[0];
+  if (new RegExp(`isAuthenticated=\\{${escapeRe(SESSION_IS_AUTH_EXPORT)}\\}`).test(tag)) {
+    return { changed: false, source, reason: 'already' };
+  }
+  if (/\bisAuthenticated=/.test(tag)) {
+    return { changed: false, source, reason: 'dev-wired' };
+  }
+  const baseIndent = m[1] || '';
+  const propMatch = tag.match(/\n([ \t]*)(?:apiKey|api-key|apiUrl|baseUrl|registries)/);
+  const propIndent = propMatch ? propMatch[1] : `${baseIndent}  `;
+  const hasUserId = /\bgetUserId=/.test(tag);
+  const props =
+    `\n${propIndent}isAuthenticated={${SESSION_IS_AUTH_EXPORT}}` +
+    (hasUserId ? '' : `\n${propIndent}getUserId={${SESSION_USER_ID_EXPORT}}`);
+  const newTag = tag.replace(/\n?[ \t]*\/>$/, `${props}\n${baseIndent}/>`);
+  let next = source.replace(tag, newTag);
+  const names = hasUserId
+    ? SESSION_IS_AUTH_EXPORT
+    : `${SESSION_IS_AUTH_EXPORT}, ${SESSION_USER_ID_EXPORT}`;
+  const importLine = `import { ${names} } from '${importPath}';`;
   if (!next.includes(importLine)) {
     next = insertImportAfterLastImport(next, importLine);
   }
@@ -601,13 +676,15 @@ function writeConsentDoc(appRoot, plan) {
     'Edits sit between `FYODOS:ORB:START` / `FYODOS:ORB:END` markers. Remove those',
     'blocks (and the Fiodos import) to revert.',
     '',
-    '## Apps with login (connect auth + screen — the only manual step)',
+    '## Apps with login (auth + identity — wired AUTOMATICALLY)',
     '',
-    'The orb runs with just `apiKey`/`apiUrl`. But only YOUR app knows whether the',
-    'user is signed in and which screen they are on, so for apps with login you',
-    'connect that in one place. Without it the agent can loop ("do you want to sign',
-    "in?\") and can't tell it already signed you in. Add these props to",
-    '`<FiodosAgent/>` (a commented scaffold is already next to the mount):',
+    'For apps with login the installer also detects WHERE your session state lives',
+    'and connects it on its own: it generates `src/fyodos/session.generated.*` and',
+    'adds `isAuthenticated={fyodosIsAuthenticated}` / `getUserId={fyodosGetUserId}`',
+    'to the mount (see `src/fyodos/FYODOS_SESSION.md`). Nothing to do by hand.',
+    '',
+    'ONLY if the installer reported it could not verify your session source (or you',
+    'want to override it), wire the props yourself:',
     '',
     '```tsx',
     '<FiodosAgent',
@@ -653,6 +730,8 @@ module.exports = {
   registryRelImport,
   addRegistriesToMountSource,
   addRegistriesToBootstrapSource,
+  addSessionToMountSource,
+  addSessionToBootstrapSource,
   buildEntryBootstrapBlock,
   IMPORT_NAME,
   WRAPPER_BASENAME,

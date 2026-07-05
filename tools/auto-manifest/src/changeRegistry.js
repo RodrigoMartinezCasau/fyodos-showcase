@@ -214,8 +214,31 @@ function summarizeEnv(result) {
   return { ...base, applied: false };
 }
 
+function summarizeSession(result) {
+  if (!result) return { status: 'skipped', applied: false };
+  const base = { status: result.status, strategy: result.strategy || null };
+  switch (result.status) {
+    case 'applied':
+    case 'applied-untested':
+      return {
+        ...base,
+        applied: true,
+        what: 'Connected the orb to the app\'s real session state (isAuthenticated/getUserId) automatically.',
+        revert: 'Delete session.generated.* and remove the FYODOS:SESSION blocks + mount props.',
+      };
+    case 'review':
+      return { ...base, applied: false, note: `Session left for review: ${result.reason || ''}` };
+    case 'reverted':
+      return { ...base, applied: false, note: `Session wiring reverted: ${result.reason || ''}` };
+    case 'no-session':
+      return { ...base, applied: false, note: 'No login detected — session wiring not needed.' };
+    default:
+      return { ...base, applied: false };
+  }
+}
+
 function collectFileEntries(appRoot, ctx) {
-  const { orbResult, handlerResult, registryResult, envResult } = ctx;
+  const { orbResult, handlerResult, registryResult, sessionResult, envResult } = ctx;
   const created = [];
   const modified = [];
   const docs = [];
@@ -289,6 +312,36 @@ function collectFileEntries(appRoot, ctx) {
       what: 'Connected `registries={fyodosGeneratedRegistries}` to the mounted orb.',
       revert: 'Remove the registries prop and its import from the orb mount.',
     });
+  }
+
+  // Session wiring (auth awareness — automatic)
+  if (
+    sessionResult &&
+    (sessionResult.status === 'applied' || sessionResult.status === 'applied-untested')
+  ) {
+    if (sessionResult.sessionFile) {
+      created.push({
+        path: normRel(appRoot, sessionResult.sessionFile),
+        phase: 'session',
+        what: 'Generated session module (`session.generated.*`): isAuthenticated/getUserId for the orb.',
+        revert: 'Safe to delete; re-run the installer to regenerate.',
+      });
+    }
+    if (sessionResult.editedFile) {
+      modified.push({
+        path: sessionResult.editedFile,
+        phase: 'session',
+        what: 'Registered the live session in the bridge (reversible FYODOS:SESSION block).',
+        revert: 'Remove the FYODOS:SESSION blocks.',
+      });
+    }
+    if (sessionResult.docPath) {
+      docs.push({
+        path: normRel(appRoot, sessionResult.docPath),
+        phase: 'session',
+        what: 'Session wiring summary: strategy, honesty contract, security notes.',
+      });
+    }
   }
 
   // Env (never record values)
@@ -379,6 +432,7 @@ function buildRunRecord(appRoot, ctx) {
       orb: summarizeOrb(ctx.orbResult),
       handlers: summarizeHandlers(ctx.handlerResult, appRoot),
       registries: summarizeRegistries(ctx.registryResult),
+      session: summarizeSession(ctx.sessionResult),
       env: summarizeEnv(ctx.envResult),
     },
     files: collectFileEntries(appRoot, ctx),

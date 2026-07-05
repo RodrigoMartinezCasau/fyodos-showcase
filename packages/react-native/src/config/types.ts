@@ -104,7 +104,7 @@ export interface FiodosAgentConfig {
   storage: StorageAdapter;
   telemetry?: TelemetryAdapter;
   /** Host auth check, required by manifest actions declaring requiresAuth. */
-  isAuthenticated?: () => boolean;
+  isAuthenticated?: () => boolean | null | undefined;
   /**
    * Host end-user identity. Conversation memory is namespaced per identity
    * (hashed LOCALLY, never sent by this module): logout/account switches swap
