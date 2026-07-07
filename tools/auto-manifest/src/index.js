@@ -403,6 +403,11 @@ async function main() {
   // step the quota was already consumed at /v1/developer/analyze (no double
   // count). Null in own-key / --no-llm mode.
   let analysisToken = null;
+  // Spec-requested content resets declared by the analysis AI: which dashboard
+  // context overrides (bubblePrompt/description/examples) the developer's
+  // --spec EXPLICITLY asked to regenerate, so the backend clears those (and
+  // ONLY those) masking overrides on publish. Null when the spec asked nothing.
+  let specResets = null;
 
   if (!useLLM) {
     // Static-only fallback: routes with mechanical naming, no actions.
@@ -456,6 +461,12 @@ async function main() {
     evidence = parsed.evidence || {};
     wiring = parsed.wiring || {};
     sessionWiring = parsed.session || null;
+    // Only meaningful when the developer passed --spec; the backend sanitizes
+    // (context fields only, real intents only) before touching any override.
+    specResets = (userSpec && parsed.specResets && typeof parsed.specResets === 'object')
+      ? parsed.specResets
+      : null;
+    if (specResets) logDev(`[ai] specResets=${JSON.stringify(specResets)}`);
     logDev(`[ai] model=${model} proposed routes=${(proposed.routes || []).length} ` +
       `actions=${(proposed.actions || []).length} in ${(elapsedMs / 1000).toFixed(1)}s`);
     logDev(`[ai] tokens in=${usage.prompt_tokens} out=${usage.completion_tokens} cost=$${costUSD.toFixed(4)}`);
@@ -570,6 +581,10 @@ async function main() {
       disabledRouteIntents: surfaceScore.disabledRouteIntents || [],
       disabledActionIntents: surfaceScore.disabledActionIntents || [],
     },
+    // Present ONLY when the developer's --spec explicitly asked to regenerate
+    // previously-edited content (e.g. "rewrite all bubble prompts"): the backend
+    // clears the matching dashboard overrides so the fresh values become live.
+    ...(specResets ? { specResets } : {}),
   };
 
   // Informative, non-blocking summary (the dashboard is where scope is managed).
@@ -1508,6 +1523,12 @@ async function publishManifest(manifest, meta, analysisToken = null, opts = {}) 
   const body = await res.json();
   if (!opts.skipSuccessLog) {
     logUser('Published to your project');
+  }
+  if (body.overridesCleared > 0) {
+    logUser(
+      `Your specifications asked to regenerate previously-edited content: ` +
+      `${body.overridesCleared} dashboard override(s) were cleared so the new values are live`,
+    );
   }
   logDev(`[publish] OK — ${body.routes} routes, ${body.actions} actions received at ${body.receivedAt}`);
 
