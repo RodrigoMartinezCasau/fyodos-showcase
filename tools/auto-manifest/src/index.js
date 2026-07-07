@@ -585,6 +585,10 @@ async function main() {
     // previously-edited content (e.g. "rewrite all bubble prompts"): the backend
     // clears the matching dashboard overrides so the fresh values become live.
     ...(specResets ? { specResets } : {}),
+    // Opt-out of the backend's continuity guard (which keeps intent ids and
+    // URL paths stable across re-analyses so dashboard customizations never
+    // break). Only for developers who explicitly want a clean slate.
+    ...(process.argv.includes('--fresh-intents') ? { freshIntents: true } : {}),
   };
 
   // Informative, non-blocking summary (the dashboard is where scope is managed).
@@ -1528,6 +1532,15 @@ async function publishManifest(manifest, meta, analysisToken = null, opts = {}) 
     logUser(
       `Your specifications asked to regenerate previously-edited content: ` +
       `${body.overridesCleared} dashboard override(s) were cleared so the new values are live`,
+    );
+  }
+  // Continuity guard feedback: the backend kept the previous intent ids /
+  // repaired degraded route paths, so dashboard customizations keep working.
+  if (body.intentsPreserved > 0 || body.pathsRepaired > 0) {
+    logUser(
+      `Continuity with your previous analysis: ${body.intentsPreserved || 0} intent id(s) kept stable` +
+      (body.pathsRepaired ? `, ${body.pathsRepaired} route path(s) repaired` : '') +
+      ` — your dashboard customizations stay intact (use --fresh-intents to opt out)`,
     );
   }
   logDev(`[publish] OK — ${body.routes} routes, ${body.actions} actions received at ${body.receivedAt}`);
