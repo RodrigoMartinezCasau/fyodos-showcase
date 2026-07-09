@@ -202,15 +202,9 @@ function useRemotePublishedConfig(pollMs = 12_000): RemotePublishedConfig {
               : null,
         });
       } catch {
-        if (!cancelled) {
-          setState({
-            enabled: true,
-            bubbleTheme: resolveBubbleTheme(null),
-            bubbleEnabled: true,
-            voiceInputEnabled: true,
-            conversationRetentionMinutes: null,
-          });
-        }
+        // Transient failure (timeout, network blip, backend redeploy…): KEEP
+        // the last-known state instead of resetting to defaults, so a long-
+        // lived app never silently reverts the published configuration.
       }
     };
     void load();
