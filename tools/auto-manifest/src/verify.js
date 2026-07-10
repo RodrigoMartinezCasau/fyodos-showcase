@@ -254,6 +254,23 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
     else delete route.actionIntents;
   }
 
+  // Escort target: keep each action's showcaseRoute fail-open. It must point
+  // at a SURVIVING, navigable route intent (never BACK); anything else —
+  // hallucinated ids, dropped routes, non-strings — is silently removed so a
+  // wrong escort can never ship (a wrong screen is worse than no escort).
+  const navigableRouteIntents = new Set(
+    dedupedRoutes.filter((r) => r.route !== 'BACK').map((r) => r.intent),
+  );
+  for (const action of dedupedActions) {
+    if (action.showcaseRoute === undefined) continue;
+    if (typeof action.showcaseRoute !== 'string' || !navigableRouteIntents.has(action.showcaseRoute)) {
+      provenance.notes.push(
+        `action '${action.intent}': showcaseRoute '${String(action.showcaseRoute)}' does not match a navigable route — removed`,
+      );
+      delete action.showcaseRoute;
+    }
+  }
+
   // Examples hygiene (fail-open): trim, dedupe and cap the enriched phrasings on
   // every surviving route and action. Never drops the item; falls back to the
   // label so the core validator's non-empty-examples rule still holds.

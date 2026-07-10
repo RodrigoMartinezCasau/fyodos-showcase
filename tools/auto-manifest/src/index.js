@@ -97,11 +97,13 @@ const { verifyManifest } = require('./verify');
 const {
   wireWebOrb, reportWireResult, connectOrbRegistries, reportRegistriesResult,
   connectOrbSession, reportSessionConnectResult,
+  connectOrbScreen, reportScreenConnectResult,
 } = require('./wireWeb');
 const { wireReactNativeOrb, reportReactNativeWire, connectRnSession } = require('./wireReactNative');
 const { wireFlutterOrb, writeFlutterEnv, reportFlutterWire } = require('./wireFlutter');
 const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
 const { wireSession, reportSessionResult } = require('./wireSession');
+const { wireScreen, reportScreenResult } = require('./wireScreen');
 const { offerWriteEnv, printEnvManualReminder } = require('./writeEnv');
 const { scoreSurface, computeSurface } = require('./scoreSurface');
 const { buildRunRecord, writeChangeRegistry } = require('./changeRegistry');
@@ -293,6 +295,20 @@ async function main() {
     }
   }
 
+  // ── Rewire-only mode: `fiodos rewire <dir>` or `fiodos <dir> --wire-only` ──
+  // Re-runs ONLY the handler wiring (verify → correct → retry, same loop as the
+  // install) from the saved artifacts of the LAST analysis. No re-analysis, no
+  // quota, no manifest publish — the repair path when some action ended up
+  // "manual" (Context/dashboard point developers here).
+  {
+    const pos = positionalArgs();
+    if (pos[0] === 'rewire' || process.argv.includes('--wire-only')) {
+      const target = pos[0] === 'rewire' ? pos[1] || '.' : pos[0] || '.';
+      await runRewireOnly(target);
+      return;
+    }
+  }
+
   // Consent gate: confirm before doing anything. `yes` continues; `no` (or any
   // other answer) cancels instantly — no analysis is run, the command just ends.
   const proceed = await askProceed();
@@ -398,6 +414,10 @@ async function main() {
   // The AI's "session" block: WHERE the app's auth/session state lives, so the
   // orb's isAuthenticated/getUserId are wired automatically (no manual step).
   let sessionWiring = null;
+  // The AI's "screen" block: whether screens are URL-driven or CLIENT STATE,
+  // and where that state lives — so the orb knows which screen the user is on
+  // even when the URL never changes (see wireScreen.js).
+  let screenWiring = null;
   let analysisMeta = { engine: 'auto-manifest-v3-ai-first', model: null, costUSD: 0 };
   // Signed proof returned by the hosted-analysis proxy: it tells the publish
   // step the quota was already consumed at /v1/developer/analyze (no double
@@ -461,6 +481,7 @@ async function main() {
     evidence = parsed.evidence || {};
     wiring = parsed.wiring || {};
     sessionWiring = parsed.session || null;
+    screenWiring = parsed.screen || null;
     // Only meaningful when the developer passed --spec; the backend sanitizes
     // (context fields only, real intents only) before touching any override.
     specResets = (userSpec && parsed.specResets && typeof parsed.specResets === 'object')
@@ -484,7 +505,7 @@ async function main() {
     logUser('Analysis complete');
 
     fs.writeFileSync(path.join(outDir, 'evidence.json'), JSON.stringify({
-      evidence, wiring, session: sessionWiring, uncertain: parsed.uncertain || [],
+      evidence, wiring, session: sessionWiring, screen: screenWiring, uncertain: parsed.uncertain || [],
     }, null, 2));
     fs.writeFileSync(path.join(outDir, 'usage.json'), JSON.stringify({
       model, elapsedMs, usage,
@@ -618,6 +639,7 @@ async function main() {
     let handlerWireResult = null;
     let registryWireResult = null;
     let sessionWireResult = null;
+    let screenWireResult = null;
     const { runPostWireTest } = require('./postWireTest');
     const selfCorrect = !process.argv.includes('--no-self-correct');
     // Corrections follow the same key model as the analysis: hosted (proxy)
@@ -765,6 +787,46 @@ async function main() {
         }
       }
 
+      // Fourth pass — SCREEN-TRUTH wiring. For apps whose screens are CLIENT
+      // STATE (a section switcher) instead of URLs, connect the active-screen
+      // state to the orb so it truly knows where the user is: per-screen
+      // bubble, "you are already there" detection and screen-scoped context.
+      // Same consent/verification/revert model as session wiring.
+      if (screenWiring && !process.argv.includes('--no-orb-wire')) {
+        const handlerDeclined =
+          handlerResult &&
+          (handlerResult.status === 'declined' || handlerResult.status === 'declined-noninteractive');
+        if (!handlerDeclined) {
+          const handlerConsented =
+            handlerResult &&
+            (handlerResult.status === 'applied' || handlerResult.status === 'applied-untested');
+          const screenResult = await wireScreen(analysisRoot, {
+            screen: screenWiring,
+            colors: fyodosTermColors(),
+            quiet: !isVerbose(),
+            assumeYes: assumeYes || Boolean(handlerConsented),
+            noWire,
+            framework: 'web',
+            appName: manifest.appName,
+            runTest: !process.argv.includes('--no-wire-test'),
+            testRunner: runPostWireTest,
+          });
+          screenWireResult = screenResult;
+          report(() => reportScreenResult(screenResult, fyodosTermColors(), { quiet: !isVerbose() }));
+          if (
+            orbMounted &&
+            (screenResult.status === 'applied' || screenResult.status === 'applied-untested')
+          ) {
+            const connectedScreen = connectOrbScreen(analysisRoot, {
+              screenFileAbs: screenResult.screenFile,
+            });
+            report(() =>
+              reportScreenConnectResult(connectedScreen, fyodosTermColors(), { quiet: !isVerbose() }),
+            );
+          }
+        }
+      }
+
       // Finalize the install proof: now that the (slow) action wiring is done,
       // tell the dashboard the terminal status so its "actions connected" tick
       // turns green for real — never before wiring actually finished. Only do
@@ -779,6 +841,7 @@ async function main() {
           actionsStatus: status,
           actionsTotal: total,
           actionsDone: done,
+          actions: actionsDetailFromHandlerResult(manifest, handlerResult),
         });
       }
     };
@@ -833,6 +896,7 @@ async function main() {
           handlerResult: handlerWireResult,
           registryResult: registryWireResult,
           sessionResult: sessionWireResult,
+          screenResult: screenWireResult,
           envResult: envWriteResult,
         });
         const paths = writeChangeRegistry(analysisRoot, record);
@@ -1563,6 +1627,7 @@ async function postOrbWired({
   actionsStatus = 'pending',
   actionsTotal = 0,
   actionsDone = 0,
+  actions = null,
 }) {
   if (!apiKey) return { ok: false, reason: 'no-api-key' };
   try {
@@ -1575,6 +1640,11 @@ async function postOrbWired({
         actionsStatus,
         actionsTotal,
         actionsDone,
+        // Per-action wiring detail (intent/status/reason). Powers the backend's
+        // "wired or nonexistent" invariant (unwired actions never reach the
+        // agent prompt) and the dashboard/Context wiring diagnosis. Older
+        // backends ignore the extra field.
+        ...(Array.isArray(actions) ? { actions } : {}),
       }),
     });
     if (res.ok) {
@@ -1587,6 +1657,210 @@ async function postOrbWired({
     logDev(`[orb-wired] skipped: ${e.message || e}`);
     return { ok: false, reason: e.message || String(e) };
   }
+}
+
+/**
+ * Rewire-only mode (`fiodos rewire <dir>` / `--wire-only`): re-run JUST the
+ * handler wiring from the saved artifacts of the last analysis (manifest.json +
+ * evidence.json in the analysis output dir). The full verify→diagnose→correct→
+ * retry loop runs again — including AI corrections — so an action that fell to
+ * "manual" in the install gets fresh attempts WITHOUT a re-analysis (no quota,
+ * no manifest publish, no orb re-mount). Ends by re-posting the per-action
+ * wiring status so the dashboard/Context see the repaired state.
+ */
+async function runRewireOnly(target) {
+  const inputRoot = path.resolve(target || '.');
+  const safeName = path.basename(inputRoot).replace(/[^a-z0-9_-]/gi, '_') || 'app';
+  const outDir = arg('--out', path.join(os.tmpdir(), 'fiodos', 'analysis', safeName));
+
+  const manifestPath = path.join(outDir, 'manifest.json');
+  const evidencePath = path.join(outDir, 'evidence.json');
+  if (!fs.existsSync(manifestPath) || !fs.existsSync(evidencePath)) {
+    logUser('No saved analysis found for this project — run a full analysis first:');
+    logUser(`  npx fiodos analyze ${target || '.'} --publish`);
+    logUser(`(looked in ${outDir}; pass --out <dir> if you analyzed with a custom output dir)`);
+    process.exitCode = 1;
+    return;
+  }
+  const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const ev = JSON.parse(fs.readFileSync(evidencePath, 'utf8'));
+  const evidence = ev.evidence || {};
+  const wiring = ev.wiring || {};
+
+  const scope = resolveAnalysisRoot(inputRoot, 'web');
+  const analysisRoot = scope.root;
+  loadAppEnv(analysisRoot);
+  const { apiKey, apiUrl } = resolveApiTarget();
+  const model = resolveModel(arg('--model', '') || DEFAULT_MODEL);
+  const assumeYes = process.argv.includes('--yes') || process.argv.includes('--wire-yes');
+  const { runPostWireTest } = require('./postWireTest');
+  const { included } = collectFiles(analysisRoot, { maxInputTokens: Number(arg('--max-input-tokens', '150000')), platform: 'web' });
+
+  const selfCorrect = !process.argv.includes('--no-self-correct');
+  const correctorUseProxy = !process.argv.includes('--own-ai-key');
+  const corrector = selfCorrect
+    ? async (args) => {
+        const { wiring: fixed } = await correctActionWiring({
+          ...args, model, platform: 'web', useProxy: correctorUseProxy, apiKey, apiUrl,
+        });
+        return fixed;
+      }
+    : null;
+
+  logUser(`Rewiring actions from the saved analysis (${manifest.actions.length} action(s), no re-analysis)…`);
+  let handlerResult = null;
+  await withSpinner(wiringSpinnerLabel('web'), async ({ pause, resume }) => {
+    if (!assumeYes) pause();
+    handlerResult = await wireHandlers(analysisRoot, {
+      manifest,
+      evidence,
+      wiring,
+      appName: manifest.appName,
+      colors: fyodosTermColors(),
+      assumeYes,
+      noWire: false,
+      quiet: !isVerbose(),
+      runTest: !process.argv.includes('--no-wire-test'),
+      revertOnFailure: true,
+      testRunner: runPostWireTest,
+      corrector,
+      files: included,
+      maxAttempts: Number(process.env.FYODOS_WIRE_MAX_ATTEMPTS || 3),
+    });
+    if (!assumeYes) resume();
+    pause();
+    reportHandlerResult(handlerResult, fyodosTermColors(), { quiet: !isVerbose() });
+    resume();
+
+    const handlerApplied =
+      handlerResult &&
+      (handlerResult.status === 'applied' || handlerResult.status === 'applied-untested') &&
+      (handlerResult.autoCount || 0) > 0 &&
+      handlerResult.registryFile;
+    if (handlerApplied) {
+      const connected = connectOrbRegistries(analysisRoot, {
+        registryFileAbs: handlerResult.registryFile,
+      });
+      pause();
+      reportRegistriesResult(connected, fyodosTermColors(), { quiet: !isVerbose() });
+      resume();
+    }
+  });
+
+  // Session + screen wiring also replay from the saved analysis (same consent
+  // model as the main flow: an APPLIED handler wiring proves the "yes").
+  const handlerConsented =
+    handlerResult &&
+    (handlerResult.status === 'applied' || handlerResult.status === 'applied-untested');
+  if (ev.session) {
+    const sessionResult = await wireSession(analysisRoot, {
+      session: ev.session,
+      colors: fyodosTermColors(),
+      quiet: !isVerbose(),
+      assumeYes: assumeYes || Boolean(handlerConsented),
+      framework: 'web',
+      appName: manifest.appName,
+      runTest: !process.argv.includes('--no-wire-test'),
+      testRunner: runPostWireTest,
+    });
+    reportSessionResult(sessionResult, fyodosTermColors(), { quiet: !isVerbose() });
+    if (sessionResult.status === 'applied' || sessionResult.status === 'applied-untested') {
+      const connectedSession = connectOrbSession(analysisRoot, {
+        sessionFileAbs: sessionResult.sessionFile,
+      });
+      reportSessionConnectResult(connectedSession, fyodosTermColors(), { quiet: !isVerbose() });
+    }
+  }
+  if (ev.screen) {
+    const screenResult = await wireScreen(analysisRoot, {
+      screen: ev.screen,
+      colors: fyodosTermColors(),
+      quiet: !isVerbose(),
+      assumeYes: assumeYes || Boolean(handlerConsented),
+      framework: 'web',
+      appName: manifest.appName,
+      runTest: !process.argv.includes('--no-wire-test'),
+      testRunner: runPostWireTest,
+    });
+    reportScreenResult(screenResult, fyodosTermColors(), { quiet: !isVerbose() });
+    if (screenResult.status === 'applied' || screenResult.status === 'applied-untested') {
+      const connectedScreen = connectOrbScreen(analysisRoot, {
+        screenFileAbs: screenResult.screenFile,
+      });
+      reportScreenConnectResult(connectedScreen, fyodosTermColors(), { quiet: !isVerbose() });
+    }
+  }
+
+  if (apiKey && handlerResult) {
+    const { status, total, done } = actionsWiredFromHandlerResult(handlerResult);
+    await postOrbWired({
+      apiKey,
+      apiUrl,
+      file: (handlerResult.registryRel || ''),
+      actionsStatus: status,
+      actionsTotal: total,
+      actionsDone: done,
+      actions: actionsDetailFromHandlerResult(manifest, handlerResult),
+    });
+  }
+  const wired = (handlerResult && handlerResult.autoCount) || 0;
+  const manual = (handlerResult && handlerResult.manualCount) || 0;
+  logUser(`Rewire finished: ${wired} action(s) wired, ${manual} still need attention.`);
+}
+
+/**
+ * Per-action wiring detail for the backend (POST /v1/developer/orb-wired).
+ * One entry per manifest action:
+ *   { intent, handler, status: 'wired'|'manual'|'link', reason?, attempts? }
+ * 'wired'  → verified and installed (the action really runs);
+ * 'manual' → could not be wired/verified — the backend EXCLUDES it from the
+ *            agent surface ("wired or nonexistent" invariant) and the
+ *            dashboard/Context can show and repair it;
+ * 'link'   → navigation/link action, needs no handler (always available).
+ * Returns null when wiring did not actually run (declined/skipped): with no
+ * verdict the backend must not filter anything.
+ */
+function actionsDetailFromHandlerResult(manifest, handlerResult) {
+  const r = handlerResult || {};
+  const ranStatuses = new Set(['applied', 'applied-untested', 'manual-only', 'reverted', 'failed']);
+  if (!ranStatuses.has(r.status)) return null;
+  const plan = r.plan || {};
+  const autoByIntent = new Map((plan.auto || []).map((e) => [e.intent, e]));
+  const reviewByIntent = new Map((plan.review || plan.manual || []).map((e) => [e.intent, e]));
+  const verifByIntent = new Map((r.verification || []).map((v) => [v.intent, v]));
+  const wholesaleFailed = r.status === 'reverted' || r.status === 'failed';
+
+  const detail = [];
+  for (const a of (manifest && manifest.actions) || []) {
+    const intent = a.intent;
+    if (a.kind === 'link') {
+      detail.push({ intent, handler: '', status: 'link' });
+      continue;
+    }
+    const verif = verifByIntent.get(intent);
+    if (!wholesaleFailed && autoByIntent.has(intent)) {
+      detail.push({
+        intent,
+        handler: a.handler || intent,
+        status: 'wired',
+        ...(verif && verif.level ? { level: verif.level } : {}),
+        ...(verif && verif.attempts ? { attempts: verif.attempts } : {}),
+      });
+      continue;
+    }
+    const rev = reviewByIntent.get(intent);
+    const reason = wholesaleFailed
+      ? `wiring ${r.status}: the combined install did not pass the build safety net`
+      : String((rev && rev.reason) || (verif && verif.error) || 'could not be wired automatically');
+    detail.push({
+      intent,
+      handler: a.handler || intent,
+      status: 'manual',
+      reason: reason.split('|')[0].replace(/\s+/g, ' ').trim().slice(0, 300),
+      ...(verif && verif.attempts ? { attempts: verif.attempts } : {}),
+    });
+  }
+  return detail;
 }
 
 // Map a wireHandlers() result to the terminal action-wiring status the backend

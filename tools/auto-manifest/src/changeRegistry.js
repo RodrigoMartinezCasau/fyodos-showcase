@@ -237,8 +237,31 @@ function summarizeSession(result) {
   }
 }
 
+function summarizeScreen(result) {
+  if (!result) return { status: 'skipped', applied: false };
+  const base = { status: result.status };
+  switch (result.status) {
+    case 'applied':
+    case 'applied-untested':
+      return {
+        ...base,
+        applied: true,
+        what: 'Connected the app\'s ACTIVE screen state to the orb (state-driven screens, no URL change).',
+        revert: 'Delete screen.generated.* and remove the FYODOS:SCREEN blocks + mount prop.',
+      };
+    case 'review':
+      return { ...base, applied: false, note: `Screen wiring left for review: ${result.reason || ''}` };
+    case 'reverted':
+      return { ...base, applied: false, note: `Screen wiring reverted: ${result.reason || ''}` };
+    case 'url-screens':
+      return { ...base, applied: false, note: 'Screens are URL-driven — no screen wiring needed.' };
+    default:
+      return { ...base, applied: false };
+  }
+}
+
 function collectFileEntries(appRoot, ctx) {
-  const { orbResult, handlerResult, registryResult, sessionResult, envResult } = ctx;
+  const { orbResult, handlerResult, registryResult, sessionResult, screenResult, envResult } = ctx;
   const created = [];
   const modified = [];
   const docs = [];
@@ -344,6 +367,36 @@ function collectFileEntries(appRoot, ctx) {
     }
   }
 
+  // Screen-truth wiring (state-driven screens — automatic)
+  if (
+    screenResult &&
+    (screenResult.status === 'applied' || screenResult.status === 'applied-untested')
+  ) {
+    if (screenResult.screenFile) {
+      created.push({
+        path: normRel(appRoot, screenResult.screenFile),
+        phase: 'screen',
+        what: 'Generated screen module (`screen.generated.*`): reports the ACTIVE screen to the orb.',
+        revert: 'Safe to delete; re-run the installer to regenerate.',
+      });
+    }
+    if (screenResult.editedFile) {
+      modified.push({
+        path: screenResult.editedFile,
+        phase: 'screen',
+        what: 'Registered the live active-screen state in the bridge (reversible FYODOS:SCREEN block).',
+        revert: 'Remove the FYODOS:SCREEN blocks.',
+      });
+    }
+    if (screenResult.docPath) {
+      docs.push({
+        path: normRel(appRoot, screenResult.docPath),
+        phase: 'screen',
+        what: 'Screen-truth wiring summary: why it was needed, honesty contract.',
+      });
+    }
+  }
+
   // Env (never record values)
   if (envResult?.status === 'written' && envResult.writePlan?.targetRel) {
     modified.push({
@@ -433,6 +486,7 @@ function buildRunRecord(appRoot, ctx) {
       handlers: summarizeHandlers(ctx.handlerResult, appRoot),
       registries: summarizeRegistries(ctx.registryResult),
       session: summarizeSession(ctx.sessionResult),
+      screen: summarizeScreen(ctx.screenResult),
       env: summarizeEnv(ctx.envResult),
     },
     files: collectFileEntries(appRoot, ctx),

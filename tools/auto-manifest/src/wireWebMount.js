@@ -87,9 +87,12 @@ const BOOTSTRAP_REGISTRY_EXPORT = 'fyodosGeneratedRegistries';
 // the mount automatically so auth awareness needs NO manual step.
 const SESSION_IS_AUTH_EXPORT = 'fyodosIsAuthenticated';
 const SESSION_USER_ID_EXPORT = 'fyodosGetUserId';
+// Export of the generated screen-truth module (see wireScreen.js). Connected
+// to the mount automatically so state-driven screen awareness needs NO manual step.
+const SCREEN_ROUTE_EXPORT = 'fyodosGetCurrentRoute';
 
 function buildEntryBootstrapBlock(opts = {}) {
-  const { registryImportPath, sessionImportPath } = opts;
+  const { registryImportPath, sessionImportPath, screenImportPath } = opts;
   const lines = [];
   lines.push(ORB_SCRIPT_START);
   lines.push(`import { createFiodosAgent as ${BOOTSTRAP_ALIAS} } from '@fiodos/web-core';`);
@@ -101,6 +104,9 @@ function buildEntryBootstrapBlock(opts = {}) {
       `import { ${SESSION_IS_AUTH_EXPORT}, ${SESSION_USER_ID_EXPORT} } from '${sessionImportPath}';`,
     );
   }
+  if (screenImportPath) {
+    lines.push(`import { ${SCREEN_ROUTE_EXPORT} } from '${screenImportPath}';`);
+  }
   lines.push(`${BOOTSTRAP_ALIAS}({`);
   lines.push('  apiKey: import.meta.env.VITE_FYODOS_API_KEY,');
   lines.push('  baseUrl: import.meta.env.VITE_FYODOS_API_URL,');
@@ -109,6 +115,7 @@ function buildEntryBootstrapBlock(opts = {}) {
     lines.push(`  isAuthenticated: ${SESSION_IS_AUTH_EXPORT},`);
     lines.push(`  getUserId: ${SESSION_USER_ID_EXPORT},`);
   }
+  if (screenImportPath) lines.push(`  getCurrentRoute: ${SCREEN_ROUTE_EXPORT},`);
   lines.push('  mount: true,');
   lines.push('});');
   lines.push(ORB_SCRIPT_END);
@@ -136,10 +143,11 @@ function addRegistriesToBootstrapSource(source, registryImportPath) {
   if (/\n\s*registries:\s/.test(source.slice(source.indexOf(ORB_SCRIPT_START)))) {
     return { changed: false, source, reason: 'already' };
   }
-  // Preserve a session connection a previous pass already added to the block.
+  // Preserve session/screen connections previous passes already added.
   const sessionImportPath = extractBootstrapImportPath(source, SESSION_IS_AUTH_EXPORT);
+  const screenImportPath = extractBootstrapImportPath(source, SCREEN_ROUTE_EXPORT);
   const stripped = stripMarkedRegion(source, ORB_SCRIPT_START, ORB_SCRIPT_END).replace(/\n{3,}$/, '\n');
-  const block = buildEntryBootstrapBlock({ registryImportPath, sessionImportPath });
+  const block = buildEntryBootstrapBlock({ registryImportPath, sessionImportPath, screenImportPath });
   const next = insertBlockAfterLastImport(stripped.trimEnd(), block);
   return { changed: true, source: next.endsWith('\n') ? next : `${next}\n` };
 }
@@ -163,8 +171,25 @@ function addSessionToBootstrapSource(source, sessionImportPath) {
     return { changed: false, source, reason: 'already' };
   }
   const registryImportPath = extractBootstrapImportPath(source, BOOTSTRAP_REGISTRY_EXPORT);
+  const screenImportPath = extractBootstrapImportPath(source, SCREEN_ROUTE_EXPORT);
   const stripped = stripMarkedRegion(source, ORB_SCRIPT_START, ORB_SCRIPT_END).replace(/\n{3,}$/, '\n');
-  const block = buildEntryBootstrapBlock({ registryImportPath, sessionImportPath });
+  const block = buildEntryBootstrapBlock({ registryImportPath, sessionImportPath, screenImportPath });
+  const next = insertBlockAfterLastImport(stripped.trimEnd(), block);
+  return { changed: true, source: next.endsWith('\n') ? next : `${next}\n` };
+}
+
+// Idempotently rewrite an existing entry-bootstrap block to carry the generated
+// SCREEN-TRUTH connection (fourth pass, after screen wiring). Preserves the
+// registries and session earlier passes added. Returns { changed, source, reason? }.
+function addScreenToBootstrapSource(source, screenImportPath) {
+  if (!source.includes(ORB_SCRIPT_START)) return { changed: false, source, reason: 'not-mounted' };
+  if (/\n\s*getCurrentRoute:\s/.test(source.slice(source.indexOf(ORB_SCRIPT_START)))) {
+    return { changed: false, source, reason: 'already' };
+  }
+  const registryImportPath = extractBootstrapImportPath(source, BOOTSTRAP_REGISTRY_EXPORT);
+  const sessionImportPath = extractBootstrapImportPath(source, SESSION_IS_AUTH_EXPORT);
+  const stripped = stripMarkedRegion(source, ORB_SCRIPT_START, ORB_SCRIPT_END).replace(/\n{3,}$/, '\n');
+  const block = buildEntryBootstrapBlock({ registryImportPath, sessionImportPath, screenImportPath });
   const next = insertBlockAfterLastImport(stripped.trimEnd(), block);
   return { changed: true, source: next.endsWith('\n') ? next : `${next}\n` };
 }
@@ -268,6 +293,36 @@ function addSessionToMountSource(source, importPath) {
     ? SESSION_IS_AUTH_EXPORT
     : `${SESSION_IS_AUTH_EXPORT}, ${SESSION_USER_ID_EXPORT}`;
   const importLine = `import { ${names} } from '${importPath}';`;
+  if (!next.includes(importLine)) {
+    next = insertImportAfterLastImport(next, importLine);
+  }
+  return { changed: true, source: next };
+}
+
+// Idempotently connect the generated SCREEN-TRUTH module to the mounted
+// <FiodosAgent/>: adds `getCurrentRoute={fyodosGetCurrentRoute}` + the import.
+// Skips (never overrides) a mount where the developer already wired their own
+// getCurrentRoute. Same reversibility model as addSessionToMountSource.
+function addScreenToMountSource(source, importPath) {
+  const tagRe = /([ \t]*)<FiodosAgent\b[\s\S]*?\/>/;
+  const m = source.match(tagRe);
+  if (!m) return { changed: false, source, reason: 'not-mounted' };
+  const tag = m[0];
+  if (new RegExp(`getCurrentRoute=\\{${escapeRe(SCREEN_ROUTE_EXPORT)}\\}`).test(tag)) {
+    return { changed: false, source, reason: 'already' };
+  }
+  if (/\bgetCurrentRoute=/.test(tag)) {
+    return { changed: false, source, reason: 'dev-wired' };
+  }
+  const baseIndent = m[1] || '';
+  const propMatch = tag.match(/\n([ \t]*)(?:apiKey|api-key|apiUrl|baseUrl|registries)/);
+  const propIndent = propMatch ? propMatch[1] : `${baseIndent}  `;
+  const newTag = tag.replace(
+    /\n?[ \t]*\/>$/,
+    `\n${propIndent}getCurrentRoute={${SCREEN_ROUTE_EXPORT}}\n${baseIndent}/>`,
+  );
+  let next = source.replace(tag, newTag);
+  const importLine = `import { ${SCREEN_ROUTE_EXPORT} } from '${importPath}';`;
   if (!next.includes(importLine)) {
     next = insertImportAfterLastImport(next, importLine);
   }
@@ -732,6 +787,8 @@ module.exports = {
   addRegistriesToBootstrapSource,
   addSessionToMountSource,
   addSessionToBootstrapSource,
+  addScreenToMountSource,
+  addScreenToBootstrapSource,
   buildEntryBootstrapBlock,
   IMPORT_NAME,
   WRAPPER_BASENAME,

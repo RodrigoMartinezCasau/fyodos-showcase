@@ -35,6 +35,7 @@ AppManifest (all fields required unless noted):
     "preconditions": string (what must be true to run it, in words — e.g. "the cart must have at least one item"; empty string if none),
     "effect": string (what happens AFTER it runs — the result/outcome the user perceives),
     "relatedIntents": string[] (intents that commonly follow or pair with this one — flows; [] if none),
+    "showcaseRoute": string (OPTIONAL: the intent of the ONE route where this action's EFFECT is VISIBLE to the user — the screen a shop assistant would walk the customer to after doing it, e.g. add_to_cart → the cart screen, change_theme → the settings/appearance screen. Use an exact route intent id from "routes". OMIT when the effect is visible everywhere/on the current screen (e.g. a global color change, logout) or when no single screen clearly shows it. The client executes the action FIRST and then best-effort navigates here; it never gates execution),
     "requireConfirmation": boolean,
     "confirmationMessageTemplate": string (REQUIRED if requireConfirmation true),
     "parameters": { "<name>": {"type": "string"|"number"|"boolean", "required": boolean, "description": string (non-empty)} },
@@ -172,7 +173,19 @@ Also return a top-level "session" block. This wires isAuthenticated/getUserId in
   · "isAuthenticatedInvoke": expression valid at the anchor, truthy when signed in (e.g. Boolean(session)).
   · "userIdInvoke": expression returning the stable id or null (e.g. session?.user?.id ?? null). Optional.
 - NEVER reference tokens, passwords or secrets — only the PRESENCE of a session and an opaque id the app already exposes.
-- "requiredSymbols" as in wiring. Everything is verified mechanically; if unverifiable, the session is honestly left for review instead of wired blind.`;
+- "requiredSymbols" as in wiring. Everything is verified mechanically; if unverifiable, the session is honestly left for review instead of wired blind.
+
+SCREEN TRUTH (how the agent KNOWS which screen the user is on):
+Also return a top-level "screen" block. The orb resolves "where is the user" from the URL (pathname) — that only works when navigation actually changes the URL. Decide by reading the code HOW this app switches screens:
+- If every screen/section change updates the URL (a real router: react-router / next / vue-router / SvelteKit navigation…), return {"kind": "url", "reason": "<the router you saw>"} and nothing else.
+- If some or all screens are switched through CLIENT STATE with NO URL change (a useState/store "section"/"tab"/"view" switcher rendered conditionally, e.g. const [section, setSection] = useState('home') with {section === 'stats' && <Stats/>}), return "kind": "state" and fill "bridge" exactly like a session bridge:
+  · "file": the component that OWNS the active-screen state.
+  · "scope": "statement" | "class-field" (same rules as action bridges).
+  · "anchor": an EXACT, UNIQUE existing line in the same scope where that state is readable.
+  · "screenInvoke": a JS expression valid at the anchor evaluating to the CURRENT screen/section KEY (the raw state value, e.g. section, activeTab, this.currentView — never a translated label).
+  · "imports": usually [] (same shape as bridge imports).
+- "requiredSymbols" as in wiring. Verified mechanically; unverifiable → honestly left for review, never wired blind.
+This is what powers per-screen bubbles, "you are already on that screen" detection and screen-scoped context in state-driven apps — without it the orb is blind to screen changes that never touch the URL.`;
 }
 
 function buildSystemPrompt(platform, userSpec = '') {
@@ -192,7 +205,8 @@ ACTIONS: things a user could trigger by voice. ${actionHintLine} CRITICAL RULES:
 - Every action MUST be backed by a REAL function you can see in the provided code. Set "handler" to that real function's name exactly as written in the code.
 - DO NOT invent actions that "apps like this usually have". If you cannot point to the code, leave it out. A hallucinated action is worse than a missed one: it fails in production in front of the user.
 - State can live anywhere: Zustand stores, React Context providers (look for createContext / useReducer / useState exposed via provider value), service modules. Read them all.
-- Skip pure UI plumbing (toggling pickers, onChange of inputs, sheet open/close).
+- CONFIGURATION CONTROLS ARE ACTIONS: visible settings the user can change — a color picker, theme/appearance selector, language switcher, visibility/feature toggles, size/volume sliders — are REAL actions whenever a real function/setter COMMITS the value (persists it or changes what the app renders), e.g. setOrbColor(color), patchWorkspace({ color }), setTheme('dark'). Emit them with the value as a voice parameter (e.g. color: string) so the user can say "change the color to blue" from anywhere. Missing these makes the assistant useless on settings screens.
+- Skip pure UI plumbing AROUND those controls: opening/closing the picker or sheet, hover/focus states, the per-keystroke onChange of a text input. Rule of thumb: if the interaction COMMITS a value the app remembers or renders differently, it is an action; if it only reveals another control, it is plumbing.
 - Destructive/sensitive operations (delete data, logout, place/cancel orders, spend money) need requireConfirmation + confirmationMessageTemplate.
 - "parameters" only when the user must supply a value by voice.
 
@@ -214,6 +228,7 @@ This is the context the agent reads to understand the app, so it can reason inst
 - preconditions: state the code requires before it has an effect (e.g. a non-empty cart, an active order, a signed-in user). Empty string if none.
 - effect: the observable outcome after it runs (state change, navigation, message).
 - relatedIntents: other manifest intents this naturally flows into or from (e.g. add-to-cart → checkout). Use the exact intent ids; [] if none.
+- showcaseRoute: the route intent of the ONE screen where the action's effect becomes visible (add_to_cart → cart screen; create_report → reports list). Read the handler: which screen renders the state it mutates? Omit when the effect is global/visible in place (theme color, logout) or ambiguous. This powers the "escort" UX — action first, then the app walks the user to the result — so precision matters more than coverage: a wrong screen is worse than none.
 - route description: what the screen displays and what can be done there.
 - route actionIntents: for each screen, the intents of the actions whose handlers are actually wired into THAT screen's component/page (what the user can DO there). Use exact action intent ids; omit or [] when the screen is purely informational/navigational. This is "what you can do here" context — it never restricts the agent.
 - route bubblePrompt: a SHORT, PROACTIVE, sales-driven CTA (in the app's language, ~6 words max) the assistant shows beside the orb on THAT screen to push the user toward the single MOST VALUABLE action available there — never a passive description. For commerce/consumer screens, sell the concrete action: a menu → "¿Qué pizza te apetece?", a cart → "¿Finalizar tu compra?", a room listing → "¿Reservamos tu habitación?". For internal/business software, push the key operational action: a reports screen → "¿Creamos el informe?", a staff list → "¿Filtramos por equipo?". Make it distinct per screen and grounded in what the user does there; it is end-user copy with a vendor's instinct, not a description. Omit when nothing natural fits.
@@ -274,6 +289,18 @@ Answer ONLY valid JSON (no markdown fences, no commentary). Start with { and end
     },
     "requiredSymbols": [{"name": "<identifier>", "file": "<repo-relative file>"}],
     "reason": "<where the session lives; or with hasLogin false, why the app has no login>"
+  },
+  "screen": {
+    "kind": "url" | "state",
+    "bridge": {
+      "file": "<STATE only: component owning the active-screen state>",
+      "scope": "statement" | "class-field",
+      "anchor": "<EXACT, UNIQUE existing line in that file, same scope as the state>",
+      "screenInvoke": "<expression evaluating to the CURRENT screen/section key>",
+      "imports": []
+    },
+    "requiredSymbols": [{"name": "<identifier>", "file": "<repo-relative file>"}],
+    "reason": "<how this app switches screens>"
   },
   "uncertain": ["<anything you were not sure about, honestly>"]
 }`;

@@ -468,12 +468,78 @@ function buildAiEntry({ appRoot, fyodosDirRel, base, aiW, manifestParams }) {
 }
 
 /**
+ * MECHANICAL ANCHOR RESCUE — the fix for the dominant wiring failure class
+ * ("the insertion point in '<file>' is ambiguous / not found").
+ *
+ * The AI's anchor only needs to locate the RIGHT COMPONENT SCOPE: the actual
+ * insertion goes before the nearest JSX `return` (see insertRegisterBlock), so
+ * when the AI picks a line that appears several times in a big file we do not
+ * have to give up. We derive a deterministic anchor ourselves: the line where
+ * one of the identifiers the `invoke` expression CALLS/READS is DECLARED
+ * (`const [x, setX] = useState(...)`, `function foo(`, `const foo =`, a class
+ * field, …). Declarations are unique per scope in real code, and anchoring on
+ * the declaration guarantees the registration lands in the scope where the
+ * symbol is visible. Correctness is still gated by the same compile-regression
+ * + effect-probe verification as every other wiring — this only replaces the
+ * "reject" with a better, mechanical candidate.
+ */
+function deriveBridgeAnchor(content, invoke) {
+  const src = stripLiterals(String(invoke || ''));
+  // Identifiers the invoke CALLS first (most specific), then everything it reads.
+  const ordered = [];
+  const pushId = (id) => {
+    if (!id || id === 'args' || id === 'this') return;
+    if (JS_KEYWORDS.has(id) || SAFE_GLOBALS.has(id)) return;
+    if (!ordered.includes(id)) ordered.push(id);
+  };
+  let m;
+  const callRe = /(?:^|[^.\w$])([A-Za-z_$][\w$]*)\s*\(/g;
+  while ((m = callRe.exec(src))) pushId(m[1]);
+  for (const id of freeIdentifiers(invoke)) pushId(id);
+
+  for (const id of ordered) {
+    // Full LINES that look like a declaration of `id` in the file.
+    const lineRe = new RegExp(
+      `^[ \\t]*(?:export\\s+)?(?:const|let|var|function|async\\s+function|private|public|protected|readonly)\\b[^\\n]*(?:^|[^.\\w$])${esc(id)}(?![\\w$])[^\\n]*$`,
+      'gm',
+    );
+    const decls = [];
+    while ((m = lineRe.exec(content))) decls.push(m[0]);
+    // Exactly ONE declaration line, and that line must be unique as a substring
+    // (so indexOf-based insertion is deterministic and idempotent).
+    if (decls.length === 1 && countOccurrences(content, decls[0]) === 1) {
+      return decls[0];
+    }
+  }
+  return null;
+}
+
+/**
+ * True when an anchor that appears several times is HARMLESS: every occurrence
+ * resolves to the same actual insertion point (the nearest JSX `return`), so
+ * the ambiguity cannot change where the registration lands.
+ */
+function ambiguousAnchorSameInsertion(content, anchor) {
+  const points = new Set();
+  let idx = content.indexOf(anchor);
+  while (idx !== -1) {
+    points.add(nearestJsxReturn(content, idx));
+    if (points.size > 1) return false;
+    idx = content.indexOf(anchor, idx + anchor.length);
+  }
+  // A single resolved point that exists (-1 = no JSX return found → not safe).
+  return points.size === 1 && !points.has(-1);
+}
+
+/**
  * Verify the AI's BRIDGE proposal for ONE action. A bridge edits the user's own
  * component (under consent) to register the live, in-scope function/instance so
  * the standalone registry can reach component-local state. The verifier confirms
  * the edit can be applied SAFELY and that nothing is fabricated:
- *   · the component file exists and the anchor line is present EXACTLY once
- *     (so the insertion point is unambiguous and idempotent),
+ *   · the component file exists and the anchor resolves to ONE unambiguous
+ *     insertion point — when the AI's anchor is missing/ambiguous, a mechanical
+ *     anchor is derived from the declaration of the invoked symbol (see
+ *     deriveBridgeAnchor) instead of giving up,
  *   · every requiredSymbol exists in the code,
  *   · `invoke` does not create a detached `new Service()` instance,
  *   · every identifier `invoke` reads is `args`/`this`, a safe global, an import
@@ -483,7 +549,7 @@ function buildAiEntry({ appRoot, fyodosDirRel, base, aiW, manifestParams }) {
 function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
   const b = aiW.bridge || {};
   const file = normRel(b.file);
-  const anchor = String(b.anchor || '').trim();
+  let anchor = String(b.anchor || '').trim();
   const invoke = String(b.invoke || '').trim();
   const why = aiW.bridgeReason ? ` (${aiW.bridgeReason})` : '';
 
@@ -491,11 +557,29 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
   const content = readFileSafe(appRoot, file);
   if (content == null) return { reason: `could not read the component '${file}' to apply the bridge` };
   if (!invoke) return { reason: `the AI did not provide the bridge 'invoke' expression for '${file}'` };
-  if (!anchor) return { reason: `the AI did not provide an insertion anchor in '${file}'` };
 
-  const occ = countOccurrences(content, anchor);
-  if (occ === 0) return { reason: `no safe insertion point was found in '${file}' — wire this action manually` };
-  if (occ > 1) return { reason: `the insertion point in '${file}' is ambiguous — wire this action manually` };
+  // Anchor resolution ladder: exact-unique AI anchor → harmless-ambiguous AI
+  // anchor → mechanically derived declaration anchor → review. The old behavior
+  // (reject on 0/>1 occurrences) left real, wireable actions "manual" whenever
+  // the AI picked a repeated line in a big file.
+  let anchorDerived = false;
+  const occ = anchor ? countOccurrences(content, anchor) : 0;
+  if (occ !== 1) {
+    const scope = b.scope === 'class-field' ? 'class-field' : 'statement';
+    if (occ > 1 && scope === 'statement' && ambiguousAnchorSameInsertion(content, anchor)) {
+      // Keep the AI anchor: every occurrence lands on the same insertion point.
+    } else {
+      const derived = deriveBridgeAnchor(content, invoke);
+      if (derived) {
+        anchor = derived;
+        anchorDerived = true;
+      } else if (!anchor || occ === 0) {
+        return { reason: `no safe insertion point was found in '${file}' — wire this action manually` };
+      } else {
+        return { reason: `the insertion point in '${file}' is ambiguous — wire this action manually` };
+      }
+    }
+  }
 
   // requiredSymbols must really exist.
   const required = Array.isArray(aiW.requiredSymbols) ? aiW.requiredSymbols : [];
@@ -1854,6 +1938,8 @@ module.exports = {
   findExportedFunction,
   findStoreMethod,
   mapParams,
+  deriveBridgeAnchor,
+  ambiguousAnchorSameInsertion,
   // shared with wireSession (same verification + injection machinery)
   fileHasSymbol,
   freeIdentifiers,

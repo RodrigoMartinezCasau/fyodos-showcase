@@ -61,6 +61,7 @@ const {
   buildBridgeModule,
   insertImportBlock,
   insertRegisterBlock,
+  deriveBridgeAnchor,
 } = require('./wireHandlers');
 
 const SESSION_BASENAME = 'session.generated';
@@ -153,7 +154,7 @@ function prepareSessionPlan({ appRoot, session, fyodosDirRel }) {
   if (session.strategy === 'bridge') {
     const b = session.bridge || {};
     const file = normRel(b.file);
-    const anchor = String(b.anchor || '').trim();
+    let anchor = String(b.anchor || '').trim();
     const isAuthInvoke = String(b.isAuthenticatedInvoke || '').trim();
     const userIdInvoke = String(b.userIdInvoke || '').trim() || null;
 
@@ -161,12 +162,19 @@ function prepareSessionPlan({ appRoot, session, fyodosDirRel }) {
     const content = readFileSafe(appRoot, file);
     if (content == null) return { reason: `could not read the component '${file}'` };
     if (!isAuthInvoke) return { reason: `no isAuthenticated expression was provided for '${file}'` };
-    if (!anchor) return { reason: `no insertion anchor was provided in '${file}'` };
     // The anchor must be unique in the file WITHOUT counting our own previous
-    // insertions (idempotent re-runs).
-    const occ = countOccurrences(stripSessionBlocks(content), anchor);
-    if (occ === 0) return { reason: `no safe insertion point was found in '${file}'` };
-    if (occ > 1) return { reason: `the insertion anchor appears ${occ} times in '${file}'; it is ambiguous` };
+    // insertions (idempotent re-runs). When the AI's anchor is missing or
+    // ambiguous, derive a deterministic one from the declaration of the symbol
+    // the invoke reads (same rescue as handler bridges) instead of giving up —
+    // safety is still guaranteed by the compile check + revert below.
+    const cleanContent = stripSessionBlocks(content);
+    const occ = anchor ? countOccurrences(cleanContent, anchor) : 0;
+    if (occ !== 1) {
+      const derived = deriveBridgeAnchor(cleanContent, isAuthInvoke);
+      if (derived) anchor = derived;
+      else if (!anchor || occ === 0) return { reason: `no safe insertion point was found in '${file}'` };
+      else return { reason: `the insertion anchor appears ${occ} times in '${file}'; it is ambiguous` };
+    }
 
     const v = verifyImports({ appRoot, rawImports: b.imports, importBaseDirRel: path.dirname(file) });
     if (v.reason) return v;

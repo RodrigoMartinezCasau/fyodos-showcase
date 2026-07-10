@@ -29,6 +29,8 @@ const {
   addRegistriesToBootstrapSource,
   addSessionToMountSource,
   addSessionToBootstrapSource,
+  addScreenToMountSource,
+  addScreenToBootstrapSource,
   buildEntryBootstrapBlock,
   IMPORT_NAME,
   WRAPPER_BASENAME,
@@ -576,6 +578,104 @@ function connectOrbSession(appRoot, opts = {}) {
   }
 }
 
+/**
+ * Fourth pass — connect the generated SCREEN-TRUTH module to the mounted orb,
+ * so the agent knows WHICH SCREEN the user is on even when screens are client
+ * state instead of URLs. Mirrors connectOrbSession: idempotent, reversible,
+ * never overrides a developer-wired getCurrentRoute.
+ */
+function connectOrbScreen(appRoot, opts = {}) {
+  const { screenFileAbs } = opts;
+  if (!screenFileAbs || !fs.existsSync(screenFileAbs)) return { status: 'no-screen-file' };
+
+  const framework = detectFramework(appRoot);
+  const target = detectTarget(appRoot, framework);
+  if (!target || !target.file) return { status: 'no-target' };
+
+  const bootstrapKinds = new Set(['vue-entry', 'svelte-entry', 'sveltekit-hooks']);
+  if (bootstrapKinds.has(target.kind)) {
+    let source;
+    try {
+      source = fs.readFileSync(target.file, 'utf8');
+    } catch {
+      return { status: 'not-mounted' };
+    }
+    const importPath = registryRelImport(target.file, screenFileAbs);
+    const fileRel = path.relative(appRoot, target.file);
+    const backups = backupFiles([target.file]);
+    try {
+      const res = addScreenToBootstrapSource(source, importPath);
+      if (!res.changed) {
+        return { status: res.reason === 'already' ? 'already' : res.reason || 'not-mounted', file: fileRel };
+      }
+      fs.writeFileSync(target.file, res.source);
+      return { status: 'connected', file: fileRel };
+    } catch (e) {
+      revertFiles(backups);
+      return { status: 'failed', file: fileRel, error: e };
+    }
+  }
+
+  const reactKinds = new Set(['vite', 'next-pages', 'next-app']);
+  if (!reactKinds.has(target.kind)) return { status: 'unsupported-framework', framework };
+
+  let mountFile = target.file;
+  if (target.kind === 'next-app') {
+    const dir = path.dirname(target.file);
+    mountFile =
+      [path.join(dir, `${WRAPPER_BASENAME}.tsx`), path.join(dir, `${WRAPPER_BASENAME}.jsx`)].find((f) =>
+        fs.existsSync(f),
+      ) || null;
+    if (!mountFile) return { status: 'not-mounted' };
+  }
+
+  let source;
+  try {
+    source = fs.readFileSync(mountFile, 'utf8');
+  } catch {
+    return { status: 'not-mounted' };
+  }
+  if (!/<FiodosAgent\b/.test(source)) return { status: 'not-mounted' };
+
+  const importPath = registryRelImport(mountFile, screenFileAbs);
+  const fileRel = path.relative(appRoot, mountFile);
+  const backups = backupFiles([mountFile]);
+  try {
+    const res = addScreenToMountSource(source, importPath);
+    if (!res.changed) {
+      return { status: res.reason || 'not-mounted', file: fileRel };
+    }
+    fs.writeFileSync(mountFile, res.source);
+    return { status: 'connected', file: fileRel };
+  } catch (e) {
+    revertFiles(backups);
+    return { status: 'failed', file: fileRel, error: e };
+  }
+}
+
+function reportScreenConnectResult(result, colors = {}, opts = {}) {
+  const quiet = opts.quiet !== false;
+  if (!result) return;
+  const { blue, cyan, dim, reset } = colors;
+  const tag = `${cyan || ''}◉${reset || ''} ${blue || ''}Fiodos${reset || ''}`;
+  switch (result.status) {
+    case 'connected':
+      console.error(`${tag} · screen truth connected to the orb mount (${result.file})`);
+      break;
+    case 'already':
+      if (!quiet) console.error(`${tag} · ${dim || ''}screen truth already connected to the mount${reset || ''}`);
+      break;
+    case 'dev-wired':
+      if (!quiet) {
+        console.error(`${tag} · ${dim || ''}the mount already has its own getCurrentRoute — left as is${reset || ''}`);
+      }
+      break;
+    default:
+      if (!quiet) console.error(`${tag} · ${dim || ''}screen truth not connected to the mount (${result.status})${reset || ''}`);
+      break;
+  }
+}
+
 function reportSessionConnectResult(result, colors = {}, opts = {}) {
   const quiet = opts.quiet !== false;
   if (!result) return;
@@ -632,6 +732,8 @@ module.exports = {
   reportRegistriesResult,
   connectOrbSession,
   reportSessionConnectResult,
+  connectOrbScreen,
+  reportScreenConnectResult,
   detectFramework,
   detectTarget,
 };

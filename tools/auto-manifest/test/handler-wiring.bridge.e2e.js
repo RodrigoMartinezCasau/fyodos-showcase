@@ -49,6 +49,14 @@ async function main() {
     `  function addItem(title) { items.push(title); return { count: items.length }; }\n` +
     `  // FYODOS_ANCHOR_POINT\n` +
     `  return { items, addItem };\n` +
+    `}\n` +
+    `export function otherComponent() {\n` +
+    `  const dupFn = () => 1;\n` +
+    `  return { dupFn };\n` +
+    `}\n` +
+    `export function anotherComponent() {\n` +
+    `  const dupFn = () => 2;\n` +
+    `  return { dupFn };\n` +
     `}\n`;
   fs.writeFileSync(path.join(appRoot, 'package.json'), JSON.stringify({ name: 'tmp', type: 'module' }));
   fs.writeFileSync(path.join(appRoot, componentRel), componentSrc);
@@ -57,7 +65,8 @@ async function main() {
     appName: 'bridge-fixture',
     actions: [
       { intent: 'add_item', handler: 'add_item', label: 'Add item', parameters: { title: { type: 'string', required: true } } },
-      { intent: 'bad_anchor', handler: 'bad_anchor', label: 'Bad anchor', parameters: {} },
+      { intent: 'bad_anchor', handler: 'bad_anchor', label: 'Bad anchor', parameters: { title: { type: 'string', required: true } } },
+      { intent: 'unrescuable_anchor', handler: 'unrescuable_anchor', label: 'Unrescuable anchor', parameters: {} },
       { intent: 'detached_new', handler: 'detached_new', label: 'Detached', parameters: {} },
       { intent: 'ghost', handler: 'ghost', label: 'Ghost symbol', parameters: {} },
     ],
@@ -71,11 +80,19 @@ async function main() {
       bridge: { file: componentRel, anchor: '// FYODOS_ANCHOR_POINT', invoke: 'addItem(args.title)' },
       requiredSymbols: [{ name: 'addItem', file: componentRel }],
     },
-    // BAD: anchor not in file → cannot place safely.
+    // RESCUED: anchor not in file, but the invoked symbol has ONE unambiguous
+    // declaration → a mechanical anchor is derived instead of giving up.
     bad_anchor: {
       strategy: 'bridge',
       bridge: { file: componentRel, anchor: '// THIS_ANCHOR_DOES_NOT_EXIST', invoke: 'addItem(args.title)' },
       requiredSymbols: [{ name: 'addItem', file: componentRel }],
+    },
+    // BAD: anchor not in file AND the invoked symbol is declared TWICE, so no
+    // mechanical anchor can be derived → review (never guess between scopes).
+    unrescuable_anchor: {
+      strategy: 'bridge',
+      bridge: { file: componentRel, anchor: '// THIS_ANCHOR_DOES_NOT_EXIST', invoke: 'dupFn(args.x)' },
+      requiredSymbols: [{ name: 'dupFn', file: componentRel }],
     },
     // BAD: detached new instance (would not affect UI).
     detached_new: {
@@ -91,17 +108,26 @@ async function main() {
     },
   };
 
-  section('1) Planning the wiring (good bridge auto, adversarial → review)');
+  section('1) Planning the wiring (good + rescued bridges auto, adversarial → review)');
   const plan = prepareHandlerPlan({ appRoot, manifest, evidence, wiring, fyodosDirRel });
   const autoIntents = plan.auto.map((e) => e.intent);
   const reviewIntents = plan.review.map((e) => e.intent);
   console.log('  auto   :', autoIntents.join(', ') || '(none)');
   console.log('  review :', reviewIntents.join(', ') || '(none)');
-  assert.deepStrictEqual(autoIntents, ['add_item'], 'only the good bridge should be auto-wired');
-  assert.ok(reviewIntents.includes('bad_anchor'), 'absent anchor must go to review');
+  assert.deepStrictEqual(
+    autoIntents,
+    ['add_item', 'bad_anchor'],
+    'the good bridge AND the anchor-rescued bridge should be auto-wired',
+  );
+  const rescued = plan.auto.find((e) => e.intent === 'bad_anchor');
+  assert.ok(
+    rescued.bridge.anchor.includes('function addItem'),
+    'the rescued anchor must be the invoked symbol\'s declaration line',
+  );
+  assert.ok(reviewIntents.includes('unrescuable_anchor'), 'ambiguous declaration must go to review');
   assert.ok(reviewIntents.includes('detached_new'), 'detached new() must go to review');
   assert.ok(reviewIntents.includes('ghost'), 'unknown symbol must go to review');
-  console.log('  PASS — exactly the safe bridge is wired');
+  console.log('  PASS — exactly the safe bridges are wired (incl. mechanical anchor rescue)');
 
   section('2) Applying: bridge holder + registry + edit INSIDE the component');
   fs.writeFileSync(path.join(appRoot, 'bridge.js'), buildBridgeModule({ ts: false, esm: true }));
