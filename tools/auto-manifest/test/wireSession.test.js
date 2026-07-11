@@ -180,6 +180,56 @@ function testBridgeNeverSharesHandlerMarkers() {
   console.log('PASS session edits never destroy handler bridge blocks (separate markers)');
 }
 
+// ── Session capabilities (Eje B audience map) ──────────────────────────────────
+
+function testModuleCapabilitiesVerifiedIndividually() {
+  const root = scaffoldModuleApp();
+  const session = {
+    ...moduleSessionBlock,
+    capabilities: [
+      { name: 'has_payment_method', call: 'Boolean(loadSession()?.paymentMethods?.length)' },
+      { name: 'is_admin', call: 'Boolean(getGhostRole())' }, // hallucinated → dropped alone
+      { name: 'BadName!', call: 'Boolean(loadSession())' }, // invalid name → dropped
+    ],
+  };
+  const res = prepareSessionPlan({ appRoot: root, session, fyodosDirRel: 'src/fyodos' });
+  assert.ok(res.plan, `plan expected, got: ${res.reason}`);
+  assert.deepStrictEqual(
+    res.plan.capabilities.map((c) => c.name),
+    ['has_payment_method'],
+    'only the verifiable capability survives',
+  );
+  assert.strictEqual(res.plan.capabilityNotes.length, 2, 'each dropped capability leaves an honest note');
+  assert.ok(res.plan.capabilityNotes.some((n) => /is_admin/.test(n)), 'names the hallucinated one');
+
+  const src = buildSessionModule(res.plan, { ts: true, esm: true });
+  assert.ok(src.includes('export function fyodosGetSessionCapabilities(): Record<string, boolean> | null'), 'caps export');
+  assert.ok(src.includes('caps["has_payment_method"] = Boolean('), 'reads the real conditional');
+  assert.ok(!src.includes('getGhostRole'), 'the dropped capability never reaches the generated code');
+  assert.ok(!src.includes('caps["is_admin"]'), 'no entry is generated for the dropped flag');
+  console.log('PASS module capabilities are verified individually (one bad flag never costs the rest)');
+}
+
+function testBridgeCapabilitiesRegistered() {
+  const root = scaffoldBridgeApp();
+  const session = {
+    ...bridgeSessionBlock,
+    bridge: { ...bridgeSessionBlock.bridge },
+    capabilities: [{ name: 'has_profile', invoke: 'Boolean(session?.profile)' }],
+  };
+  const { plan } = prepareSessionPlan({ appRoot: root, session, fyodosDirRel: 'src/fyodos' });
+  assert.ok(plan, 'bridge plan with capabilities verifies');
+  assert.deepStrictEqual(plan.bridge.capabilities.map((c) => c.name), ['has_profile']);
+  const edit = planSessionComponentEdit(root, plan);
+  applySessionComponentEdit(root, edit);
+  const out = fs.readFileSync(path.join(root, 'src/context/AuthProvider.tsx'), 'utf8');
+  assert.ok(
+    out.includes('"__fyodos_capabilities": () => ({ "has_profile": Boolean(Boolean(session?.profile)) })'),
+    'live capabilities registered through the bridge',
+  );
+  console.log('PASS bridge capabilities are registered next to the live session');
+}
+
 // ── End-to-end wireSession (module strategy) + mount connection ────────────────
 
 function scaffoldMountedViteApp() {
@@ -198,7 +248,10 @@ function scaffoldMountedViteApp() {
 async function testWireSessionEndToEnd() {
   const { root, main } = scaffoldMountedViteApp();
   const res = await wireSession(root, {
-    session: moduleSessionBlock,
+    session: {
+      ...moduleSessionBlock,
+      capabilities: [{ name: 'has_payment_method', call: 'Boolean(loadSession()?.paymentMethods?.length)' }],
+    },
     assumeYes: true,
     quiet: true,
     appName: 'Demo',
@@ -213,7 +266,13 @@ async function testWireSessionEndToEnd() {
   assert.ok(/isAuthenticated=\{fyodosIsAuthenticated\}/.test(out), 'isAuthenticated prop added');
   assert.ok(/getUserId=\{fyodosGetUserId\}/.test(out), 'getUserId prop added');
   assert.ok(
-    /import \{ fyodosIsAuthenticated, fyodosGetUserId \} from '\.\/fyodos\/session\.generated'/.test(out),
+    /getSessionCapabilities=\{fyodosGetSessionCapabilities\}/.test(out),
+    'capabilities prop added (the generated module exports it)',
+  );
+  assert.ok(
+    /import \{ fyodosIsAuthenticated, fyodosGetUserId, fyodosGetSessionCapabilities \} from '\.\/fyodos\/session\.generated'/.test(
+      out,
+    ),
     'session import added',
   );
 
@@ -278,6 +337,8 @@ async function main() {
   testBridgeCodegenReadsBridge();
   testBridgeEditAppliedAndIdempotent();
   testBridgeNeverSharesHandlerMarkers();
+  testModuleCapabilitiesVerifiedIndividually();
+  testBridgeCapabilitiesRegistered();
   await testWireSessionEndToEnd();
   testMountNeverOverridesDevWiring();
   testBootstrapSessionPreservesRegistries();

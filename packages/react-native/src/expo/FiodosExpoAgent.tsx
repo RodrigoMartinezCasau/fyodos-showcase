@@ -101,6 +101,12 @@ export interface FiodosExpoAgentProps {
   registries?: ActionRegistries;
   /** Host auth check for manifest actions that declare requiresAuth. */
   isAuthenticated?: () => boolean | null | undefined;
+  /**
+   * Fine-grained session capability flags (audience map, e.g.
+   * { has_payment_method: true }). Boolean flags only; sent with each turn so
+   * the orb shows this user only THEIR available actions.
+   */
+  getSessionCapabilities?: () => Record<string, boolean> | null | undefined;
   /** Stable per-user context the agent should know (in the agent's language). */
   getUserContextText?: () => string | null;
   /**
@@ -129,6 +135,7 @@ export function FiodosExpoAgent({
   sttLocale,
   registries,
   isAuthenticated,
+  getSessionCapabilities,
   getUserContextText,
   getUserId,
   consentParagraphs,
@@ -202,11 +209,12 @@ export function FiodosExpoAgent({
       storage: stable.storage,
       telemetry: stable.telemetry,
       isAuthenticated,
+      getSessionCapabilities,
       getUserContextText,
       getUserId: stableGetUserId,
       publishedVoiceActivation: publishedVoiceActivation ?? undefined,
     }),
-    [manifest, locale, sttLocale, stable, registries, isAuthenticated, getUserContextText, stableGetUserId, publishedVoiceActivation],
+    [manifest, locale, sttLocale, stable, registries, isAuthenticated, getSessionCapabilities, getUserContextText, stableGetUserId, publishedVoiceActivation],
   );
 
   return (

@@ -45,4 +45,18 @@ for (const platform of ['web', 'mobile']) {
   console.log(`PASS ${platform} prompt requests the screen block`);
 }
 
+// 4. Audience map (Eje B): who sees each screen/action + session capabilities.
+assertHas(schema, '"audience": "public" | "authenticated"', 'schema documents audience');
+assertHas(schema, 'requiredCapabilities', 'schema documents requiredCapabilities');
+for (const platform of ['web', 'mobile']) {
+  const prompt = buildSystemPrompt(platform);
+  assertHas(prompt, 'AUDIENCE MAP', `${platform}: audience-map section`);
+  assertHas(prompt, 'VISIBILITY', `${platform}: audience is visibility, not the execution lock`);
+  assertHas(prompt, 'requiredCapabilities', `${platform}: fine-grained capabilities rule`);
+  assertHas(prompt, 'has_payment_method', `${platform}: names the saved-card example`);
+  assertHas(prompt, '"capabilities"', `${platform}: session block exposes live capability flags`);
+  assertHas(prompt, 'Booleans only', `${platform}: capabilities carry no user data`);
+  console.log(`PASS ${platform} prompt requests the audience map`);
+}
+
 console.log('ALL analyzer.coverage tests passed');

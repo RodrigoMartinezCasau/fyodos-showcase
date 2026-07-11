@@ -271,6 +271,42 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
     }
   }
 
+  // Audience map (fail-open): only the two known values survive; anything else
+  // is dropped so an invalid claim can never HIDE a capability from a user.
+  // 'public' is the implicit default, so it is normalized away (absent = public).
+  // requiredCapabilities become a deduped list of short snake_case names; a
+  // malformed list is dropped entirely (a bogus capability must never hide an
+  // action behind a flag no session will ever report).
+  for (const item of [...dedupedRoutes, ...dedupedActions]) {
+    if (item.audience !== undefined && item.audience !== 'authenticated') {
+      if (item.audience !== 'public') {
+        provenance.notes.push(
+          `'${item.intent}': audience '${String(item.audience)}' is not public/authenticated — removed`,
+        );
+      }
+      delete item.audience;
+    }
+  }
+  for (const action of dedupedActions) {
+    if (action.requiredCapabilities === undefined) continue;
+    const caps = Array.isArray(action.requiredCapabilities)
+      ? [
+          ...new Set(
+            action.requiredCapabilities
+              .filter((c) => typeof c === 'string' && /^[a-z][a-z0-9_]{0,63}$/.test(c.trim()))
+              .map((c) => c.trim()),
+          ),
+        ].slice(0, 8)
+      : [];
+    if (caps.length > 0) action.requiredCapabilities = caps;
+    else {
+      provenance.notes.push(
+        `action '${action.intent}': requiredCapabilities had no valid snake_case names — removed`,
+      );
+      delete action.requiredCapabilities;
+    }
+  }
+
   // Examples hygiene (fail-open): trim, dedupe and cap the enriched phrasings on
   // every surviving route and action. Never drops the item; falls back to the
   // label so the core validator's non-empty-examples rule still holds.

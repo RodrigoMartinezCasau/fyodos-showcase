@@ -195,6 +195,35 @@ export function useAgent({
     return autofill ? { credentialAutofill: true } : undefined;
   }, [config.credentialAutofill]);
 
+  // Live session verdict for audience filtering (never user data). Fresh per
+  // turn so login/logout mid-session is honest; undefined when the host wired
+  // no session source (backend then filters nothing — today's behavior).
+  const sessionContext = useCallback(() => {
+    const { isAuthenticated, getSessionCapabilities } = config;
+    if (!isAuthenticated && !getSessionCapabilities) return undefined;
+    let authenticated: boolean | null = null;
+    try {
+      const v = isAuthenticated?.();
+      authenticated = v == null ? null : Boolean(v);
+    } catch {
+      authenticated = null;
+    }
+    let capabilities: Record<string, boolean> | undefined;
+    try {
+      const raw = getSessionCapabilities?.();
+      if (raw && typeof raw === 'object') {
+        const clean: Record<string, boolean> = {};
+        for (const [k, v] of Object.entries(raw)) {
+          if (typeof v === 'boolean') clean[k] = v;
+        }
+        if (Object.keys(clean).length > 0) capabilities = clean;
+      }
+    } catch {
+      capabilities = undefined;
+    }
+    return { authenticated, ...(capabilities ? { capabilities } : {}) };
+  }, [config]);
+
   const { voice, backend, navigation, manifest } = {
     voice: config.voice,
     backend: config.backend,
@@ -551,6 +580,7 @@ export function useAgent({
             conversationSummary: conversation.summary ?? undefined,
             sessionId: sessionIdRef.current,
             platformCapabilities: platformCapabilities(),
+            sessionContext: sessionContext(),
             ...buildManifestPayload(manifest),
           },
           { signal: controller.signal },
@@ -894,6 +924,7 @@ export function useAgent({
                   chainStep: step,
                   lastStep,
                   platformCapabilities: platformCapabilities(),
+                  sessionContext: sessionContext(),
                   ...buildManifestPayload(manifest),
                 },
                 { signal: ctrl.signal },

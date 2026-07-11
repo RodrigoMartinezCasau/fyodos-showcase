@@ -513,6 +513,17 @@ function connectOrbSession(appRoot, opts = {}) {
   const { sessionFileAbs } = opts;
   if (!sessionFileAbs || !fs.existsSync(sessionFileAbs)) return { status: 'no-session-file' };
 
+  // Only connect the capability getter when the generated module actually
+  // exports it — referencing a missing export would break the app's build.
+  let sessionHasCapabilities = false;
+  try {
+    sessionHasCapabilities = fs
+      .readFileSync(sessionFileAbs, 'utf8')
+      .includes('fyodosGetSessionCapabilities');
+  } catch {
+    sessionHasCapabilities = false;
+  }
+
   const framework = detectFramework(appRoot);
   const target = detectTarget(appRoot, framework);
   if (!target || !target.file) return { status: 'no-target' };
@@ -529,7 +540,7 @@ function connectOrbSession(appRoot, opts = {}) {
     const fileRel = path.relative(appRoot, target.file);
     const backups = backupFiles([target.file]);
     try {
-      const res = addSessionToBootstrapSource(source, importPath);
+      const res = addSessionToBootstrapSource(source, importPath, { sessionHasCapabilities });
       if (!res.changed) {
         return { status: res.reason === 'already' ? 'already' : res.reason || 'not-mounted', file: fileRel };
       }
@@ -566,7 +577,7 @@ function connectOrbSession(appRoot, opts = {}) {
   const fileRel = path.relative(appRoot, mountFile);
   const backups = backupFiles([mountFile]);
   try {
-    const res = addSessionToMountSource(source, importPath);
+    const res = addSessionToMountSource(source, importPath, { sessionHasCapabilities });
     if (!res.changed) {
       return { status: res.reason || 'not-mounted', file: fileRel };
     }

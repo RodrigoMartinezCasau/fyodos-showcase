@@ -124,4 +124,68 @@ test('verify keeps action.showcaseRoute fail-open', () => {
   assert.equal(byIntent.undo.showcaseRoute, undefined);
 });
 
+// Audience map (Eje B): only 'authenticated' survives ('public' is the implicit
+// default and is normalized away; junk values are dropped so an invalid claim
+// can never hide a capability). requiredCapabilities keep only valid snake_case
+// names; a list with none is removed entirely.
+test('verify sanitizes audience and requiredCapabilities fail-open', () => {
+  const manifest = {
+    appId: 'app',
+    appName: 'App',
+    version: '1',
+    routes: [
+      { intent: 'account', route: '/account', label: 'Account', examples: ['account'], audience: 'authenticated' },
+      { intent: 'home', route: '/', label: 'Home', examples: ['home'], audience: 'public' },
+      { intent: 'junk', route: '/junk', label: 'Junk', examples: ['junk'], audience: 'members-only' },
+    ],
+    actions: [
+      {
+        intent: 'buy_one_click',
+        label: 'Buy in one click',
+        category: 'order',
+        handler: 'buyNow',
+        requireConfirmation: true,
+        confirmationMessageTemplate: 'Buy?',
+        parameters: {},
+        examples: ['buy'],
+        audience: 'authenticated',
+        requiredCapabilities: ['has_payment_method', 'Bad Name!', 'has_payment_method'],
+      },
+      {
+        intent: 'subscribe',
+        label: 'Subscribe',
+        category: 'account',
+        handler: 'subscribe',
+        requireConfirmation: false,
+        parameters: {},
+        examples: ['subscribe'],
+        requiredCapabilities: ['***'], // nothing valid → field removed
+      },
+    ],
+    policies: { requireConfirmationForDestructive: true, allowedWithoutAuth: [], contextRetentionTurns: 5 },
+  };
+  const evidence = {
+    routes: {},
+    actions: {
+      buy_one_click: { file: 'shop.ts', symbol: 'buyNow' },
+      subscribe: { file: 'shop.ts', symbol: 'subscribe' },
+    },
+  };
+  const sentFiles = [
+    { rel: 'shop.ts', content: 'export function buyNow() {}\nexport function subscribe() {}' },
+  ];
+
+  const { manifest: out } = verifyManifest(manifest, evidence, sentFiles, [], { verifyRoutes: false });
+
+  const routes = Object.fromEntries(out.routes.map((r) => [r.intent, r]));
+  assert.equal(routes.account.audience, 'authenticated');
+  assert.equal(routes.home.audience, undefined, "explicit 'public' normalizes away (it is the default)");
+  assert.equal(routes.junk.audience, undefined, 'junk audience values are dropped');
+
+  const actions = Object.fromEntries(out.actions.map((a) => [a.intent, a]));
+  assert.equal(actions.buy_one_click.audience, 'authenticated');
+  assert.deepEqual(actions.buy_one_click.requiredCapabilities, ['has_payment_method']);
+  assert.equal(actions.subscribe.requiredCapabilities, undefined);
+});
+
 console.log('ALL verify.actionIntents tests passed');

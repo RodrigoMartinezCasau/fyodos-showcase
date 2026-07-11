@@ -151,6 +151,16 @@ export function createFiodosBackendClient(options: FiodosBackendClientOptions): 
       if (request.platformCapabilities?.credentialAutofill) {
         body.platform_capabilities = { credential_autofill: true };
       }
+      // Live session verdict for audience filtering (retrocompatible: absent
+      // when the host wired no session source; old backends ignore it).
+      if (request.sessionContext) {
+        body.session_context = {
+          authenticated: request.sessionContext.authenticated,
+          ...(request.sessionContext.capabilities
+            ? { capabilities: request.sessionContext.capabilities }
+            : {}),
+        };
+      }
       // Autonomous chaining (opt-in). Older backends ignore these; older SDKs
       // never set them (retrocompatible).
       if (request.isContinuation) {

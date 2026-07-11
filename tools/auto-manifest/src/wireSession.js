@@ -68,8 +68,15 @@ const SESSION_BASENAME = 'session.generated';
 const DOC_BASENAME = 'FYODOS_SESSION.md';
 const IS_AUTH_EXPORT = 'fyodosIsAuthenticated';
 const USER_ID_EXPORT = 'fyodosGetUserId';
+const CAPS_EXPORT = 'fyodosGetSessionCapabilities';
 const BRIDGE_IS_AUTH = '__fyodos_is_authenticated';
 const BRIDGE_USER_ID = '__fyodos_user_id';
+const BRIDGE_CAPABILITIES = '__fyodos_capabilities';
+
+// Capability flags are short snake_case names ("has_payment_method"). Anything
+// else is dropped: a malformed name could never match the manifest's
+// requiredCapabilities anyway, so wiring it would be dead weight.
+const CAPABILITY_NAME_RE = /^[a-z][a-z0-9_]{0,63}$/;
 
 // Session edits carry their OWN markers: wireHandlers' stripFiodosBlocks
 // removes every FYODOS:BRIDGE block in a file, so if the session registration
@@ -130,10 +137,45 @@ function verifyExpr({ expr, importedNames, extraOk = new Set(), what }) {
 }
 
 /**
+ * Verify the AI's fine-grained session capabilities (Eje B audience map:
+ * "has_payment_method", "is_admin"…) INDIVIDUALLY: a hallucinated capability
+ * is dropped with an honest note while the rest of the session wiring still
+ * applies — one bad flag must never cost the whole auth awareness.
+ * Returns { caps: [{ name, expr }], notes: [reason...] }.
+ */
+function verifyCapabilities({ rawCapabilities, exprKey, importedNames, extraOk = new Set() }) {
+  const caps = [];
+  const notes = [];
+  const seen = new Set();
+  for (const c of Array.isArray(rawCapabilities) ? rawCapabilities : []) {
+    const name = String((c && c.name) || '').trim();
+    const expr = String((c && c[exprKey]) || '').trim();
+    if (!CAPABILITY_NAME_RE.test(name)) {
+      notes.push(`capability '${name || '(unnamed)'}' dropped: not a short snake_case name`);
+      continue;
+    }
+    if (seen.has(name)) continue;
+    if (!expr) {
+      notes.push(`capability '${name}' dropped: no '${exprKey}' expression was provided`);
+      continue;
+    }
+    const err = verifyExpr({ expr, importedNames, extraOk, what: `capability '${name}'` });
+    if (err) {
+      notes.push(`capability '${name}' dropped: ${err}`);
+      continue;
+    }
+    seen.add(name);
+    caps.push({ name, expr });
+  }
+  return { caps: caps.slice(0, 8), notes };
+}
+
+/**
  * Turn the AI's `session` block into a verified plan, or { reason }.
  * Plan shapes:
- *   { strategy:'module', imports, isAuthExpr, userIdExpr|null }
- *   { strategy:'bridge', bridge:{ file, anchor, scope, imports, isAuthInvoke, userIdInvoke|null } }
+ *   { strategy:'module', imports, isAuthExpr, userIdExpr|null, capabilities, capabilityNotes }
+ *   { strategy:'bridge', bridge:{ file, anchor, scope, imports, isAuthInvoke, userIdInvoke|null,
+ *     capabilities }, capabilityNotes }
  */
 function prepareSessionPlan({ appRoot, session, fyodosDirRel }) {
   if (!session || typeof session !== 'object') return { reason: 'no session block' };
@@ -181,18 +223,30 @@ function prepareSessionPlan({ appRoot, session, fyodosDirRel }) {
 
     // Identifiers must be in-file, imported, args-free locals or safe globals.
     const inFileOk = new Set();
-    for (const expr of [isAuthInvoke, userIdInvoke].filter(Boolean)) {
+    const capExprs = (Array.isArray(session.capabilities) ? session.capabilities : [])
+      .map((c) => String((c && c.invoke) || '').trim())
+      .filter(Boolean);
+    for (const expr of [isAuthInvoke, userIdInvoke, ...capExprs].filter(Boolean)) {
       for (const id of freeIdentifiers(expr)) {
         if (fileHasSymbol(appRoot, file, id)) inFileOk.add(id);
       }
+    }
+    for (const expr of [isAuthInvoke, userIdInvoke].filter(Boolean)) {
       const err = verifyExpr({ expr, importedNames: v.importedNames, extraOk: inFileOk, what: 'session' });
       if (err) return { reason: `${err} — in '${file}'` };
     }
+    const capsV = verifyCapabilities({
+      rawCapabilities: session.capabilities,
+      exprKey: 'invoke',
+      importedNames: v.importedNames,
+      extraOk: inFileOk,
+    });
 
     return {
       plan: {
         strategy: 'bridge',
         reason: String(session.reason || ''),
+        capabilityNotes: capsV.notes,
         bridge: {
           file,
           anchor,
@@ -200,6 +254,7 @@ function prepareSessionPlan({ appRoot, session, fyodosDirRel }) {
           imports: v.imports,
           isAuthInvoke,
           userIdInvoke,
+          capabilities: capsV.caps,
           importPathToBridge: relImport(path.dirname(file), path.join(fyodosDirRel, BRIDGE_BASENAME)),
         },
       },
@@ -217,6 +272,11 @@ function prepareSessionPlan({ appRoot, session, fyodosDirRel }) {
     const err = verifyExpr({ expr, importedNames: v.importedNames, what: 'session' });
     if (err) return { reason: err };
   }
+  const capsV = verifyCapabilities({
+    rawCapabilities: session.capabilities,
+    exprKey: 'call',
+    importedNames: v.importedNames,
+  });
 
   return {
     plan: {
@@ -225,6 +285,8 @@ function prepareSessionPlan({ appRoot, session, fyodosDirRel }) {
       imports: v.imports,
       isAuthExpr,
       userIdExpr,
+      capabilities: capsV.caps,
+      capabilityNotes: capsV.notes,
     },
   };
 }
@@ -248,6 +310,8 @@ function buildSessionModule(plan, opts = {}) {
   const esm = opts.esm !== false;
   const boolRet = ts ? ': boolean | null' : '';
   const strRet = ts ? ': string | null' : '';
+  const capsRet = ts ? ': Record<string, boolean> | null' : '';
+  const capsDecl = ts ? ': Record<string, boolean>' : '';
 
   const L = [];
   L.push(
@@ -290,6 +354,27 @@ function buildSessionModule(plan, opts = {}) {
     L.push('    return null;');
     L.push('  }');
     L.push('}');
+    L.push('');
+    L.push('/**');
+    L.push(' * Fine-grained session capability flags (audience map: has_payment_method,');
+    L.push(' * is_admin…). null = UNKNOWN — the orb then filters NOTHING (fail-open).');
+    L.push(' * Boolean flags only; never counts, names or any user data.');
+    L.push(' */');
+    L.push(`export function ${CAPS_EXPORT}()${capsRet} {`);
+    L.push('  try {');
+    L.push(`    const fn = getFiodosBridge()[${JSON.stringify(BRIDGE_CAPABILITIES)}];`);
+    L.push("    if (typeof fn !== 'function') return null;");
+    L.push('    const raw = fn();');
+    L.push("    if (!raw || typeof raw !== 'object') return null;");
+    L.push(`    const caps${capsDecl} = {};`);
+    L.push('    for (const k of Object.keys(raw)) {');
+    L.push("      if (typeof raw[k] === 'boolean') caps[k] = raw[k];");
+    L.push('    }');
+    L.push('    return Object.keys(caps).length > 0 ? caps : null;');
+    L.push('  } catch {');
+    L.push('    return null;');
+    L.push('  }');
+    L.push('}');
   } else {
     for (const imp of plan.imports || []) L.push(importLine(imp, esm));
     if ((plan.imports || []).length) L.push('');
@@ -318,9 +403,33 @@ function buildSessionModule(plan, opts = {}) {
       L.push('  return null;');
     }
     L.push('}');
+    L.push('');
+    L.push('/**');
+    L.push(' * Fine-grained session capability flags (audience map: has_payment_method,');
+    L.push(' * is_admin…). null = UNKNOWN — the orb then filters NOTHING (fail-open).');
+    L.push(' * Boolean flags only; never counts, names or any user data.');
+    L.push(' */');
+    L.push(`export function ${CAPS_EXPORT}()${capsRet} {`);
+    const moduleCaps = Array.isArray(plan.capabilities) ? plan.capabilities : [];
+    if (moduleCaps.length > 0) {
+      L.push(`  const caps${capsDecl} = {};`);
+      for (const c of moduleCaps) {
+        // Each flag is isolated: one throwing read stays UNKNOWN (omitted)
+        // instead of blanking every other capability.
+        L.push('  try {');
+        L.push(`    caps[${JSON.stringify(c.name)}] = Boolean(${c.expr});`);
+        L.push('  } catch {');
+        L.push('    /* unknown — omitted (fail-open) */');
+        L.push('  }');
+      }
+      L.push('  return Object.keys(caps).length > 0 ? caps : null;');
+    } else {
+      L.push('  return null;');
+    }
+    L.push('}');
   }
   L.push('');
-  if (!esm) L.push(`module.exports = { ${IS_AUTH_EXPORT}, ${USER_ID_EXPORT} };`);
+  if (!esm) L.push(`module.exports = { ${IS_AUTH_EXPORT}, ${USER_ID_EXPORT}, ${CAPS_EXPORT} };`);
   let body = L.join('\n');
   if (!esm) {
     // CommonJS build: `export function` is invalid — rewrite to plain functions.
@@ -337,6 +446,11 @@ function planSessionComponentEdit(appRoot, plan) {
 
   const methods = [`  ${JSON.stringify(BRIDGE_IS_AUTH)}: () => (${b.isAuthInvoke}),`];
   if (b.userIdInvoke) methods.push(`  ${JSON.stringify(BRIDGE_USER_ID)}: () => (${b.userIdInvoke}),`);
+  const caps = Array.isArray(b.capabilities) ? b.capabilities : [];
+  if (caps.length > 0) {
+    const entries = caps.map((c) => `${JSON.stringify(c.name)}: Boolean(${c.expr})`).join(', ');
+    methods.push(`  ${JSON.stringify(BRIDGE_CAPABILITIES)}: () => ({ ${entries} }),`);
+  }
 
   const importLines = [`import { registerFiodosBridge } from '${b.importPathToBridge}';`];
   for (const imp of b.imports || []) importLines.push(importLine(imp, true));
@@ -407,9 +521,21 @@ function buildSessionDoc(plan, ctx = {}) {
   L.push('');
   L.push(`- App: \`${appName}\``);
   L.push(`- Strategy: \`${plan.strategy}\`${plan.reason ? ` — ${plan.reason}` : ''}`);
-  L.push(`- Creates \`${sessionRel}\` — exports \`${IS_AUTH_EXPORT}()\` and \`${USER_ID_EXPORT}()\`.`);
+  L.push(`- Creates \`${sessionRel}\` — exports \`${IS_AUTH_EXPORT}()\`, \`${USER_ID_EXPORT}()\` and \`${CAPS_EXPORT}()\`.`);
   if (editedFile) {
     L.push(`- Edits \`${editedFile}\` (only reversible \`FYODOS:SESSION\` blocks) to register the live session.`);
+  }
+  const planCaps =
+    plan.strategy === 'bridge'
+      ? (plan.bridge && plan.bridge.capabilities) || []
+      : plan.capabilities || [];
+  if (planCaps.length > 0) {
+    L.push(
+      `- Capability flags (audience map): ${planCaps.map((c) => `\`${c.name}\``).join(', ')} — boolean-only, read live from the same session source. Actions whose \`requiredCapabilities\` report false are hidden from that user's orb.`,
+    );
+  }
+  for (const note of plan.capabilityNotes || []) {
+    L.push(`- Capability left out: ${note}.`);
   }
   L.push(`- Verification: ${verified ? 'build check passed' : verifyNote || 'compile check unavailable — applied with the mechanical symbol verification only'}.`);
   L.push('');
@@ -620,8 +746,10 @@ module.exports = {
   SESSION_BASENAME,
   IS_AUTH_EXPORT,
   USER_ID_EXPORT,
+  CAPS_EXPORT,
   BRIDGE_IS_AUTH,
   BRIDGE_USER_ID,
+  BRIDGE_CAPABILITIES,
   SESSION_EDIT_START,
   SESSION_EDIT_END,
 };

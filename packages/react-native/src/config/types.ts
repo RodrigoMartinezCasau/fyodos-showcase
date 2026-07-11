@@ -107,6 +107,13 @@ export interface FiodosAgentConfig {
   /** Host auth check, required by manifest actions declaring requiresAuth. */
   isAuthenticated?: () => boolean | null | undefined;
   /**
+   * Fine-grained session capability flags from the wired session bridge
+   * (audience map: e.g. { has_payment_method: true }). Sent with each turn so
+   * the backend shows this user only THEIR face of the orb. Boolean flags
+   * only — never user data. null/undefined = unknown (nothing is filtered).
+   */
+  getSessionCapabilities?: () => Record<string, boolean> | null | undefined;
+  /**
    * Platform saved-credential service powering the built-in SMART SIGN-IN
    * flow. React Native has no built-in default (keychain access needs a
    * native module): plug an adapter backed by e.g. react-native-keychain /

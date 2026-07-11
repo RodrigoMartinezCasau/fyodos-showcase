@@ -87,12 +87,15 @@ const BOOTSTRAP_REGISTRY_EXPORT = 'fyodosGeneratedRegistries';
 // the mount automatically so auth awareness needs NO manual step.
 const SESSION_IS_AUTH_EXPORT = 'fyodosIsAuthenticated';
 const SESSION_USER_ID_EXPORT = 'fyodosGetUserId';
+// Capability flags (audience map) — only connected when the generated session
+// module actually exports it (older generated files do not).
+const SESSION_CAPS_EXPORT = 'fyodosGetSessionCapabilities';
 // Export of the generated screen-truth module (see wireScreen.js). Connected
 // to the mount automatically so state-driven screen awareness needs NO manual step.
 const SCREEN_ROUTE_EXPORT = 'fyodosGetCurrentRoute';
 
 function buildEntryBootstrapBlock(opts = {}) {
-  const { registryImportPath, sessionImportPath, screenImportPath } = opts;
+  const { registryImportPath, sessionImportPath, screenImportPath, sessionHasCapabilities } = opts;
   const lines = [];
   lines.push(ORB_SCRIPT_START);
   lines.push(`import { createFiodosAgent as ${BOOTSTRAP_ALIAS} } from '@fiodos/web-core';`);
@@ -100,9 +103,9 @@ function buildEntryBootstrapBlock(opts = {}) {
     lines.push(`import { ${BOOTSTRAP_REGISTRY_EXPORT} } from '${registryImportPath}';`);
   }
   if (sessionImportPath) {
-    lines.push(
-      `import { ${SESSION_IS_AUTH_EXPORT}, ${SESSION_USER_ID_EXPORT} } from '${sessionImportPath}';`,
-    );
+    const sessionNames = [SESSION_IS_AUTH_EXPORT, SESSION_USER_ID_EXPORT];
+    if (sessionHasCapabilities) sessionNames.push(SESSION_CAPS_EXPORT);
+    lines.push(`import { ${sessionNames.join(', ')} } from '${sessionImportPath}';`);
   }
   if (screenImportPath) {
     lines.push(`import { ${SCREEN_ROUTE_EXPORT} } from '${screenImportPath}';`);
@@ -114,6 +117,9 @@ function buildEntryBootstrapBlock(opts = {}) {
   if (sessionImportPath) {
     lines.push(`  isAuthenticated: ${SESSION_IS_AUTH_EXPORT},`);
     lines.push(`  getUserId: ${SESSION_USER_ID_EXPORT},`);
+    if (sessionHasCapabilities) {
+      lines.push(`  getSessionCapabilities: ${SESSION_CAPS_EXPORT},`);
+    }
   }
   if (screenImportPath) lines.push(`  getCurrentRoute: ${SCREEN_ROUTE_EXPORT},`);
   lines.push('  mount: true,');
@@ -145,9 +151,15 @@ function addRegistriesToBootstrapSource(source, registryImportPath) {
   }
   // Preserve session/screen connections previous passes already added.
   const sessionImportPath = extractBootstrapImportPath(source, SESSION_IS_AUTH_EXPORT);
+  const sessionHasCapabilities = Boolean(extractBootstrapImportPath(source, SESSION_CAPS_EXPORT));
   const screenImportPath = extractBootstrapImportPath(source, SCREEN_ROUTE_EXPORT);
   const stripped = stripMarkedRegion(source, ORB_SCRIPT_START, ORB_SCRIPT_END).replace(/\n{3,}$/, '\n');
-  const block = buildEntryBootstrapBlock({ registryImportPath, sessionImportPath, screenImportPath });
+  const block = buildEntryBootstrapBlock({
+    registryImportPath,
+    sessionImportPath,
+    screenImportPath,
+    sessionHasCapabilities,
+  });
   const next = insertBlockAfterLastImport(stripped.trimEnd(), block);
   return { changed: true, source: next.endsWith('\n') ? next : `${next}\n` };
 }
@@ -165,7 +177,7 @@ function extractBootstrapImportPath(source, name) {
 // Idempotently rewrite an existing entry-bootstrap block to carry the generated
 // SESSION connection (third pass, after session wiring). Preserves the
 // registries the second pass added. Returns { changed, source, reason? }.
-function addSessionToBootstrapSource(source, sessionImportPath) {
+function addSessionToBootstrapSource(source, sessionImportPath, opts = {}) {
   if (!source.includes(ORB_SCRIPT_START)) return { changed: false, source, reason: 'not-mounted' };
   if (/\n\s*isAuthenticated:\s/.test(source.slice(source.indexOf(ORB_SCRIPT_START)))) {
     return { changed: false, source, reason: 'already' };
@@ -173,7 +185,12 @@ function addSessionToBootstrapSource(source, sessionImportPath) {
   const registryImportPath = extractBootstrapImportPath(source, BOOTSTRAP_REGISTRY_EXPORT);
   const screenImportPath = extractBootstrapImportPath(source, SCREEN_ROUTE_EXPORT);
   const stripped = stripMarkedRegion(source, ORB_SCRIPT_START, ORB_SCRIPT_END).replace(/\n{3,}$/, '\n');
-  const block = buildEntryBootstrapBlock({ registryImportPath, sessionImportPath, screenImportPath });
+  const block = buildEntryBootstrapBlock({
+    registryImportPath,
+    sessionImportPath,
+    screenImportPath,
+    sessionHasCapabilities: Boolean(opts.sessionHasCapabilities),
+  });
   const next = insertBlockAfterLastImport(stripped.trimEnd(), block);
   return { changed: true, source: next.endsWith('\n') ? next : `${next}\n` };
 }
@@ -188,8 +205,14 @@ function addScreenToBootstrapSource(source, screenImportPath) {
   }
   const registryImportPath = extractBootstrapImportPath(source, BOOTSTRAP_REGISTRY_EXPORT);
   const sessionImportPath = extractBootstrapImportPath(source, SESSION_IS_AUTH_EXPORT);
+  const sessionHasCapabilities = Boolean(extractBootstrapImportPath(source, SESSION_CAPS_EXPORT));
   const stripped = stripMarkedRegion(source, ORB_SCRIPT_START, ORB_SCRIPT_END).replace(/\n{3,}$/, '\n');
-  const block = buildEntryBootstrapBlock({ registryImportPath, sessionImportPath, screenImportPath });
+  const block = buildEntryBootstrapBlock({
+    registryImportPath,
+    sessionImportPath,
+    screenImportPath,
+    sessionHasCapabilities,
+  });
   const next = insertBlockAfterLastImport(stripped.trimEnd(), block);
   return { changed: true, source: next.endsWith('\n') ? next : `${next}\n` };
 }
@@ -269,7 +292,8 @@ function addRegistriesToMountSource(source, exportName, importPath) {
 // `getUserId={fyodosGetUserId}` + the import. Skips (never overrides) a mount
 // where the developer already wired their own isAuthenticated. Same
 // reversibility model as addRegistriesToMountSource.
-function addSessionToMountSource(source, importPath) {
+function addSessionToMountSource(source, importPath, opts = {}) {
+  const withCapabilities = Boolean(opts.sessionHasCapabilities);
   const tagRe = /([ \t]*)<FiodosAgent\b[\s\S]*?\/>/;
   const m = source.match(tagRe);
   if (!m) return { changed: false, source, reason: 'not-mounted' };
@@ -284,15 +308,17 @@ function addSessionToMountSource(source, importPath) {
   const propMatch = tag.match(/\n([ \t]*)(?:apiKey|api-key|apiUrl|baseUrl|registries)/);
   const propIndent = propMatch ? propMatch[1] : `${baseIndent}  `;
   const hasUserId = /\bgetUserId=/.test(tag);
+  const addCaps = withCapabilities && !/\bgetSessionCapabilities=/.test(tag);
   const props =
     `\n${propIndent}isAuthenticated={${SESSION_IS_AUTH_EXPORT}}` +
-    (hasUserId ? '' : `\n${propIndent}getUserId={${SESSION_USER_ID_EXPORT}}`);
+    (hasUserId ? '' : `\n${propIndent}getUserId={${SESSION_USER_ID_EXPORT}}`) +
+    (addCaps ? `\n${propIndent}getSessionCapabilities={${SESSION_CAPS_EXPORT}}` : '');
   const newTag = tag.replace(/\n?[ \t]*\/>$/, `${props}\n${baseIndent}/>`);
   let next = source.replace(tag, newTag);
-  const names = hasUserId
-    ? SESSION_IS_AUTH_EXPORT
-    : `${SESSION_IS_AUTH_EXPORT}, ${SESSION_USER_ID_EXPORT}`;
-  const importLine = `import { ${names} } from '${importPath}';`;
+  const nameList = [SESSION_IS_AUTH_EXPORT];
+  if (!hasUserId) nameList.push(SESSION_USER_ID_EXPORT);
+  if (addCaps) nameList.push(SESSION_CAPS_EXPORT);
+  const importLine = `import { ${nameList.join(', ')} } from '${importPath}';`;
   if (!next.includes(importLine)) {
     next = insertImportAfterLastImport(next, importLine);
   }
@@ -792,4 +818,5 @@ module.exports = {
   buildEntryBootstrapBlock,
   IMPORT_NAME,
   WRAPPER_BASENAME,
+  SESSION_CAPS_EXPORT,
 };
