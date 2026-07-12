@@ -141,7 +141,9 @@ function buildUserPrompt(appMeta, files, omitted, staticRoutes, surface = null, 
     : '';
   const routeBlock = staticRoutes.length
     ? `Statically-scanned routes (existence is verified — use these hrefs):\n${routeHint}\n`
-    : `No static route list (web app): infer routes/views from the router and navigation calls in the code below.\n`;
+    : opts.platform === 'shopify'
+      ? 'Shopify storefront: derive routes from the PUBLIC STOREFRONT SNAPSHOT files under _fyodos/storefront/ (universal pages + one route per real collection/page handle) and from the theme templates below.\n'
+      : `No static route list (web app): infer routes/views from the router and navigation calls in the code below.\n`;
 
   // Detected interactive link elements on the product surface — concrete hrefs
   // the model should turn into LINK actions (verified later against the file).
@@ -171,7 +173,7 @@ function buildUserPrompt(appMeta, files, omitted, staticRoutes, surface = null, 
     routeBlock +
     linkBlock +
     omittedNote +
-    (includeSchema && LOCAL_PROMPTS ? `\nManifest schema:\n${LOCAL_PROMPTS.manifestSchemaDoc()}\n\n` : '\n') +
+    (includeSchema && LOCAL_PROMPTS ? `\nManifest schema:\n${LOCAL_PROMPTS.manifestSchemaDoc(opts.platform === 'shopify')}\n\n` : '\n') +
     `FULL SOURCE CODE (${files.length} files):\n\n${codeBlob}`
   );
 }
@@ -383,7 +385,7 @@ async function analyzeWithAI({
   if (useProxy) {
     // Server prompt mode: the backend builds the system prompt (with the
     // manifest schema embedded), so the user payload carries only the inputs.
-    user = buildUserPrompt(appMeta, files, omitted, staticRoutes, surface, spec, { includeSchema: false });
+    user = buildUserPrompt(appMeta, files, omitted, staticRoutes, surface, spec, { includeSchema: false, platform });
     ({ parsed, usage, serverModel, analysisToken } = await analyzeViaProxy({
       apiKey, apiUrl, model: resolved, user, task: 'analysis', platform, hasUserSpec: Boolean(spec),
     }));
@@ -391,7 +393,7 @@ async function analyzeWithAI({
     const sp = await resolveOwnKeySystemPrompt({
       task: 'analysis', platform, hasUserSpec: Boolean(spec), apiKey, apiUrl,
     });
-    user = buildUserPrompt(appMeta, files, omitted, staticRoutes, surface, spec, { includeSchema: sp.schemaInUser });
+    user = buildUserPrompt(appMeta, files, omitted, staticRoutes, surface, spec, { includeSchema: sp.schemaInUser, platform });
     ({ parsed, usage } = isAnthropicModel(resolved)
       ? await completeAnthropic({ model: resolved, system: sp.system, user })
       : await completeOpenAI({ model: resolved, system: sp.system, user }));

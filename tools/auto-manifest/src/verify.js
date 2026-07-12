@@ -31,6 +31,40 @@ function fileHasIdentifier(content, identifier) {
   return re.test(content);
 }
 
+const EXECUTION_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
+
+/**
+ * Structural check of a declarative `execution` block (closed platforms).
+ * Mirrors @fiodos/core validateExecution: http kind, known method, non-empty
+ * url, and every {placeholder} resolvable (baseUrl or a declared parameter).
+ * Returns a problem string, or null when the block is sound.
+ */
+function validateExecutionShape(action) {
+  const exec = action.execution;
+  if (!exec || typeof exec !== 'object') return 'missing execution object';
+  if (exec.kind !== 'http') return `kind '${exec.kind}' is not 'http'`;
+  if (!EXECUTION_METHODS.has(exec.method)) return `invalid method '${exec.method}'`;
+  if (typeof exec.url !== 'string' || !exec.url.trim()) return 'empty url';
+  if (!String(action.handler || '').trim()) return 'function action has no handler name';
+  const declared = new Set(Object.keys(action.parameters || {}));
+  const placeholders = new Set();
+  const collect = (value) => {
+    if (typeof value === 'string') {
+      for (const m of value.matchAll(/\{([A-Za-z_][A-Za-z0-9_]*)\}/g)) placeholders.add(m[1]);
+    } else if (value && typeof value === 'object') {
+      for (const v of Object.values(value)) collect(v);
+    }
+  };
+  collect(exec.url);
+  collect(exec.body);
+  for (const name of placeholders) {
+    if (name !== 'baseUrl' && !declared.has(name)) {
+      return `execution references undeclared parameter '{${name}}'`;
+    }
+  }
+  return null;
+}
+
 /**
  * Upper bound on examples kept per route/action. The enriched prompt asks the
  * model for 5-8 varied phrasings; this cap protects the cacheable system prompt
@@ -160,11 +194,47 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
     });
   }
 
+  const isShopify = opts.platform === 'shopify';
   const actions = [];
   for (const action of manifest.actions || []) {
     const ev = evidence.actions?.[action.intent] || {};
     const evFile = String(ev.file || '').replace(/\\/g, '/').replace(/^\.\//, '');
     const content = byRel.get(evFile);
+
+    // Shopify (closed platform): the ground truth for API actions is the
+    // platform itself, not app code. An action carrying a declarative
+    // `execution` block is verified STRUCTURALLY (http kind + method + url and
+    // every {placeholder} declared) — a synthetic handler name can never match
+    // an identifier in a .liquid file, and requiring it would drop the whole
+    // universal commerce set. The universal "/checkout" link is likewise
+    // platform-guaranteed (themes rarely hardcode that href).
+    if (isShopify && action.kind !== 'link' && action.execution) {
+      const problem = validateExecutionShape(action);
+      if (problem) {
+        provenance.actions.push({
+          intent: action.intent, included: false,
+          reason: `invalid execution block — ${problem} — DROPPED`,
+        });
+        continue;
+      }
+      actions.push(action);
+      provenance.actions.push({
+        intent: action.intent, included: true,
+        verification: 'declarative execution (Shopify storefront API — platform-guaranteed)',
+        evidence: ev,
+      });
+      continue;
+    }
+    if (isShopify && action.kind === 'link' && String(action.navTarget || '').trim() === '/checkout') {
+      action.handler = '';
+      actions.push(action);
+      provenance.actions.push({
+        intent: action.intent, included: true,
+        verification: 'universal Shopify checkout link (platform-guaranteed)',
+        evidence: ev,
+      });
+      continue;
+    }
 
     if (!content) {
       provenance.actions.push({
@@ -352,4 +422,4 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
   };
 }
 
-module.exports = { verifyManifest, normalizeHref, sanitizeExamples, MAX_EXAMPLES };
+module.exports = { verifyManifest, normalizeHref, sanitizeExamples, validateExecutionShape, MAX_EXAMPLES };

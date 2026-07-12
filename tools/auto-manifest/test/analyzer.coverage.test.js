@@ -59,4 +59,23 @@ for (const platform of ['web', 'mobile']) {
   console.log(`PASS ${platform} prompt requests the audience map`);
 }
 
+// 5. Shopify (closed platform): the prompt swaps code wiring for the
+// declarative execution contract and demands per-store personalization.
+{
+  const prompt = buildSystemPrompt('shopify');
+  assertHas(prompt, 'Shopify STOREFRONT', 'shopify: storefront identity');
+  assertHas(prompt, '_fyodos/storefront/', 'shopify: snapshot files as input');
+  assertHas(prompt, 'STORE LANGUAGE & PERSONALIZATION', 'shopify: personalization is the point');
+  assertHas(prompt, 'shopifyAddToCart', 'shopify: universal commerce handler names');
+  assertHas(prompt, '{baseUrl}/cart/add.js', 'shopify: exact Ajax Cart execution template');
+  assertHas(prompt, '"/checkout"', 'shopify: universal checkout link');
+  assertHas(prompt, 'Do NOT return "wiring", "session" or "screen" blocks', 'shopify: no code-wiring contract');
+  assert.ok(!prompt.includes('WIRING (how to actually RUN'), 'shopify: wiring guide absent');
+  assert.ok(!prompt.includes('SCREEN TRUTH'), 'shopify: screen-truth section absent');
+  const schemaWithExecution = manifestSchemaDoc(true);
+  assertHas(schemaWithExecution, 'Additional action field for CLOSED platforms', 'schema documents execution when asked');
+  assert.ok(!manifestSchemaDoc().includes('Additional action field'), 'execution stays out of the default schema');
+  console.log('PASS shopify prompt uses the closed-platform execution contract');
+}
+
 console.log('ALL analyzer.coverage tests passed');

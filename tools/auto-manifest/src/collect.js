@@ -47,6 +47,12 @@ const PROFILES = {
     exts: ['.kt'],
     skipDirs: ['.git', '.gradle', 'build', '.idea'],
   },
+  // Shopify theme repo (GitHub-synced Liquid theme). The "code" is the theme's
+  // Liquid templates + JSON templates/settings; heavy static assets are noise.
+  shopify: {
+    exts: ['.liquid', '.json'],
+    skipDirs: ['.git', 'node_modules', 'assets', 'dist', 'build'],
+  },
 };
 
 const SKIP_FILES = /\.(d\.ts|test\.|spec\.)|babel\.config|metro\.config|tailwind\.config|postcss\.config|jest\.config|eslint/;
@@ -64,8 +70,16 @@ const CHARS_PER_TOKEN = 3.0;
 
 /** Lower tier = higher priority when the budget forces choices. Generalized so
  *  it ranks screens/state/services first across web, RN AND native naming. */
-function tierFor(rel) {
+function tierFor(rel, platform) {
   const p = rel.replace(/\\/g, '/');
+  if (platform === 'shopify') {
+    // Shopify theme layout: templates define the store's pages; layout + locales
+    // carry structure and language; sections/snippets are secondary UI.
+    if (/^(layout|templates)\//.test(p)) return 0;
+    if (/^locales\//.test(p)) return 1;
+    if (/^sections\//.test(p)) return 2;
+    return 3; // snippets/, config/ (settings_data.json can be huge), rest
+  }
   if (/^(src\/)?app\//.test(p)) return 0; // expo-router / Next screens
   if (/(^|\/)(screens?|pages?|views?|routes?|activities|fragments)\//i.test(p)) return 0;
   if (/(screen|page|view|activity|fragment)\.(dart|kt|swift)$/i.test(p)) return 0;
@@ -95,7 +109,7 @@ function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' }
       if (SKIP_FILES.test(rel)) continue;
       if (isNative && SKIP_NATIVE_FILES.test(rel)) continue;
       const content = fs.readFileSync(full, 'utf8');
-      files.push({ rel, content, tier: tierFor(rel), chars: content.length });
+      files.push({ rel, content, tier: tierFor(rel, platform), chars: content.length });
     }
   };
   walk(appRoot);

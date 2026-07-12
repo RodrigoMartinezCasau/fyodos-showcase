@@ -100,6 +100,9 @@ const {
   connectOrbScreen, reportScreenConnectResult,
 } = require('./wireWeb');
 const { wireReactNativeOrb, reportReactNativeWire, connectRnSession } = require('./wireReactNative');
+const {
+  isShopifyThemeRoot, fetchStorefrontSnapshot, wireShopifyTheme, reportShopifyWire,
+} = require('./shopifyTheme');
 const { wireFlutterOrb, writeFlutterEnv, reportFlutterWire } = require('./wireFlutter');
 const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
 const { wireSession, reportSessionResult } = require('./wireSession');
@@ -119,6 +122,8 @@ function arg(flag, fallback) {
 const VALUE_FLAGS = new Set([
   '--out', '--model', '--max-input-tokens', '--platform', '--api-key', '--api-url',
   '--spec', '--analysis-root',
+  // shopify (theme repo mode): the store's public domain for the catalog snapshot
+  '--store',
   // from-odata (closed-software mode)
   '--app-id', '--app-name', '--app-description', '--auth-ref', '--entities',
 ]);
@@ -194,9 +199,11 @@ function askProceed() {
   });
 }
 
-/** Spinner copy: "website" for web targets, "app" for mobile/native. */
+/** Spinner copy: "website" for web targets, "store" for Shopify, "app" for mobile/native. */
 function surfaceNoun(platform) {
-  return platform === 'web' ? 'website' : 'app';
+  if (platform === 'web') return 'website';
+  if (platform === 'shopify') return 'store';
+  return 'app';
 }
 
 function orbMountSpinnerLabel(platform) {
@@ -345,7 +352,7 @@ async function main() {
   fs.mkdirSync(outDir, { recursive: true });
 
   const platformArg = (arg('--platform', '') || '').toLowerCase();
-  const KNOWN_PLATFORMS = ['web', 'mobile', 'flutter', 'ios', 'android'];
+  const KNOWN_PLATFORMS = ['web', 'mobile', 'flutter', 'ios', 'android', 'shopify'];
   const forcedPlatform = KNOWN_PLATFORMS.includes(platformArg) ? platformArg : null;
 
   // ── 1. Static route scan (cheap facts; also the route verifier's ground truth)
@@ -385,6 +392,24 @@ async function main() {
 
   // ── 2. Collect source files (rule-based, budget-aware) ────────────────────
   const { included, omitted, estimatedTokens } = collectFiles(analysisRoot, { maxInputTokens, platform });
+
+  // Shopify: the theme alone doesn't say WHAT the store sells. Fetch a PUBLIC
+  // storefront snapshot (collections + product sample) from the store's own
+  // endpoints and include it as synthetic FILE blocks (_fyodos/storefront/*)
+  // so the analysis personalizes routes/bubbles/examples to the REAL catalog
+  // — and so evidence verification has concrete files to point at. Fail-open:
+  // an unreachable store still gets the universal surface file.
+  if (platform === 'shopify') {
+    const storeDomain = arg('--store', process.env.FYODOS_SHOPIFY_STORE || '');
+    if (!storeDomain) {
+      logUser('Tip: add --store your-store.com so the analysis reads your live catalog (collections & products).');
+    }
+    const snapshot = await withSpinner('Reading your store\u2019s public catalog', () =>
+      fetchStorefrontSnapshot(storeDomain, { log: logDev }),
+    );
+    included.push(...snapshot.files);
+  }
+
   fs.writeFileSync(path.join(outDir, 'files-sent.json'), JSON.stringify({
     included: included.map((f) => f.rel),
     omitted,
@@ -496,7 +521,7 @@ async function main() {
     // Actions are always verified against real code. Routes are verified only
     // when there is filesystem ground truth (mobile); for web they are kept as
     // AI-proposed and flagged unverified in provenance.
-    ({ manifest, provenance } = verifyManifest(proposed, evidence, included, routes, { verifyRoutes }));
+    ({ manifest, provenance } = verifyManifest(proposed, evidence, included, routes, { verifyRoutes, platform }));
     ensureBackRoute(manifest, provenance);
     const droppedActions = provenance.actions.filter((a) => !a.included).length;
     const droppedRoutes = provenance.routes.filter((r) => !r.included).length;
@@ -905,6 +930,66 @@ async function main() {
         logDev(`[change-registry] could not write: ${e.message}`);
       }
     }
+  } else if (platform === 'shopify' && publishing) {
+    // ── Shopify: publish + embed the orb in layout/theme.liquid ───────────────
+    // No code wiring: the manifest's commerce actions carry declarative
+    // `execution` blocks that the embed turns into handlers at runtime
+    // (buildApiActionRegistries, {baseUrl} → the store's own origin). The one
+    // edit is the theme.liquid snippet (idempotent markers); Shopify's GitHub
+    // sync deploys it when the developer pushes.
+    loadAppEnv(analysisRoot);
+    const { apiKey, apiUrl } = resolveApiTarget();
+    const noWire = process.argv.includes('--no-wire');
+    let orbWireResult = null;
+
+    await withSpinner('Publishing to your project', async ({ setLabel, pause, resume }) => {
+      await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true });
+      if (!noWire && !process.argv.includes('--no-orb-wire')) {
+        setLabel(orbMountSpinnerLabel(platform));
+        orbWireResult = wireShopifyTheme(analysisRoot, { apiKey, apiUrl, noWire });
+        pause();
+        reportShopifyWire(orbWireResult, fyodosTermColors(), { quiet: !isVerbose() });
+        resume();
+        // Install proof only when the snippet is genuinely in the theme. All
+        // actions are execution-declared (nothing left to wire), so the
+        // terminal status is 'done' immediately — the dashboard tick then
+        // waits only for the runtime heartbeat once the theme is pushed.
+        if (
+          apiKey &&
+          (orbWireResult.status === 'added' || orbWireResult.status === 'already')
+        ) {
+          const proof = await postOrbWired({
+            apiKey,
+            apiUrl,
+            file: orbWireResult.file || '',
+            platform: 'shopify',
+            actionsStatus: 'done',
+          });
+          if (proof && proof.ok === false && proof.reason !== 'no-api-key') {
+            logDev(`[orb-wired] shopify install proof not recorded (${proof.status || proof.reason}); dashboard will rely on the runtime ping`);
+          }
+        }
+      }
+    });
+    logUser('Published to your project');
+    if (orbWireResult && (orbWireResult.status === 'added' || orbWireResult.status === 'already')) {
+      logUser('Commit & push this theme repo — Shopify\u2019s GitHub sync deploys the orb to your live store.');
+    }
+
+    if (!noWire) {
+      try {
+        const record = buildRunRecord(analysisRoot, {
+          appName: manifest.appName,
+          manifest,
+          publishMeta,
+          orbResult: orbWireResult,
+        });
+        const paths = writeChangeRegistry(analysisRoot, record);
+        logUser(`Change log: ${paths.mdRel} (history in .fyodos/changes/)`);
+      } catch (e) {
+        logDev(`[change-registry] could not write: ${e.message}`);
+      }
+    }
   } else if (platform === 'mobile' && publishing) {
     // ── Mobile (Expo / React Native): mirror the web pipeline, adapted ─────────
     // Same single command that publishes also mounts the orb (via the SDK's
@@ -1195,6 +1280,9 @@ function detectPlatform(appRoot, appDir) {
     return found;
   };
 
+  // Shopify theme repos (GitHub-synced Liquid themes) are unmistakable and
+  // have no package.json framework signal — check them first.
+  if (isShopifyThemeRoot(appRoot)) return 'shopify';
   if (has('pubspec.yaml')) return 'flutter';
   if (has('Package.swift') || hasAnyExt('.xcodeproj') || (has('Sources') && hasAnyExt('.swift'))) return 'ios';
   if ((has('settings.gradle.kts') || has('settings.gradle') || has('build.gradle.kts') || has('build.gradle')) && hasAnyExt('.kt')) {
