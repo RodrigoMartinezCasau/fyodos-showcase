@@ -42,6 +42,12 @@ for (const platform of ['web', 'mobile']) {
   assertHas(prompt, '"kind": "state"', `${platform}: state-driven screens branch`);
   assertHas(prompt, 'screenInvoke', `${platform}: asks for the state expression`);
   assertHas(prompt, '"kind": "url"', `${platform}: url-driven fast path`);
+  // Full-screen overlays (onboarding/install wizards, first-run panels) are
+  // screens the URL never sees — the exact blindness observed in production
+  // (orb kept reporting the section UNDER the install wizard).
+  assertHas(prompt, 'FULL-SCREEN OVERLAYS COUNT AS SCREENS', `${platform}: overlay rule present`);
+  assertHas(prompt, 'onboarding wizard', `${platform}: names the onboarding case`);
+  assertHas(prompt, "showOnboarding ? 'onboarding' : section", `${platform}: conditional screenInvoke example`);
   console.log(`PASS ${platform} prompt requests the screen block`);
 }
 

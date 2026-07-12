@@ -200,6 +200,7 @@ Also return a top-level "screen" block. The orb resolves "where is the user" fro
   · "anchor": an EXACT, UNIQUE existing line in the same scope where that state is readable.
   · "screenInvoke": a JS expression valid at the anchor evaluating to the CURRENT screen/section KEY (the raw state value, e.g. section, activeTab, this.currentView — never a translated label).
   · "imports": usually [] (same shape as bridge imports).
+- FULL-SCREEN OVERLAYS COUNT AS SCREENS: a boolean/state flag that replaces the WHOLE view — an onboarding wizard, an install/setup flow, a full-screen modal or "first run" panel (e.g. if (showOnboarding) return <Wizard/>) — is a screen change the URL never sees. When such flags exist in the SAME component, fold them into screenInvoke with a conditional so the overlay wins while active (e.g. (showOnboarding ? 'onboarding' : section)). An orb that keeps reporting the section UNDER the overlay tells the user they are on a screen they cannot even see — the exact lie this block exists to prevent. Only fold in flags readable at the anchor; never invent state.
 - "requiredSymbols" as in wiring. Verified mechanically; unverifiable → honestly left for review, never wired blind.
 This is what powers per-screen bubbles, "you are already on that screen" detection and screen-scoped context in state-driven apps — without it the orb is blind to screen changes that never touch the URL.`;
 }

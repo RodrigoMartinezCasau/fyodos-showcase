@@ -12,6 +12,8 @@
 import {
   manifestActionsForBackend,
   manifestRoutesForBackend,
+  withExecutableActions,
+  type ActionRegistries,
   parseAgentAction,
   type AgentBackendClient,
   type AgentTurnRequest,
@@ -273,15 +275,23 @@ export function createFiodosBackendClient(options: FiodosBackendClientOptions): 
   };
 }
 
-/** Serializes the manifest payloads for a turn request (helper for useAgent). */
-export function buildManifestPayload(manifest: AppManifest) {
+/**
+ * Serializes the manifest payloads for a turn request (helper for useAgent).
+ *
+ * When the live registries are provided, actions with no registered handler
+ * are dropped from the payload (runtime "wired or nonexistent"): the LLM never
+ * hears about an action this mounted app cannot execute, so it can never
+ * promise it. Fail-open without registries.
+ */
+export function buildManifestPayload(manifest: AppManifest, registries?: ActionRegistries | null) {
+  const effective = withExecutableActions(manifest, registries);
   return {
-    manifestVersion: manifest.version,
-    manifestRoutes: manifestRoutesForBackend(manifest),
-    manifestActions: manifestActionsForBackend(manifest),
-    appName: manifest.appName,
-    appDescription: manifest.appDescription,
-    ...(manifest.appType ? { appType: manifest.appType } : {}),
-    ...(manifest.appFlow ? { appFlow: manifest.appFlow } : {}),
+    manifestVersion: effective.version,
+    manifestRoutes: manifestRoutesForBackend(effective),
+    manifestActions: manifestActionsForBackend(effective),
+    appName: effective.appName,
+    appDescription: effective.appDescription,
+    ...(effective.appType ? { appType: effective.appType } : {}),
+    ...(effective.appFlow ? { appFlow: effective.appFlow } : {}),
   };
 }

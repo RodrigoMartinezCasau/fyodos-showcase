@@ -581,7 +581,7 @@ export function useAgent({
             sessionId: sessionIdRef.current,
             platformCapabilities: platformCapabilities(),
             sessionContext: sessionContext(),
-            ...buildManifestPayload(manifest),
+            ...buildManifestPayload(manifest, config.registries),
           },
           { signal: controller.signal },
         );
@@ -925,7 +925,7 @@ export function useAgent({
                   lastStep,
                   platformCapabilities: platformCapabilities(),
                   sessionContext: sessionContext(),
-                  ...buildManifestPayload(manifest),
+                  ...buildManifestPayload(manifest, config.registries),
                 },
                 { signal: ctrl.signal },
               );
