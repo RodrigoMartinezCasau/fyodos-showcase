@@ -554,7 +554,7 @@ export function AgentOrb({
                 height={t.waveformHeight}
               />
             ) : logoDataUrl ? null : (
-              icon ?? <FiodosOrbMark orbSize={t.size} />
+              icon ?? <FiodosOrbMark orbSize={t.size} color={t.waveformColor ?? t.accentColor} />
             )}
           </OrbVisual>
         </Pressable>

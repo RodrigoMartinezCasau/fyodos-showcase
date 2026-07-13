@@ -122,6 +122,10 @@ function buildEntryBootstrapBlock(opts = {}) {
     }
   }
   if (screenImportPath) lines.push(`  getCurrentRoute: ${SCREEN_ROUTE_EXPORT},`);
+  // Language link (never left disconnected): the orb follows the page's live
+  // <html lang>, so analyzer bubble translations track the app's language
+  // switcher automatically.
+  lines.push("  localeDetection: 'document',");
   lines.push('  mount: true,');
   lines.push('});');
   lines.push(ORB_SCRIPT_END);
@@ -243,6 +247,10 @@ function agentJsx(framework, ts, indent = '  ') {
     `${indent}<FiodosAgent\n` +
     `${indent}  apiKey={${keyExpr}}\n` +
     `${indent}  apiUrl={${urlExpr}}\n` +
+    // Language link (never left disconnected): the orb follows the page's live
+    // <html lang>, so analyzer bubble translations track the app's language
+    // switcher automatically.
+    `${indent}  localeDetection="document"\n` +
     `${indent}/>`
   );
 }
@@ -644,7 +652,7 @@ function injectVueSfc(plan) {
   }
   const block = [
     ORB_HTML_START,
-    '  <FiodosAgent :api-key="fyodosApiKey" :base-url="fyodosApiUrl" />',
+    '  <FiodosAgent :api-key="fyodosApiKey" :base-url="fyodosApiUrl" locale-detection="document" />',
     ORB_HTML_END,
   ].join('\n');
   source = source.replace('</template>', `${block}\n</template>`);
@@ -662,7 +670,7 @@ function injectSvelteSfc(plan) {
   }
   const block = [
     ORB_HTML_START,
-    '<FiodosAgent apiKey={import.meta.env.VITE_FYODOS_API_KEY} baseUrl={import.meta.env.VITE_FYODOS_API_URL} />',
+    '<FiodosAgent apiKey={import.meta.env.VITE_FYODOS_API_KEY} baseUrl={import.meta.env.VITE_FYODOS_API_URL} localeDetection="document" />',
     ORB_HTML_END,
   ].join('\n');
   if (source.includes('</main>')) {
@@ -699,7 +707,7 @@ function injectAngularComponent(plan) {
     );
   }
 
-  const block = [ORB_HTML_START, '<fyodos-agent [apiKey]="fyodosApiKey" [baseUrl]="fyodosApiUrl" />', ORB_HTML_END].join('\n');
+  const block = [ORB_HTML_START, '<fyodos-agent [apiKey]="fyodosApiKey" [baseUrl]="fyodosApiUrl" localeDetection="document" />', ORB_HTML_END].join('\n');
   html = `${html.trimEnd()}\n${block}\n`;
   writeFile(target.file, ts);
   writeFile(templatePath, html);

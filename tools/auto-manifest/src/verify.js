@@ -122,6 +122,44 @@ function sanitizeBubblePrompt(raw) {
   return s || undefined;
 }
 
+/** "es-ES" / "ES" → "es" (base language code, lowercased); undefined when unusable. */
+function sanitizeLanguageCode(raw) {
+  const code = String(raw || '').split(/[-_]/)[0].trim().toLowerCase();
+  return /^[a-z]{2,3}$/.test(code) ? code : undefined;
+}
+
+/**
+ * Sanitize a route's `bubblePrompts` translation map (fail-open, item never
+ * dropped): keeps only valid base-language keys whose values survive the same
+ * bubblePrompt hygiene. Returns undefined when nothing usable remains, so the
+ * SDK falls back to the single `bubblePrompt`.
+ */
+function sanitizeBubblePrompts(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const lang = sanitizeLanguageCode(key);
+    const prompt = sanitizeBubblePrompt(value);
+    if (lang && prompt && !(lang in out)) out[lang] = prompt;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
+ * Sanitize the manifest-level `appLanguages` list (fail-open): dedupes and
+ * normalizes to base codes, preserving the model's order (primary first).
+ * Returns undefined when nothing usable remains (monolingual apps).
+ */
+function sanitizeAppLanguages(raw) {
+  if (!Array.isArray(raw)) return undefined;
+  const out = [];
+  for (const entry of raw) {
+    const lang = sanitizeLanguageCode(entry);
+    if (lang && !out.includes(lang)) out.push(lang);
+  }
+  return out.length > 0 ? out : undefined;
+}
+
 /** Normalize an expo-router href for comparison: strip (groups), trailing /index. */
 function normalizeHref(href) {
   return ('/' + String(href || '')
@@ -399,6 +437,11 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
     }
     if (bubble) route.bubblePrompt = bubble;
     else delete route.bubblePrompt;
+    // Multilingual bubble translations (fail-open): keep only clean entries so
+    // the orb can follow the app's active language; drop the map when empty.
+    const bubbles = sanitizeBubblePrompts(route.bubblePrompts);
+    if (bubbles) route.bubblePrompts = bubbles;
+    else delete route.bubblePrompts;
   }
 
   // Schema coercion the model sometimes needs (same as the old engine).
@@ -416,8 +459,15 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
     }
   }
 
+  // App-level supported languages (fail-open): normalized base codes, primary
+  // first; dropped entirely when the analysis found no i18n evidence.
+  const appLanguages = sanitizeAppLanguages(manifest.appLanguages);
+  const cleanManifest = { ...manifest, routes: dedupedRoutes, actions: dedupedActions };
+  if (appLanguages) cleanManifest.appLanguages = appLanguages;
+  else delete cleanManifest.appLanguages;
+
   return {
-    manifest: { ...manifest, routes: dedupedRoutes, actions: dedupedActions },
+    manifest: cleanManifest,
     provenance,
   };
 }

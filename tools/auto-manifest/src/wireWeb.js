@@ -134,7 +134,7 @@ function agentSnippetVue() {
     `</script>\n\n` +
     `<template>\n` +
     `  <!-- ...your app... -->\n` +
-    `  <FiodosAgent :api-key="fyodosApiKey" :base-url="fyodosApiUrl" />\n` +
+    `  <FiodosAgent :api-key="fyodosApiKey" :base-url="fyodosApiUrl" locale-detection="document" />\n` +
     `</template>`
   );
 }
@@ -144,7 +144,7 @@ function agentSnippetSvelte() {
     `<script lang="ts">\n` +
     `  import FiodosAgent from '@fiodos/svelte/FiodosAgent.svelte';\n` +
     `</script>\n\n` +
-    `<FiodosAgent apiKey={import.meta.env.VITE_FYODOS_API_KEY} baseUrl={import.meta.env.VITE_FYODOS_API_URL} />`
+    `<FiodosAgent apiKey={import.meta.env.VITE_FYODOS_API_KEY} baseUrl={import.meta.env.VITE_FYODOS_API_URL} localeDetection="document" />`
   );
 }
 
