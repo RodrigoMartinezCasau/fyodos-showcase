@@ -175,6 +175,11 @@ function logUser(line) {
   console.log(`${cyan}◉${reset} ${blue}Fiodos${reset} · ${line}`);
 }
 
+/** Human-readable pointer to the per-run change registry written in the repo. */
+function changeLogUserMessage(paths) {
+  return `We saved a summary of every file we changed — see ${paths.mdRel} (past runs in .fyodos/changes/)`;
+}
+
 /**
  * Ask the developer to confirm before the analysis runs. `yes` continues; any
  * other answer (or `no`) cancels instantly — the command ends without analyzing.
@@ -925,7 +930,7 @@ async function main() {
           envResult: envWriteResult,
         });
         const paths = writeChangeRegistry(analysisRoot, record);
-        logUser(`Change log: ${paths.mdRel} (history in .fyodos/changes/)`);
+        logUser(changeLogUserMessage(paths));
       } catch (e) {
         logDev(`[change-registry] could not write: ${e.message}`);
       }
@@ -973,7 +978,18 @@ async function main() {
     });
     logUser('Published to your project');
     if (orbWireResult && (orbWireResult.status === 'added' || orbWireResult.status === 'already')) {
-      logUser('Commit & push this theme repo — Shopify\u2019s GitHub sync deploys the orb to your live store.');
+      logUser('Commit & push this theme repo.');
+      // Shopify's GitHub sync only auto-updates the storefront when the
+      // CONNECTED theme is already the LIVE one. A brand-new theme connected
+      // from GitHub stays a draft until published ONCE by hand — every push
+      // after that keeps it live automatically. Without this line the orb can
+      // be fully wired and pushed and still never appear to real customers,
+      // with nothing in the CLI output explaining why.
+      logUser(
+        'If this is already your LIVE theme, that push alone puts the orb on your store. ' +
+        'If it\u2019s still a DRAFT (check the Shopify admin theme badge), publish it ONCE — ' +
+        'Online Store \u2192 Themes \u2192 \u22ef \u2192 Publish \u2014 then every future push stays live automatically.',
+      );
     }
 
     if (!noWire) {
@@ -985,7 +1001,7 @@ async function main() {
           orbResult: orbWireResult,
         });
         const paths = writeChangeRegistry(analysisRoot, record);
-        logUser(`Change log: ${paths.mdRel} (history in .fyodos/changes/)`);
+        logUser(changeLogUserMessage(paths));
       } catch (e) {
         logDev(`[change-registry] could not write: ${e.message}`);
       }
@@ -1108,7 +1124,7 @@ async function main() {
           envResult: envWriteResult,
         });
         const paths = writeChangeRegistry(analysisRoot, record);
-        logUser(`Change log: ${paths.mdRel} (history in .fyodos/changes/)`);
+        logUser(changeLogUserMessage(paths));
       } catch (e) {
         logDev(`[change-registry] could not write: ${e.message}`);
       }
@@ -1187,7 +1203,7 @@ async function main() {
           envResult: envWriteResult,
         });
         const paths = writeChangeRegistry(analysisRoot, record);
-        logUser(`Change log: ${paths.mdRel} (history in .fyodos/changes/)`);
+        logUser(changeLogUserMessage(paths));
       } catch (e) {
         logDev(`[change-registry] could not write: ${e.message}`);
       }
