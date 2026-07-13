@@ -29,7 +29,14 @@ function normRel(p) {
 /** Extract "path(line,col): error" / "ERROR ... path:line" style lines. */
 function extractErrorLines(output) {
   const lines = String(output || '').split('\n');
-  return lines.filter((l) => /error\s+TS\d+|: error|ERROR\b|is not assignable|Cannot find|does not exist/i.test(l));
+  return lines.filter((l) => {
+    // npm's failure banner ("npm error path …", "npm ERR! command failed") is
+    // the WRAPPER around a failed script, not a diagnostic. Counting it as an
+    // error made an action fail with "compilation: npm error path <dir>" even
+    // when every real tsc line had been classified as style-only.
+    if (/^\s*npm\s+(error|ERR!)/i.test(l)) return false;
+    return /error\s+TS\d+|: error|ERROR\b|is not assignable|Cannot find|does not exist/i.test(l);
+  });
 }
 
 /**
@@ -52,8 +59,16 @@ function normErr(line) {
  * really broken), as opposed to a style violation? These mean the safety net
  * MUST act: the action does not actually work.
  */
+// "Declared but never used" (TS6133/6192/6196/6198/6199/6205) is a STRICTNESS
+// gate (noUnusedLocals), never broken code. It also appears as an ARTIFACT of
+// per-action isolated verification: wiring one bridge action alone leaves the
+// sibling symbols of the same destructuring temporarily unused, which used to
+// fail every action in that file (the navigate_section/logout production bug).
+const UNUSED_CODE_TS_RE = /error\s+TS6(?:133|192|196|198|199|205)\b/i;
+
 function isRealCompileError(line) {
   const l = String(line);
+  if (UNUSED_CODE_TS_RE.test(l)) return false;
   return /error\s+TS\d+|Type error:|Cannot find (?:module|name)|is not assignable|does not exist on type|has no exported member|Module not found|SyntaxError|Unexpected (?:token|keyword|reserved word)|Expression expected|Parsing error/i.test(l);
 }
 
@@ -66,6 +81,8 @@ function isRealCompileError(line) {
 function isLintError(line) {
   const l = String(line);
   if (isRealCompileError(l)) return false;
+  // Unused-symbol strictness (see UNUSED_CODE_TS_RE) is style, not brokenness.
+  if (UNUSED_CODE_TS_RE.test(l)) return true;
   // Reference to a known ESLint rule namespace / a bare `no-*` rule.
   if (/@typescript-eslint\/|react-hooks\/|jsx-a11y\/|@next\/next\/|\bimport\/[a-z-]+|\breact\/[a-z-]+|prettier\/|\bno-[a-z][a-z-]+\b/.test(l)) return true;
   // ESLint compact format "12:5  Error  message  rule" without a TS error code.

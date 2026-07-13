@@ -203,4 +203,43 @@ function makeThemeFixture() {
   console.log('PASS wireShopifyTheme idempotent injection');
 }
 
+// ── 6. layout/password.liquid is wired too (Shopify renders it INSTEAD of
+//      theme.liquid while the store is password-protected — dev/trial stores
+//      default to this, and it's exactly the "installed correctly but the orb
+//      never shows up" report) ─────────────────────────────────────────────
+{
+  const root = makeThemeFixture();
+  const opts = { apiKey: 'fyo_test_key', apiUrl: 'https://api.fyodos.com' };
+  const passwordAbs = path.join(root, 'layout', 'password.liquid');
+  fs.writeFileSync(passwordAbs, '<!doctype html>\n<html>\n<body>\n{{ content_for_layout }}\n</body>\n</html>\n');
+
+  const first = wireShopifyTheme(root, opts);
+  assert.strictEqual(first.status, 'added', 'theme.liquid still wired');
+  assert.ok(first.password, 'password layout result present when the file exists');
+  assert.strictEqual(first.password.status, 'added', 'password.liquid wired too');
+  const pwSource = fs.readFileSync(passwordAbs, 'utf8');
+  assert.ok(pwSource.includes('FYODOS:ORB:START'), 'markers present in password.liquid');
+  assert.ok(pwSource.includes('fyo_test_key'), 'api key present in password.liquid snippet');
+
+  const second = wireShopifyTheme(root, opts);
+  assert.strictEqual(second.password.status, 'already', 'unchanged password.liquid re-run is a no-op');
+  assert.strictEqual(
+    (fs.readFileSync(passwordAbs, 'utf8').match(/FYODOS:ORB:START/g) || []).length,
+    1, 'no duplicate injection in password.liquid',
+  );
+
+  fs.rmSync(root, { recursive: true, force: true });
+  console.log('PASS wireShopifyTheme also wires layout/password.liquid when present');
+}
+
+// ── 7. Themes without a password.liquid (older/simpler themes) are unaffected
+{
+  const root = makeThemeFixture(); // no password.liquid in this fixture
+  const result = wireShopifyTheme(root, { apiKey: 'k', apiUrl: 'https://api.fyodos.com' });
+  assert.strictEqual(result.status, 'added', 'theme.liquid still wired');
+  assert.strictEqual(result.password, null, 'no password result when the theme has no password.liquid');
+  fs.rmSync(root, { recursive: true, force: true });
+  console.log('PASS themes without password.liquid are unaffected (no failure)');
+}
+
 console.log('ALL shopify tests passed');

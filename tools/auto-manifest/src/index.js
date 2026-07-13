@@ -990,6 +990,24 @@ async function main() {
         'If it\u2019s still a DRAFT (check the Shopify admin theme badge), publish it ONCE — ' +
         'Online Store \u2192 Themes \u2192 \u22ef \u2192 Publish \u2014 then every future push stays live automatically.',
       );
+      // New/trial Shopify stores are password-protected by default, and a
+      // password-protected storefront renders layout/password.liquid INSTEAD
+      // of layout/theme.liquid on every page — so without also wiring that
+      // layout (done above when the theme has one) the orb would be
+      // correctly installed and published yet invisible behind the password
+      // gate. Surfacing this explicitly since it is the #1 "installed
+      // correctly but nothing shows up" report on a fresh store.
+      if (orbWireResult.password) {
+        logUser(
+          orbWireResult.password.status === 'failed'
+            ? `Heads up: your store looks password-protected but the orb could not be added to ${orbWireResult.password.file} (${orbWireResult.password.reason}) — it will be invisible until you remove the password or fix that layout.`
+            : 'Your theme has a password page (layout/password.liquid) — the orb is embedded there too, so it still shows up while your store is password-protected.',
+        );
+      } else {
+        logUser(
+          'Heads up: if your store is still password-protected (common on new/trial stores) and your theme has NO separate layout/password.liquid, the orb won\u2019t show on the password page — remove the password (Online Store \u2192 Preferences) to test, or check under a real domain/plan.',
+        );
+      }
     }
 
     if (!noWire) {

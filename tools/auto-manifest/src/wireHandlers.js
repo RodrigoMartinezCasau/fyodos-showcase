@@ -98,6 +98,66 @@ function readFileSafe(appRoot, fileRel) {
   }
 }
 
+const SOURCE_EXTS = ['.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte'];
+
+/** Read tsconfig/jsconfig path aliases once per appRoot: [{ prefix, target }]. */
+const aliasCache = new Map();
+function readPathAliases(appRoot) {
+  if (aliasCache.has(appRoot)) return aliasCache.get(appRoot);
+  const aliases = [];
+  for (const cfgName of ['tsconfig.json', 'tsconfig.app.json', 'jsconfig.json']) {
+    try {
+      const raw = fs.readFileSync(path.join(appRoot, cfgName), 'utf8');
+      // Tolerant parse: strip comments and trailing commas (tsconfig is JSONC).
+      const cfg = JSON.parse(raw.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '').replace(/,\s*([}\]])/g, '$1'));
+      const co = cfg.compilerOptions || {};
+      const baseUrl = co.baseUrl || '.';
+      for (const [key, targets] of Object.entries(co.paths || {})) {
+        const target = Array.isArray(targets) ? targets[0] : targets;
+        if (!target) continue;
+        aliases.push({
+          prefix: key.replace(/\*$/, ''),
+          target: normRel(path.join(baseUrl, String(target).replace(/\*$/, ''))),
+        });
+      }
+    } catch {
+      /* no config or unparsable — skip */
+    }
+  }
+  aliasCache.set(appRoot, aliases);
+  return aliases;
+}
+
+/**
+ * Resolve an AI-proposed import path to a REAL file, tolerating what a human
+ * would write: tsconfig path aliases ('@/context/AppProvider') and
+ * extensionless specifiers. Returns the resolved app-relative path (with
+ * extension) or null. Rejecting these outright un-wired real actions whose
+ * only "fault" was that the AI wrote the import the way the codebase does.
+ */
+function resolveSourceFile(appRoot, fromRel) {
+  const candidates = [normRel(fromRel)];
+  for (const { prefix, target } of readPathAliases(appRoot)) {
+    const f = candidates[0];
+    if (f === prefix.replace(/\/$/, '') || f.startsWith(prefix)) {
+      candidates.push(normRel(target + f.slice(prefix.length)));
+    }
+  }
+  for (const rel of candidates) {
+    const abs = path.join(appRoot, rel);
+    if (fs.existsSync(abs) && fs.statSync(abs).isFile()) return rel;
+    for (const ext of SOURCE_EXTS) {
+      if (fs.existsSync(`${abs}${ext}`)) return `${rel}${ext}`;
+    }
+    if (fs.existsSync(abs) && fs.statSync(abs).isDirectory()) {
+      for (const ext of SOURCE_EXTS) {
+        if (fs.existsSync(path.join(abs, `index${ext}`))) return normRel(path.join(rel, `index${ext}`));
+      }
+    }
+  }
+  return null;
+}
+
 /** Count non-overlapping occurrences of a literal substring. */
 function countOccurrences(haystack, needle) {
   if (!needle) return 0;
@@ -112,14 +172,15 @@ function countOccurrences(haystack, needle) {
 
 // ── Mechanical verification (the safety net for AI-proposed wiring) ─────────────
 
-/** True if `symbol` appears as a standalone identifier somewhere in the file. */
+/** True if `symbol` appears as a standalone identifier somewhere in the file.
+ * The file path tolerates aliases/extensionless specifiers (resolveSourceFile). */
 function fileHasSymbol(appRoot, fileRel, symbol) {
   if (!fileRel || !symbol) return false;
-  const abs = path.join(appRoot, normRel(fileRel));
-  if (!fs.existsSync(abs)) return false;
+  const resolved = resolveSourceFile(appRoot, fileRel);
+  if (!resolved) return false;
   let content;
   try {
-    content = fs.readFileSync(abs, 'utf8');
+    content = fs.readFileSync(path.join(appRoot, resolved), 'utf8');
   } catch {
     return false;
   }
@@ -419,11 +480,12 @@ function buildAiEntry({ appRoot, fyodosDirRel, base, aiW, manifestParams }) {
   const importedNames = new Set();
   for (const imp of rawImports) {
     const name = String((imp && imp.name) || '').trim();
-    const from = normRel(imp && imp.from);
+    const rawFrom = normRel(imp && imp.from);
     const kind = (imp && imp.kind) || 'named';
-    if (!name || !from) return { reason: 'an import proposed by the AI is incomplete (missing name/from)' };
-    if (!fs.existsSync(path.join(appRoot, from))) {
-      return { reason: `the proposed import points to a non-existent file: '${from}'` };
+    if (!name || !rawFrom) return { reason: 'an import proposed by the AI is incomplete (missing name/from)' };
+    const from = resolveSourceFile(appRoot, rawFrom);
+    if (!from) {
+      return { reason: `the proposed import points to a non-existent file: '${rawFrom}'` };
     }
     // For named imports the symbol must be present in that file; default/namespace
     // bind the module's default/whole export so only file existence is checked.
@@ -515,6 +577,36 @@ function deriveBridgeAnchor(content, invoke) {
 }
 
 /**
+ * "Once wired, never regressed": when the file ALREADY contains a generated
+ * block registering this intent (from a previous verified run), reuse that
+ * position instead of re-rolling the AI's anchor. Re-running the wiring is
+ * otherwise nondeterministic — a bad anchor + an unlucky AI correction can
+ * un-wire an action that worked yesterday. Returns the nearest line ABOVE the
+ * existing block that survives the strip and is unique in the stripped
+ * content (a deterministic anchor for the same spot), or null.
+ */
+function reuseExistingBlockAnchor(rawContent, strippedContent, intent) {
+  const blockRe = new RegExp(
+    `(${esc(EDIT_START_PREFIX)}[^\\n]*)\\n[\\s\\S]*?${esc(EDIT_END)}`,
+    'g',
+  );
+  let m;
+  while ((m = blockRe.exec(rawContent))) {
+    if (!GENERATED_HEADER_RE.test(m[1])) continue;
+    if (!new RegExp(`"${esc(intent)}"\\s*:`).test(m[0])) continue;
+    const lines = rawContent.slice(0, m.index).split('\n');
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const line = lines[i];
+      const t = line.trim();
+      if (!t || t.startsWith('//') || t.startsWith('/*') || t.startsWith('*')) continue;
+      if (line.includes('FYODOS:')) continue;
+      if (countOccurrences(strippedContent, line) === 1) return line;
+    }
+  }
+  return null;
+}
+
+/**
  * True when an anchor that appears several times is HARMLESS: every occurrence
  * resolves to the same actual insertion point (the nearest JSX `return`), so
  * the ambiguity cannot change where the registration lands.
@@ -554,9 +646,15 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
   const why = aiW.bridgeReason ? ` (${aiW.bridgeReason})` : '';
 
   if (!file) return { reason: `the AI marked a bridge but did not indicate the component file${why}` };
-  const content = readFileSafe(appRoot, file);
-  if (content == null) return { reason: `could not read the component '${file}' to apply the bridge` };
+  const rawContent = readFileSafe(appRoot, file);
+  if (rawContent == null) return { reason: `could not read the component '${file}' to apply the bridge` };
   if (!invoke) return { reason: `the AI did not provide the bridge 'invoke' expression for '${file}'` };
+  // Anchor decisions must be made on the content the block will ACTUALLY be
+  // inserted into: applyComponentEdits strips our previous blocks first. On a
+  // re-run over an already-wired file, the old generated block contains the
+  // same invoke expressions, so counting occurrences on the raw file falsely
+  // flags unique anchors as "ambiguous" and un-wires working actions.
+  const content = stripFiodosBlocks(rawContent);
 
   // Anchor resolution ladder: exact-unique AI anchor → harmless-ambiguous AI
   // anchor → mechanically derived declaration anchor → review. The old behavior
@@ -566,7 +664,13 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
   const occ = anchor ? countOccurrences(content, anchor) : 0;
   if (occ !== 1) {
     const scope = b.scope === 'class-field' ? 'class-field' : 'statement';
-    if (occ > 1 && scope === 'statement' && ambiguousAnchorSameInsertion(content, anchor)) {
+    const reused = reuseExistingBlockAnchor(rawContent, content, base.intent);
+    if (reused) {
+      // A previous run already wired this intent here and verified it; the
+      // proven position beats re-rolling an ambiguous AI anchor.
+      anchor = reused;
+      anchorDerived = true;
+    } else if (occ > 1 && scope === 'statement' && ambiguousAnchorSameInsertion(content, anchor)) {
       // Keep the AI anchor: every occurrence lands on the same insertion point.
     } else {
       const derived = deriveBridgeAnchor(content, invoke);
@@ -604,10 +708,18 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
   const importedNames = new Set();
   for (const imp of Array.isArray(b.imports) ? b.imports : []) {
     const name = String((imp && imp.name) || '').trim();
-    const from = normRel(imp && imp.from);
+    const rawFrom = normRel(imp && imp.from);
     const kind = (imp && imp.kind) || 'named';
-    if (!name || !from) return { reason: 'a bridge import is incomplete (missing name/from)' };
-    if (!fs.existsSync(path.join(appRoot, from))) return { reason: `the bridge import points to a non-existent file: '${from}'` };
+    if (!name || !rawFrom) return { reason: 'a bridge import is incomplete (missing name/from)' };
+    // The component often ALREADY imports the symbol (useApp, a store hook…).
+    // Re-importing it produces "Duplicate identifier" and fails the candidate,
+    // so an already-in-scope name is accepted without adding a second import.
+    if (new RegExp(`^\\s*import\\b[^;\\n]*[^\\w$]${esc(name)}[^\\w$][^;\\n]*from`, 'm').test(content)) {
+      importedNames.add(name);
+      continue;
+    }
+    const from = resolveSourceFile(appRoot, rawFrom);
+    if (!from) return { reason: `the bridge import points to a non-existent file: '${rawFrom}'` };
     if (kind === 'named' && !fileHasSymbol(appRoot, from, name)) return { reason: `named import '${name}' does not exist in '${from}'` };
     imports.push({ kind, name, importPath: relImport(path.dirname(file), from) });
     importedNames.add(name);
@@ -1195,10 +1307,31 @@ function buildHandlerDoc(plan, ctx = {}) {
 
 // ── Editing the user's own files (idempotent + reversible) ─────────────────────
 
-/** Remove any previously-inserted Fiodos blocks (idempotence across re-runs). */
+/**
+ * Header phrasings the CLI itself has ever written (current English + the
+ * localized parenthetical of older versions). Only blocks carrying one of
+ * these are OURS to strip.
+ */
+const GENERATED_HEADER_RE = /(generated by|auto-generado por|generado por)\s+Fiodos/i;
+
+/**
+ * Remove previously-inserted Fiodos blocks (idempotence across re-runs) —
+ * but ONLY the blocks this CLI generated. A developer can hand-write their
+ * own `FYODOS:BRIDGE` block (e.g. "manual wiring — logout") following our
+ * docs; that block is THEIR code and often the only user of an import
+ * (`useEffect`, a hook…). Stripping it orphans the import, the strict
+ * TypeScript check (noUnusedLocals) fails the candidate, and the whole
+ * wiring reverts — the exact failure that left navigate_section/logout
+ * unwired in production. Developer blocks are preserved verbatim.
+ */
 function stripFiodosBlocks(content) {
-  const re = new RegExp(`\\n?${esc(EDIT_START_PREFIX)}[^\\n]*[\\s\\S]*?${esc(EDIT_END)}\\n?`, 'g');
-  return content.replace(re, '\n');
+  const re = new RegExp(
+    `\\n?(${esc(EDIT_START_PREFIX)}[^\\n]*)[\\s\\S]*?${esc(EDIT_END)}\\n?`,
+    'g',
+  );
+  return content.replace(re, (block, headerLine) =>
+    GENERATED_HEADER_RE.test(headerLine) ? '\n' : block,
+  );
 }
 
 /** Insert an import block right after the file's last top-level import line. */
@@ -1258,6 +1391,26 @@ function insertRegisterBlock(content, file, anchor, block, scope) {
   if (scope === 'class-field') {
     const lineEnd = content.indexOf('\n', at);
     const endIdx = lineEnd === -1 ? content.length : lineEnd;
+    return content.slice(0, endIdx) + '\n' + block + content.slice(endIdx);
+  }
+
+  // When the anchor's own line is unmistakably a body STATEMENT (a declaration
+  // or a bare call ending in `;`), insert right AFTER it. Snapping to the
+  // nearest `return` instead can land the registration inside a conditional
+  // early-return branch (`if (authLoading) { … return <Spinner/> }`): it
+  // compiles, but in normal use that branch never runs and the bridge is never
+  // registered — the action silently dies at runtime.
+  const anchorLineStart = content.lastIndexOf('\n', at) + 1;
+  const anchorLineEnd = content.indexOf('\n', at);
+  const anchorLine = content.slice(anchorLineStart, anchorLineEnd === -1 ? content.length : anchorLineEnd).trim();
+  const isStatementLine =
+    /^(const|let|var)\b.*;\s*$/.test(anchorLine) || /^[\w$][\w$.]*\((?:[^()]|\([^()]*\))*\);\s*$/.test(anchorLine);
+  if (isStatementLine) {
+    // A multi-line declaration (`const { a, b } =\n  useApp();`) ends at the
+    // first `;` at/after the anchor, not at the anchor's own line end.
+    const semi = content.indexOf(';', at);
+    const stmtEnd = semi === -1 ? (anchorLineEnd === -1 ? content.length : anchorLineEnd) : content.indexOf('\n', semi);
+    const endIdx = stmtEnd === -1 ? content.length : stmtEnd;
     return content.slice(0, endIdx) + '\n' + block + content.slice(endIdx);
   }
 
@@ -1410,24 +1563,64 @@ function pickRelevantFiles(files, evidence, candidate, intent) {
     for (const imp of (candidate.bridge && candidate.bridge.imports) || []) if (imp && imp.from) wanted.add(normRel(imp.from));
     for (const r of candidate.requiredSymbols || []) if (r && r.file) wanted.add(normRel(r.file));
   }
+  // The most common unfixable failure is "symbol X is not available in the
+  // proposed file": the fix lives in ANOTHER component that consumes X. Give
+  // the corrector every file that mentions the invoked symbols (capped) so it
+  // can retarget the bridge instead of blindly retrying the same file.
+  const invokeSrc = String(
+    (candidate && ((candidate.bridge && candidate.bridge.invoke) || candidate.call)) || '',
+  );
+  const symbols = new Set();
+  let sm;
+  const symRe = /(?:^|[^.\w$])([A-Za-z_$][\w$]{2,})\s*\(/g;
+  while ((sm = symRe.exec(invokeSrc))) {
+    if (!JS_KEYWORDS.has(sm[1]) && !SAFE_GLOBALS.has(sm[1])) symbols.add(sm[1]);
+  }
+  if (symbols.size) {
+    let extra = 0;
+    for (const f of files) {
+      if (extra >= 4) break;
+      if (wanted.has(normRel(f.rel))) continue;
+      const content = String(f.content || '');
+      for (const sym of symbols) {
+        if (new RegExp(`(^|[^\\w$])${esc(sym)}([^\\w$]|$)`).test(content)) {
+          wanted.add(normRel(f.rel));
+          extra += 1;
+          break;
+        }
+      }
+    }
+  }
   const picked = files.filter((f) => wanted.has(normRel(f.rel)));
   return picked.length ? picked : files.slice(0, 4);
 }
 
-/** Write ONLY one entry (registry + bridge + its edit) for isolated verification. */
+/**
+ * Write ONLY one entry (registry + bridge + its edit) for isolated verification.
+ * Registry/bridge files from a PREVIOUS install are snapshotted and restored on
+ * revert instead of deleted: deleting them would break every OTHER file that
+ * still imports `../fyodos/bridge` from an earlier run, making all later
+ * verifications fail with a phantom "Cannot find module" (TS2307).
+ */
 function writeIsolated({ appRoot, fyodosDirAbs, entry, ts, esm, ext }) {
   const onePlan = { auto: [entry], review: [], manual: [], entries: [entry] };
   const registryAbs = path.join(fyodosDirAbs, `${REGISTRY_BASENAME}${ext}`);
   const bridgeAbs = path.join(fyodosDirAbs, `${BRIDGE_BASENAME}${ext}`);
-  const generated = [registryAbs];
+  const priorBackups = [];
+  const generated = [];
+  const snapshotOrCreate = (abs) => {
+    if (fs.existsSync(abs)) priorBackups.push({ file: abs, abs, original: fs.readFileSync(abs, 'utf8') });
+    else generated.push(abs);
+  };
+  snapshotOrCreate(registryAbs);
   if (entry.kind === 'bridge') {
+    snapshotOrCreate(bridgeAbs);
     fs.writeFileSync(bridgeAbs, buildBridgeModule({ ts, esm }));
-    generated.push(bridgeAbs);
   }
   fs.writeFileSync(registryAbs, buildRegistryModule(onePlan, { ts, esm }));
   const edits = planComponentEdits(appRoot, onePlan, { ts });
   const { backups } = applyComponentEdits(appRoot, edits);
-  return { backups, generated, touched: [...edits.map((e) => e.file), registryAbs, bridgeAbs] };
+  return { backups: [...backups, ...priorBackups], generated, touched: [...edits.map((e) => e.file), registryAbs, bridgeAbs] };
 }
 
 /**

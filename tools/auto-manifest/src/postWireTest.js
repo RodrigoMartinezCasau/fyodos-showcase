@@ -127,6 +127,13 @@ function summarizeBuildOutput(raw, maxLines = 4) {
   return picked.slice(0, maxLines).join('\n').trim();
 }
 
+/** Does this output contain a signal that the CODE is broken (vs npm/env noise)? */
+function looksLikeCompileFailure(output) {
+  return /error\s+TS\d+|Type error:|Module not found|Can't resolve|Failed to compile|SyntaxError|Parsing error|Cannot find (?:module|name)/i.test(
+    String(output || ''),
+  );
+}
+
 async function runPostWireTest(appRoot, opts = {}) {
   const timeoutMs = opts.timeoutMs || 240000;
   if (!fs.existsSync(path.join(appRoot, 'node_modules'))) {
@@ -143,12 +150,26 @@ async function runPostWireTest(appRoot, opts = {}) {
     return { ok: true, stage: 'skipped-no-deps', command: '(none)', output: 'no build/typecheck script.' };
   }
 
-  const res = await runAsync('npm', chosen.args, {
-    cwd: appRoot,
-    timeout: timeoutMs,
-    env: { ...process.env, CI: '1', NODE_ENV: process.env.NODE_ENV || 'production' },
-    maxBuffer: 64 * 1024 * 1024,
-  });
+  const runOnce = () =>
+    runAsync('npm', chosen.args, {
+      cwd: appRoot,
+      timeout: timeoutMs,
+      env: { ...process.env, CI: '1', NODE_ENV: process.env.NODE_ENV || 'production' },
+      maxBuffer: 64 * 1024 * 1024,
+    });
+
+  let res = await runOnce();
+  // A spawn-level or npm-level failure with ZERO compile diagnostics is
+  // environment noise (npm cache contention, a concurrent process touching
+  // package.json, transient ENOENT), not broken code. Blaming the action for
+  // it drops perfectly good wiring, so retry once before judging.
+  const npmLevelFailure =
+    (res.error && res.error.code !== 'ETIMEDOUT') ||
+    (res.status !== 0 && res.status !== null && !looksLikeCompileFailure(`${res.stdout}\n${res.stderr}`));
+  if (npmLevelFailure) {
+    await new Promise((r) => setTimeout(r, 1500));
+    res = await runOnce();
+  }
 
   if (res.error && res.error.code === 'ETIMEDOUT') {
     return { ok: false, stage: 'timeout', command: chosen.label, output: `build exceeded ${Math.round(timeoutMs / 1000)}s` };

@@ -240,19 +240,16 @@ function escapeRe(s) {
 }
 
 /**
- * Inject (or refresh) the snippet in layout/theme.liquid, right before
+ * Inject (or refresh) the snippet into ONE liquid layout file, right before
  * </body>. Idempotent via the FYODOS:ORB markers: an existing block is
  * replaced in place, so re-running the CLI updates the snippet instead of
- * duplicating it. Returns { status: 'added'|'already'|'skipped'|'failed',
- * file, reason? }.
+ * duplicating it. Returns { status: 'added'|'already'|'skipped'|'failed'|
+ * 'not-found', file, reason?, refreshed? }.
  */
-function wireShopifyTheme(appRoot, { apiKey, apiUrl, noWire = false } = {}) {
-  const relFile = path.join('layout', 'theme.liquid');
-  const file = path.join(appRoot, relFile);
+function injectSnippetInLayout(file, relFile, snippet, { noWire = false } = {}) {
   if (!fs.existsSync(file)) {
-    return { status: 'failed', file: relFile, reason: 'layout/theme.liquid not found' };
+    return { status: 'not-found', file: relFile };
   }
-  const snippet = buildShopifySnippet({ apiKey, apiUrl });
   const source = fs.readFileSync(file, 'utf8');
 
   const markerRe = new RegExp(`${escapeRe(ORB_START)}[\\s\\S]*?${escapeRe(ORB_END)}`);
@@ -273,6 +270,41 @@ function wireShopifyTheme(appRoot, { apiKey, apiUrl, noWire = false } = {}) {
   return { status: 'added', file: relFile };
 }
 
+/**
+ * Wire the theme's layout(s). layout/theme.liquid is the one every storefront
+ * page uses and is REQUIRED. layout/password.liquid — when the theme ships
+ * one (Dawn, Horizon and most modern themes do) — is a SEPARATE layout Shopify
+ * renders INSTEAD of theme.liquid on every page while the store has password
+ * protection active (the default on every new/trial store, and very common on
+ * dev stores used to test an install). Without wiring it too, the orb is
+ * correctly embedded and published yet invisible to anyone hitting the
+ * password gate — "installed correctly but nothing shows up". Best-effort:
+ * its absence is normal (older/simpler themes have none) and never fails the
+ * install.
+ *
+ * Returns { status, file, reason?, refreshed?, password: {status, file,...} }
+ * — `password` mirrors the same shape for layout/password.liquid, or null
+ * when that file does not exist in this theme.
+ */
+function wireShopifyTheme(appRoot, { apiKey, apiUrl, noWire = false } = {}) {
+  const snippet = buildShopifySnippet({ apiKey, apiUrl });
+
+  const themeRelFile = path.join('layout', 'theme.liquid');
+  const themeFile = path.join(appRoot, themeRelFile);
+  if (!fs.existsSync(themeFile)) {
+    return { status: 'failed', file: themeRelFile, reason: 'layout/theme.liquid not found', password: null };
+  }
+  const themeResult = injectSnippetInLayout(themeFile, themeRelFile, snippet, { noWire });
+
+  const passwordRelFile = path.join('layout', 'password.liquid');
+  const passwordFile = path.join(appRoot, passwordRelFile);
+  const passwordResult = fs.existsSync(passwordFile)
+    ? injectSnippetInLayout(passwordFile, passwordRelFile, snippet, { noWire })
+    : null;
+
+  return { ...themeResult, password: passwordResult };
+}
+
 function reportShopifyWire(result, colors = {}, { quiet = false } = {}) {
   const { blue = '', cyan = '', reset = '' } = colors;
   const say = (line) => console.error(`${cyan}◉${reset} ${blue}Fiodos${reset} · ${line}`);
@@ -284,6 +316,13 @@ function reportShopifyWire(result, colors = {}, { quiet = false } = {}) {
     say(`could not embed the orb: ${result.reason}`);
   } else if (!quiet) {
     say(`orb embed skipped (${result.reason || result.status})`);
+  }
+
+  const pw = result.password;
+  if (pw && (pw.status === 'added' || pw.status === 'already')) {
+    say(`orb also embedded in ${pw.file} — keeps working while your store is password-protected`);
+  } else if (pw && pw.status === 'failed') {
+    say(`could not embed the orb in ${pw.file}: ${pw.reason} — the orb won't show while your store is password-protected`);
   }
 }
 
