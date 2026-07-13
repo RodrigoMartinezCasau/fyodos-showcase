@@ -326,6 +326,34 @@ async function analyzeViaProxy({ apiKey, apiUrl, model, user, task = 'analysis',
       'Or pass --own-ai-key to analyze with your own AI key (code never reaches Fiodos).',
     );
   }
+  // PRE-FLIGHT platform check (analysis only, non-web platforms): the deployed
+  // backend may be OLDER than this CLI and not know the platform yet — its
+  // prompt builder then silently falls back to the generic web prompt and the
+  // resulting manifest misses the platform spec entirely (e.g. Shopify's
+  // execution blocks). The system-prompt endpoint echoes the platform it
+  // resolved, so a stale backend is detectable BEFORE spending any AI tokens.
+  // Fail-open on network/endpoint errors: the post-call echo guard still runs.
+  if (task === 'analysis' && platform && platform !== 'web') {
+    try {
+      const probe = await fetch(
+        `${apiUrl}/v1/developer/analysis/system-prompt?task=analysis&platform=${encodeURIComponent(platform)}`,
+        { headers: { 'x-api-key': apiKey } },
+      );
+      if (probe.ok) {
+        const meta = await probe.json();
+        if (meta && meta.platform && meta.platform !== platform) {
+          throw new Error(
+            `The Fiodos backend at ${apiUrl} does not support --platform ${platform} yet ` +
+            `(it would analyze as "${meta.platform}", missing the ${platform} platform spec). ` +
+            'Update/redeploy the backend and re-run the analysis.',
+          );
+        }
+      }
+    } catch (e) {
+      if (String(e && e.message).includes('does not support --platform')) throw e;
+      /* preflight is best-effort — the post-call echo guard still protects */
+    }
+  }
   const res = await fetch(`${apiUrl}/v1/developer/analyze`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
@@ -351,6 +379,18 @@ async function analyzeViaProxy({ apiKey, apiUrl, model, user, task = 'analysis',
     throw new Error(`Hosted analysis failed: ${res.status} ${detail}`);
   }
   const data = await res.json();
+  // Platform degradation guard: an outdated backend that does not know the
+  // requested platform silently builds the generic WEB prompt instead — the
+  // manifest then LOOKS fine but misses the platform's spec (e.g. Shopify's
+  // declarative execution blocks, without which no commerce action can run).
+  // New backends echo the platform they actually used; a mismatch is fatal.
+  if (data.platform && platform && data.platform !== platform) {
+    throw new Error(
+      `The Fiodos backend at ${apiUrl} does not support --platform ${platform} yet ` +
+      `(it analyzed as "${data.platform}"). The manifest it would produce is missing ` +
+      `the ${platform} platform spec. Update/redeploy the backend and re-run the analysis.`,
+    );
+  }
   return {
     parsed: parseJsonContent(data.text || '{}'),
     usage: {

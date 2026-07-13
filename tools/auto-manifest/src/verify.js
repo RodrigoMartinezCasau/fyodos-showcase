@@ -146,6 +146,41 @@ function sanitizeBubblePrompts(raw) {
 }
 
 /**
+ * Max length (chars) of a dashboard `labels` translation — it renders as a
+ * short UI label (route/action name), never a sentence.
+ */
+const MAX_LABEL = 60;
+
+/** Sanitize one dashboard label translation string (see sanitizeBubblePrompt). */
+function sanitizeLabelText(raw) {
+  if (typeof raw !== 'string') return undefined;
+  let s = raw.replace(/\s+/g, ' ').trim();
+  s = s.replace(/^["'«»“”]+|["'«»“”]+$/g, '').trim();
+  if (!s) return undefined;
+  if (s.length > MAX_LABEL) s = s.slice(0, MAX_LABEL).trim();
+  return s || undefined;
+}
+
+/**
+ * Sanitize a route/action's `labels` translation map (fail-open, item never
+ * dropped): keeps only valid base-language keys whose values survive label
+ * hygiene. Returns undefined when nothing usable remains, so the dashboard
+ * falls back to the primary `label`. Unlike `bubblePrompts`, this map is
+ * REQUIRED by the analyzer prompt (es/en, unconditional) — but the CLI still
+ * never blocks a manifest over a missing/malformed translation.
+ */
+function sanitizeLabels(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const out = {};
+  for (const [key, value] of Object.entries(raw)) {
+    const lang = sanitizeLanguageCode(key);
+    const label = sanitizeLabelText(value);
+    if (lang && label && !(lang in out)) out[lang] = label;
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+/**
  * Sanitize the manifest-level `appLanguages` list (fail-open): dedupes and
  * normalizes to base codes, preserving the model's order (primary first).
  * Returns undefined when nothing usable remains (monolingual apps).
@@ -442,6 +477,10 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
     const bubbles = sanitizeBubblePrompts(route.bubblePrompts);
     if (bubbles) route.bubblePrompts = bubbles;
     else delete route.bubblePrompts;
+    // Dashboard label translations (es/en) — see sanitizeLabels doc.
+    const routeLabels = sanitizeLabels(route.labels);
+    if (routeLabels) route.labels = routeLabels;
+    else delete route.labels;
   }
 
   // Schema coercion the model sometimes needs (same as the old engine).
@@ -457,6 +496,10 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
       action.confirmationMessageTemplate = `Confirm: ${action.label || action.intent}?`;
       provenance.notes.push(`action '${action.intent}': confirmation template filled mechanically`);
     }
+    // Dashboard label translations (es/en) — see sanitizeLabels doc.
+    const actionLabels = sanitizeLabels(action.labels);
+    if (actionLabels) action.labels = actionLabels;
+    else delete action.labels;
   }
 
   // App-level supported languages (fail-open): normalized base codes, primary
