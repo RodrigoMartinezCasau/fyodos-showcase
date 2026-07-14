@@ -286,6 +286,10 @@ export function useAgent({
       }) => Promise<void>)
     | null
   >(null);
+  // Intent whose showcase escort was DEFERRED mid-chain (suppressEscort):
+  // flushed when the chain ends so the user lands where the last action's
+  // effect is visible — never in the middle of a running chain.
+  const deferredEscortIntentRef = useRef<string | null>(null);
   const pendingConfirmationMessageRef = useRef<string | null>(null);
   useEffect(() => {
     pendingConfirmationMessageRef.current = pendingConfirmationMessage;
@@ -661,6 +665,8 @@ export function useAgent({
               redactionsApplied: actx.redactions,
             });
             if (navResult.success) {
+              // A deliberate navigate supersedes any escort deferred earlier.
+              deferredEscortIntentRef.current = null;
               lastStep = {
                 type: 'navigate',
                 intent: action.intent ?? '',
@@ -782,7 +788,13 @@ export function useAgent({
               }
             } else {
               const actionStartedAt = Date.now();
-              const execResult = await executor.execute(action, executeContext);
+              // Mid-chain: hold the showcase escort so the chain is not yanked
+              // between screens step by step; it escorts once when it ends.
+              const escortDeferred =
+                chaining.enabled && res.taskStatus === 'in_progress';
+              const execResult = await executor.execute(action, executeContext, {
+                suppressEscort: escortDeferred,
+              });
               telemetry.logEvent({
                 eventType: execResult.recoverable
                   ? 'action_needs_context'
@@ -840,6 +852,11 @@ export function useAgent({
                 spokenAudio = null;
               }
               if (execResult.success && !execResult.recoverable) {
+                // Deferred-escort bookkeeping: remember the intent whose
+                // escort was held (flushed at chain end).
+                deferredEscortIntentRef.current = escortDeferred
+                  ? (action.intent ?? null)
+                  : null;
                 // Feed the step's RESULT DATA back to the next chain turn
                 // (bounded): it is how the model reads real technical values
                 // (variant ids, line numbers) out of a data action instead
@@ -895,6 +912,7 @@ export function useAgent({
           let step = cs.step;
           let lastStep = cs.lastStep;
           const visitedKeys = cs.visitedKeys;
+          try {
           while (step < chaining.maxSteps) {
             step += 1;
             if (chaining.dwellMs > 0) await sleep(chaining.dwellMs);
@@ -1047,6 +1065,16 @@ export function useAgent({
             chainStep: step,
             chainAbortReason: 'max_steps',
           });
+          } finally {
+            // Flush the showcase escort deferred during the chain — unless a
+            // confirmation is pending (the chain may resume after the answer,
+            // and the confirmed action escorts on its own).
+            if (pendingConfirmationRef.current == null) {
+              const escortIntent = deferredEscortIntentRef.current;
+              deferredEscortIntentRef.current = null;
+              if (escortIntent) executor.escortForIntent(escortIntent);
+            }
+          }
         };
         // Expose the loop so confirmPendingAction can resume this exact chain.
         if (chaining.enabled) runChainLoopRef.current = runChainLoop;
@@ -1813,6 +1841,7 @@ export function useAgent({
     // Declining a sensitive action stops any chain it was part of, cleanly.
     const chainState = chainStateRef.current;
     chainStateRef.current = null;
+    deferredEscortIntentRef.current = null;
     if (chainState) {
       telemetry.logEvent({
         eventType: 'agent_chain_aborted',

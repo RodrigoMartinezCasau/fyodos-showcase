@@ -953,13 +953,20 @@ function buildRegistryModule(plan, opts = {}) {
   // Shared runner: one place normalizes any wired call into an action result,
   // so each handler below stays a one-liner. `unknown` keeps the truthiness
   // test legal even when the wired call returns void (e.g. db.delete(...)).
+  // "is not a function" here means a BRIDGE method whose host screen is not
+  // mounted yet — the SDK executor recognizes FYODOS_HANDLER_UNREADY, walks
+  // the user to the screen that hosts the action and retries automatically.
   const runHelper = ts
     ? 'async function __fyodosRun(call: () => unknown): Promise<FiodosActionResult> {\n' +
       '  try {\n' +
       '    const result: unknown = await Promise.resolve(call());\n' +
       "    return { success: true, data: (result && typeof result === 'object') ? result as Record<string, unknown> : { result } };\n" +
       '  } catch (err) {\n' +
-      '    return { success: false, error: err instanceof Error ? err.message : String(err) };\n' +
+      '    const msg = err instanceof Error ? err.message : String(err);\n' +
+      "    if (err instanceof TypeError && /is not a function/.test(msg)) {\n" +
+      "      return { success: false, error: 'FYODOS_HANDLER_UNREADY: ' + msg };\n" +
+      '    }\n' +
+      '    return { success: false, error: msg };\n' +
       '  }\n' +
       '}\n'
     : 'async function __fyodosRun(call) {\n' +
@@ -967,7 +974,11 @@ function buildRegistryModule(plan, opts = {}) {
       '    const result = await Promise.resolve(call());\n' +
       "    return { success: true, data: (result && typeof result === 'object') ? result : { result } };\n" +
       '  } catch (err) {\n' +
-      '    return { success: false, error: err instanceof Error ? err.message : String(err) };\n' +
+      '    const msg = err instanceof Error ? err.message : String(err);\n' +
+      "    if (err instanceof TypeError && /is not a function/.test(msg)) {\n" +
+      "      return { success: false, error: 'FYODOS_HANDLER_UNREADY: ' + msg };\n" +
+      '    }\n' +
+      '    return { success: false, error: msg };\n' +
       '  }\n' +
       '}\n';
 

@@ -56,14 +56,18 @@ export const DEFAULT_AGENT_TIMINGS: AgentTimings = {
 };
 
 /**
- * Autonomous multi-step chaining. OFF by default: with `enabled: false` the orb
- * behaves exactly as before (one action per turn). When ON, after a successful
+ * Autonomous multi-step chaining. ON by default: after a successful
  * navigate/execute whose backend `task_status` is "in_progress", the orb takes
  * the next step on its own — capped at `maxSteps`, with no-progress detection,
  * and sensitive-confirmation pauses (which ALWAYS require the user).
+ *
+ * Default ON is a product invariant, not a tuning choice: data actions
+ * (search, get-cart…) are INVISIBLE — without the continuation turn the orb
+ * runs them and then goes silent. Pass `chaining: { enabled: false }` to opt
+ * out and return to one-action-per-turn.
  */
 export interface AgentChaining {
-  /** Master switch. Default false (retrocompatible). */
+  /** Master switch. Default true (the agent completes multi-step tasks). */
   enabled: boolean;
   /** Hard cap on steps per user request (safety). Default 6. */
   maxSteps: number;
@@ -72,7 +76,7 @@ export interface AgentChaining {
 }
 
 export const DEFAULT_AGENT_CHAINING: AgentChaining = {
-  enabled: false,
+  enabled: true,
   maxSteps: 6,
   dwellMs: 450,
 };

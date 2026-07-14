@@ -94,8 +94,14 @@ async function errorFromResponse(res: Response): Promise<AgentApiError> {
     return new AgentApiError('unauthorized', detail, res.status);
   }
   if (res.status === 429) {
+    // The backend marks plan/budget 429s with error:"quota_exceeded" (rate
+    // limits carry error:"rate_limited"); the detail/remaining checks cover
+    // older backends. Getting this right matters: a quota 429 shown as "too
+    // many requests" sends the developer chasing rate limits that are fine.
     const quotaSignal =
-      typeof body.remaining === 'number' || (detail ?? '').toLowerCase().includes('quota');
+      body.error === 'quota_exceeded' ||
+      typeof body.remaining === 'number' ||
+      (detail ?? '').toLowerCase().includes('quota');
     return new AgentApiError(quotaSignal ? 'quota_exceeded' : 'rate_limited', detail, res.status);
   }
   if (res.status === 404) return new AgentApiError('not_found', detail, res.status);

@@ -100,6 +100,14 @@ test('HTTP statuses map to stable machine codes (no language matching)', async (
     { status: 429, body: { error: 'rate limit' }, code: 'rate_limited' },
     { status: 429, body: { error: 'Daily quota exceeded' }, code: 'quota_exceeded' },
     { status: 429, body: { remaining: 0 }, code: 'quota_exceeded' },
+    // Plan/budget 429s carry error:"quota_exceeded" with a human detail that
+    // does NOT contain the word "quota" — the machine field must win, or the
+    // user sees a misleading "too many requests" for a budget problem.
+    {
+      status: 429,
+      body: { detail: 'Daily AI usage safety limit reached for this project.', error: 'quota_exceeded' },
+      code: 'quota_exceeded',
+    },
     { status: 404, body: {}, code: 'not_found' },
     { status: 503, body: {}, code: 'server_error' },
   ];
