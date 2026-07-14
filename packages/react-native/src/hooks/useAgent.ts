@@ -42,6 +42,7 @@ import {
   recordConversationExchange,
   restoreConversationSession,
   stripWakePhrase,
+  trimChainStepData,
   defaultWakePhrasesForLocale,
   type AgentAction,
   type AgentScreenContext,
@@ -829,13 +830,27 @@ export function useAgent({
                 // audio no longer matches the spoken text).
                 spokenReply = execResult.message;
                 spokenAudio = null;
+              } else if (!execResult.success) {
+                // Same guarantee for a handler that failed WITHOUT setting
+                // `message` (e.g. a declarative execution call — OData/Dynamics
+                // actions on native — that hit a network/HTTP/template error).
+                // Without this, the LLM's pre-action narration stays as if the
+                // action had happened — a silent false success.
+                spokenReply = messages.actionFailed;
+                spokenAudio = null;
               }
               if (execResult.success && !execResult.recoverable) {
+                // Feed the step's RESULT DATA back to the next chain turn
+                // (bounded): it is how the model reads real technical values
+                // (variant ids, line numbers) out of a data action instead
+                // of inventing them.
+                const chainData = trimChainStepData(execResult.data);
                 lastStep = {
                   type: 'execute',
                   intent: action.intent ?? '',
                   label: manifestAction?.label,
                   success: true,
+                  ...(chainData ? { data: chainData } : {}),
                 };
                 actionKey = `execute:${action.intent ?? ''}`;
                 canContinue = res.taskStatus === 'in_progress';

@@ -174,6 +174,10 @@ export function createFiodosBackendClient(options: FiodosBackendClientOptions): 
             intent: request.lastStep.intent,
             ...(request.lastStep.label ? { label: request.lastStep.label } : {}),
             success: request.lastStep.success,
+            // Bounded result payload of the executed step (product search
+            // results…): the backend renders it so the model can read real
+            // ids for the NEXT step's parameters.
+            ...(request.lastStep.data ? { data: request.lastStep.data } : {}),
           };
         }
       }

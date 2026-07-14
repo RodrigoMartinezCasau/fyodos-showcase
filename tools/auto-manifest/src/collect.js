@@ -80,6 +80,10 @@ function tierFor(rel, platform) {
     if (/^sections\//.test(p)) return 2;
     return 3; // snippets/, config/ (settings_data.json can be huge), rest
   }
+  return tierForApp(p);
+}
+
+function tierForApp(p) {
   if (/^(src\/)?app\//.test(p)) return 0; // expo-router / Next screens
   // `sections/` and `panels/` are SCREEN BODIES in shell-based apps (a Shell
   // page switches between section components): they carry the visible controls
@@ -117,7 +121,21 @@ function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' }
       if (!codeExt.has(path.extname(entry.name))) continue;
       if (SKIP_FILES.test(rel)) continue;
       if (isNative && SKIP_NATIVE_FILES.test(rel)) continue;
-      const content = fs.readFileSync(full, 'utf8');
+      let content = fs.readFileSync(full, 'utf8');
+      if (platform === 'shopify' && /^locales\//.test(rel.replace(/\\/g, '/'))) {
+        // Theme-editor translations (merchant-facing settings strings), not
+        // storefront language evidence — pure noise for the analysis.
+        if (/\.schema\.json$/.test(rel)) continue;
+        // Non-default storefront locales: what matters is THAT the language is
+        // published (the filename carries the code) — that is the evidence the
+        // MULTILINGUAL rule needs to emit appLanguages/bubblePrompts. Sending
+        // each file whole (tens of KB × dozens of locales) blew the budget and
+        // the alphabetical cut dropped exactly the important ones (en/es
+        // arrived after bg/cs/da…), so the AI saw a "monolingual" store.
+        if (!/\.default\.json$/.test(rel)) {
+          content = '{"__fyodos_note": "published storefront locale (content elided; this language IS offered to shoppers — count it in appLanguages/bubblePrompts)"}';
+        }
+      }
       files.push({ rel, content, tier: tierFor(rel, platform), chars: content.length });
     }
   };
