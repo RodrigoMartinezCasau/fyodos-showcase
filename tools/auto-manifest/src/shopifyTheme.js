@@ -195,10 +195,40 @@ async function fetchStorefrontSnapshot(storeRaw, { log = () => {} } = {}) {
 }
 
 /**
+ * The Liquid-rendered SCREEN CONTEXT lines shared by the CLI and dashboard
+ * snippets. One branch per storefront template the agent can act on, each
+ * exposing the visible items WITH their add-to-cart variantIds.
+ *
+ * Why every branch matters: with product-only context (the original version)
+ * the agent was BLIND on collection/search/cart pages — "add it to the cart"
+ * said next to a perfectly visible product degenerated into a text search
+ * with the user's phrasing, zero results, and an apology. The agent must be
+ * able to act on whatever the customer is LOOKING AT, on every page type.
+ */
+function shopifyScreenContextLiquidLines() {
+  return [
+    "  {% if template contains 'product' and product %}",
+    '  {% capture fyodos_screen_text %}The customer is viewing the product page of: {{ product.title }} (price {{ product.price | money | strip_html }}). Add-to-cart variantId: {{ product.selected_or_first_available_variant.id }}.{% endcapture %}',
+    "  window.__fyodosScreen = { kind: 'product', text: {{ fyodos_screen_text | json }} };",
+    "  {% elsif template contains 'collection' and collection %}",
+    '  {% capture fyodos_screen_text %}The customer is browsing the collection "{{ collection.title }}". Products visible on screen (title — price — add-to-cart variantId): {% for fyodos_p in collection.products limit: 16 %}{{ fyodos_p.title }} — {{ fyodos_p.price | money | strip_html }} — variantId {{ fyodos_p.selected_or_first_available_variant.id }}; {% endfor %}To add one to the cart, call add_to_cart with its variantId from this list.{% endcapture %}',
+    "  window.__fyodosScreen = { kind: 'collection', text: {{ fyodos_screen_text | json }} };",
+    "  {% elsif template contains 'search' and search.performed %}",
+    '  {% capture fyodos_screen_text %}The customer is viewing search results for "{{ search.terms }}". Products visible on screen (title — price — add-to-cart variantId): {% for fyodos_r in search.results limit: 12 %}{% if fyodos_r.object_type == \'product\' %}{{ fyodos_r.title }} — {{ fyodos_r.price | money | strip_html }} — variantId {{ fyodos_r.selected_or_first_available_variant.id }}; {% endif %}{% endfor %}To add one to the cart, call add_to_cart with its variantId from this list.{% endcapture %}',
+    "  window.__fyodosScreen = { kind: 'search', text: {{ fyodos_screen_text | json }} };",
+    "  {% elsif template contains 'cart' %}",
+    '  {% capture fyodos_screen_text %}The customer is viewing their cart: {{ cart.item_count }} item(s), total {{ cart.total_price | money | strip_html }}. Lines (title × quantity — variantId): {% for fyodos_i in cart.items %}{{ fyodos_i.product.title }} × {{ fyodos_i.quantity }} — variantId {{ fyodos_i.variant_id }}; {% endfor %}Use update_cart_item with a variantId from this list to change quantities.{% endcapture %}',
+    "  window.__fyodosScreen = { kind: 'cart', text: {{ fyodos_screen_text | json }} };",
+    '  {% endif %}',
+  ];
+}
+
+/**
  * The theme.liquid block: loads the embed, fetches the published manifest and
  * mounts the orb with API-wired registries. Mirrors the dashboard's
- * buildShopifySnippet, plus a Liquid-rendered PRODUCT screen context so the
- * agent knows the visible variant id (what add_to_cart needs by voice).
+ * buildShopifySnippet, plus a Liquid-rendered screen context (product,
+ * collection, search and cart pages) so the agent knows the visible items and
+ * their variant ids (what add_to_cart / update_cart_item need by voice).
  */
 function buildShopifySnippet({ apiKey, apiUrl }) {
   const key = apiKey || '<your-api-key>';
@@ -207,10 +237,7 @@ function buildShopifySnippet({ apiKey, apiUrl }) {
     ORB_START,
     `<script src="${FIODOS_EMBED_CDN_URL}" defer></script>`,
     '<script>',
-    "  {% if template contains 'product' and product %}",
-    '  {% capture fyodos_screen_text %}The customer is viewing the product page of: {{ product.title }} (price {{ product.price | money | strip_html }}). Add-to-cart variantId: {{ product.selected_or_first_available_variant.id }}.{% endcapture %}',
-    "  window.__fyodosScreen = { kind: 'product', text: {{ fyodos_screen_text | json }} };",
-    '  {% endif %}',
+    ...shopifyScreenContextLiquidLines(),
     "  window.addEventListener('DOMContentLoaded', function () {",
     `    var FYODOS_API_KEY = '${key}';`,
     `    var FYODOS_API_URL = '${url}';`,
@@ -330,6 +357,7 @@ module.exports = {
   isShopifyThemeRoot,
   readThemeMeta,
   fetchStorefrontSnapshot,
+  shopifyScreenContextLiquidLines,
   buildShopifySnippet,
   wireShopifyTheme,
   reportShopifyWire,

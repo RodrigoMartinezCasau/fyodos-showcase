@@ -102,6 +102,7 @@ const {
 const { wireReactNativeOrb, reportReactNativeWire, connectRnSession } = require('./wireReactNative');
 const {
   isShopifyThemeRoot, fetchStorefrontSnapshot, wireShopifyTheme, reportShopifyWire,
+  normalizeStoreDomain,
 } = require('./shopifyTheme');
 const { wireFlutterOrb, writeFlutterEnv, reportFlutterWire } = require('./wireFlutter');
 const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
@@ -404,13 +405,22 @@ async function main() {
   // so the analysis personalizes routes/bubbles/examples to the REAL catalog
   // — and so evidence verification has concrete files to point at. Fail-open:
   // an unreachable store still gets the universal surface file.
+  // Hoisted out of the `if` so it also reaches analysisMeta below: persisting
+  // the store domain in the published meta (not just using it locally for the
+  // snapshot) is what lets the DASHBOARD reconstruct the exact `--platform
+  // shopify --store <domain>` re-analysis command from the BACKEND record —
+  // no dependency on this browser's localStorage remembering how the project
+  // was first set up. Without it, a project analyzed before this field existed
+  // (or from a different browser/machine) shows the generic web command,
+  // silently missing the flags a Shopify re-analysis needs.
+  let shopifyStoreDomain = '';
   if (platform === 'shopify') {
-    const storeDomain = arg('--store', process.env.FYODOS_SHOPIFY_STORE || '');
-    if (!storeDomain) {
+    shopifyStoreDomain = normalizeStoreDomain(arg('--store', process.env.FYODOS_SHOPIFY_STORE || ''));
+    if (!shopifyStoreDomain) {
       logUser('Tip: add --store your-store.com so the analysis reads your live catalog (collections & products).');
     }
     const snapshot = await withSpinner('Reading your store\u2019s public catalog', () =>
-      fetchStorefrontSnapshot(storeDomain, { log: logDev }),
+      fetchStorefrontSnapshot(shopifyStoreDomain, { log: logDev }),
     );
     included.push(...snapshot.files);
   }
@@ -466,6 +476,13 @@ async function main() {
     ({ manifest, provenance } = routesOnlyManifest(appMeta, routes));
     logDev('[no-llm] static-only manifest (routes only, no actions)');
     logUser('Static analysis complete');
+    // Still record platform (+ store, when given) so the dashboard's
+    // re-analysis command stays correct even for a free/no-key smoke pass.
+    analysisMeta = {
+      ...analysisMeta,
+      platform,
+      ...(platform === 'shopify' && shopifyStoreDomain ? { store: shopifyStoreDomain } : {}),
+    };
   } else {
     // Hybrid AI-key model. DEFAULT: hosted analysis via the Fiodos backend
     // proxy (Fiodos's AI key, no key needed by the developer). With
@@ -552,6 +569,7 @@ async function main() {
       costUSD: Number(costUSD.toFixed(4)),
       droppedActions,
       droppedRoutes,
+      ...(platform === 'shopify' && shopifyStoreDomain ? { store: shopifyStoreDomain } : {}),
     };
   }
 

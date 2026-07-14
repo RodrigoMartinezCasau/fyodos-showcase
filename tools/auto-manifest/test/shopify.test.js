@@ -193,11 +193,43 @@ function makeThemeFixture() {
   assert.ok(updated.includes('fyo_new_key') && !updated.includes('fyo_test_key'), 'old key replaced');
   assert.strictEqual((updated.match(/FYODOS:ORB:START/g) || []).length, 1, 'still exactly one block');
 
-  // The snippet's Liquid stays balanced (every tag opened is closed).
+  // The snippet's Liquid stays balanced (every tag opened is closed; every
+  // {% elsif %} lives inside the one if/endif pair).
   const snippet = buildShopifySnippet(opts);
   const opens = (snippet.match(/\{%\s*(if|capture)/g) || []).length;
   const closes = (snippet.match(/\{%\s*end(if|capture)/g) || []).length;
   assert.strictEqual(opens, closes, 'balanced Liquid tags in the snippet');
+  const fors = (snippet.match(/\{%\s*for\s/g) || []).length;
+  const endfors = (snippet.match(/\{%\s*endfor/g) || []).length;
+  assert.strictEqual(fors, endfors, 'balanced for/endfor in the snippet');
+
+  // SCREEN CONTEXT ON EVERY ACTING PAGE TYPE: product, collection, search and
+  // cart must each publish window.__fyodosScreen with the visible items and
+  // their variantIds. With product-only context the agent was blind on
+  // collection pages: "add it to the cart" next to a visible product became a
+  // doomed text search ("no encontré productos…").
+  for (const kind of ['product', 'collection', 'search', 'cart']) {
+    assert.ok(
+      snippet.includes(`kind: '${kind}'`),
+      `screen context published on ${kind} pages`,
+    );
+  }
+  assert.ok(
+    snippet.includes('collection.products limit:'),
+    'collection context lists the visible products',
+  );
+  assert.ok(
+    /collection[\s\S]*variantId \{\{ fyodos_p\.selected_or_first_available_variant\.id \}\}/.test(snippet),
+    'collection items carry their add-to-cart variantId',
+  );
+  assert.ok(
+    snippet.includes('search.results limit:'),
+    'search context lists the visible results',
+  );
+  assert.ok(
+    snippet.includes('cart.items'),
+    'cart context lists the cart lines',
+  );
 
   fs.rmSync(root, { recursive: true, force: true });
   console.log('PASS wireShopifyTheme idempotent injection');
