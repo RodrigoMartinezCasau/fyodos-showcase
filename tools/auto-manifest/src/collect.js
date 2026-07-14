@@ -81,13 +81,22 @@ function tierFor(rel, platform) {
     return 3; // snippets/, config/ (settings_data.json can be huge), rest
   }
   if (/^(src\/)?app\//.test(p)) return 0; // expo-router / Next screens
-  if (/(^|\/)(screens?|pages?|views?|routes?|activities|fragments)\//i.test(p)) return 0;
-  if (/(screen|page|view|activity|fragment)\.(dart|kt|swift)$/i.test(p)) return 0;
+  // `sections/` and `panels/` are SCREEN BODIES in shell-based apps (a Shell
+  // page switches between section components): they carry the visible controls
+  // (color pickers, toggles) the analyzer must read to emit their actions.
+  // Ranking them as generic components (tier 3) silently dropped them under
+  // budget pressure and whole screens became invisible to the AI.
+  if (/(^|\/)(screens?|pages?|views?|routes?|sections?|panels?|activities|fragments)\//i.test(p)) return 0;
+  if (/(screen|page|view|activity|fragment|section)\.(dart|kt|swift)$/i.test(p)) return 0;
+  // Central state gets its OWN tier right after screens: the providers/stores
+  // define the setters that make screen controls wire-able actions. Sharing a
+  // tier with the (numerous) service/lib files let alphabetical fill starve
+  // out AppProvider-style files, and the AI had to guess every handler name.
   if (/(^|\/)(state|store|stores|context|contexts|redux|providers?|blocs?|cubits?|viewmodels?)\//i.test(p)) return 1;
   if (/(viewmodel|notifier|bloc|cubit|store|controller)\.(dart|kt|swift)$/i.test(p)) return 1;
-  if (/(^|\/)(services?|api|db|data|domain|agent|handlers?|actions?|lib|utils|repositories|repository|usecases?)\//i.test(p)) return 1;
-  if (/(^|\/)(hooks)\//.test(p)) return 2;
-  return 3; // generic components / ui
+  if (/(^|\/)(services?|api|db|data|domain|agent|handlers?|actions?|lib|utils|repositories|repository|usecases?)\//i.test(p)) return 2;
+  if (/(^|\/)(hooks)\//.test(p)) return 3;
+  return 4; // generic components / ui
 }
 
 function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' } = {}) {
@@ -118,10 +127,48 @@ function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' }
   files.sort((a, b) => a.tier - b.tier || a.rel.localeCompare(b.rel));
 
   const budgetChars = maxInputTokens * CHARS_PER_TOKEN;
+
+  // Floor-reserved fill. A pure greedy fill let a fat tier 0 (many large
+  // screen files) consume the WHOLE budget and push out tier 1 entirely —
+  // i.e. the app's central state/providers (AppProvider, stores) vanished
+  // from the analysis, so the AI could not see the setters that make
+  // configuration controls real actions and had to guess every handler name.
+  // Each lower tier gets a guaranteed FLOOR (share of the total budget,
+  // capped at its real demand); screens still get everything left over, and a
+  // final backfill hands unused room to deferred files in tier order.
+  const FLOOR_SHARE = { 1: 0.2, 2: 0.05, 3: 0.02, 4: 0.02 };
+  const demand = new Map();
+  for (const f of files) demand.set(f.tier, (demand.get(f.tier) ?? 0) + f.chars);
+
   const included = [];
-  const omitted = [];
+  const deferred = [];
   let used = 0;
-  for (const f of files) {
+  const tiers = [...demand.keys()].sort((a, b) => a - b);
+  for (const tier of tiers) {
+    // Reserve, for every LOWER-priority tier that still has files, the smaller
+    // of its floor and what it actually needs.
+    let reserved = 0;
+    for (const t of tiers) {
+      if (t <= tier) continue;
+      reserved += Math.min((FLOOR_SHARE[t] ?? 0) * budgetChars, demand.get(t));
+    }
+    const available = budgetChars - used - reserved;
+    let tierUsed = 0;
+    for (const f of files) {
+      if (f.tier !== tier) continue;
+      if (tierUsed + f.chars <= available) {
+        included.push(f);
+        tierUsed += f.chars;
+      } else {
+        deferred.push(f);
+      }
+    }
+    used += tierUsed;
+  }
+  // Backfill: any room the floors did not consume goes back to the deferred
+  // files, highest tier priority first.
+  const omitted = [];
+  for (const f of deferred) {
     if (used + f.chars <= budgetChars) {
       included.push(f);
       used += f.chars;
@@ -129,6 +176,8 @@ function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' }
       omitted.push({ rel: f.rel, chars: f.chars, tier: f.tier });
     }
   }
+  // Restore deterministic tier/path order after the backfill.
+  included.sort((a, b) => a.tier - b.tier || a.rel.localeCompare(b.rel));
 
   return {
     included,

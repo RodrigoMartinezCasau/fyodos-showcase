@@ -1334,9 +1334,14 @@ function stripFiodosBlocks(content) {
   );
 }
 
-/** Insert an import block right after the file's last top-level import line. */
+/** Insert an import block right after the file's last top-level import statement.
+ *  Matches the WHOLE statement through its module string — a per-line regex put
+ *  the block INSIDE multi-line imports (`import {\n  a,\n} from 'x';`), corrupting
+ *  the file (TS1003 "Identifier expected") and failing the wiring of every action
+ *  in that file. `[^'"]*` cannot skip a quote, so the match always stops at the
+ *  first quoted module specifier, then runs to that line's end. */
 function insertImportBlock(content, importBlock) {
-  const importLineRe = /^[ \t]*import\b[^\n]*\n/gm;
+  const importLineRe = /^[ \t]*import\b[^'"]*['"][^'"]+['"][^\n]*\n/gm;
   let lastEnd = -1;
   let m;
   while ((m = importLineRe.exec(content))) lastEnd = m.index + m[0].length;

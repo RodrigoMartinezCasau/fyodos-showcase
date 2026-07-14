@@ -23,6 +23,11 @@ for (const platform of ['web', 'mobile', 'flutter', 'ios', 'android']) {
   assertHas(prompt, 'color picker', `${platform}: names the color-picker case`);
   assertHas(prompt, 'COMMITS the value', `${platform}: commit-vs-plumbing rule of thumb`);
   assertHas(prompt, 'UI plumbing AROUND', `${platform}: plumbing is scoped, not a blanket skip`);
+  // Draft/workspace setters (patchOrbTheme-style) are commits too: the exact
+  // gap seen in production — color pickers writing to a publish-later draft
+  // were skipped, so "pon el borde del orbe verde" had no action to run.
+  assertHas(prompt, 'DRAFT SETTERS COUNT', `${platform}: draft-setter commits rule`);
+  assertHas(prompt, 'NOT one per preset swatch', `${platform}: one action per setting`);
   console.log(`PASS ${platform} prompt treats configuration controls as actions`);
 }
 
