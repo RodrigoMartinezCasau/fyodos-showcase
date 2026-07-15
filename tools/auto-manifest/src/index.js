@@ -220,11 +220,46 @@ function wiringSpinnerLabel(platform) {
   return `Wiring actions to your ${surfaceNoun(platform)}`;
 }
 
-/** Branded terminal spinner (Fiodos orb + colors when stderr is a TTY). */
+/**
+ * Fit a colored line into ONE terminal row. The in-place refresh
+ * (`\r` + erase-line) only works if the rendered line never wraps: on a
+ * narrow terminal (IDE panes) a wrapped spinner line leaves one orphan row
+ * BEHIND per tick — hundreds of stacked "Analyzing your project…" lines
+ * instead of a single live counter. ANSI escape sequences are copied without
+ * counting toward the visible width, so colors survive the truncation.
+ */
+function fitLineToWidth(line, columns) {
+  const cols = Number(columns);
+  if (!Number.isFinite(cols) || cols <= 0) return line;
+  const max = cols - 1; // last cell stays free: writing it can auto-wrap
+  let out = '';
+  let visible = 0;
+  for (let i = 0; i < line.length; ) {
+    if (line[i] === '\x1b') {
+      const m = /^\x1b\[[0-9;]*m/.exec(line.slice(i));
+      if (m) {
+        out += m[0];
+        i += m[0].length;
+        continue;
+      }
+    }
+    if (visible >= max) break;
+    out += line[i];
+    visible += 1;
+    i += 1;
+  }
+  // Close any open color so the truncated tail never bleeds styles.
+  return visible >= max ? `${out}\x1b[0m` : out;
+}
+
+/** Branded terminal spinner (Fiodos orb + colors when stderr is a TTY).
+ *  Without a TTY (piped/CI output) there is no in-place line refresh, so the
+ *  animation would stack one line per tick — print the label ONCE instead. */
 async function withSpinner(label, work) {
   const orbFrames = ['◴', '◷', '◶', '◵'];
   const brailleFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   const { blue, cyan, dim, reset } = fyodosTermColors();
+  const isTTY = Boolean(process.stderr.isTTY);
   let currentLabel = label;
   let frame = 0;
   let id = null;
@@ -236,13 +271,18 @@ async function withSpinner(label, work) {
     const tail = brailleFrames[frame % brailleFrames.length];
     const line =
       `${cyan}${orb}${reset} ${blue}Fiodos${reset} ${dim}${tail}${reset}  ${currentLabel}… ${dim}${sec}s${reset}`;
-    process.stderr.write(`\r\x1b[K${line}`);
+    process.stderr.write(`\r\x1b[K${fitLineToWidth(line, process.stderr.columns)}`);
     frame += 1;
   };
 
   const clearLine = () => process.stderr.write('\r\x1b[K');
 
   const startSpinner = () => {
+    if (!isTTY) {
+      // One static line; no timer (nothing can be refreshed without a TTY).
+      process.stderr.write(`${cyan}◉${reset} ${blue}Fiodos${reset}  ${currentLabel}…\n`);
+      return;
+    }
     render();
     id = setInterval(render, 140);
   };
@@ -256,11 +296,14 @@ async function withSpinner(label, work) {
   };
 
   const resume = () => {
-    if (!id) startSpinner();
+    if (!id && isTTY) startSpinner();
   };
 
   const setLabel = (next) => {
     currentLabel = next;
+    // Without a TTY the label is only ever printed once — announce the change
+    // on its own line so progress is still visible in piped/CI output.
+    if (!isTTY) process.stderr.write(`${cyan}◉${reset} ${blue}Fiodos${reset}  ${next}…\n`);
   };
 
   startSpinner();
