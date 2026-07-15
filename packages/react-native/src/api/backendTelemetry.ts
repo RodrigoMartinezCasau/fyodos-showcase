@@ -31,10 +31,20 @@ export interface FiodosTelemetryOptions {
 
 /** Wire shape accepted by POST /v1/agent/events. */
 interface WireEvent {
-  type: 'session' | 'action' | 'confirmation_requested' | 'confirmation_completed';
+  type:
+    | 'session'
+    | 'action'
+    | 'action_failed'
+    | 'confirmation_requested'
+    | 'confirmation_completed';
   intent?: string | null;
   session_id?: string | null;
+  /** Technical failure detail (action_failed only) — never user content. */
+  error?: string | null;
 }
+
+/** Bound on the technical error string shipped with action_failed events. */
+const MAX_ERROR_DETAIL_CHARS = 200;
 
 /**
  * Maps one SDK agent event to zero or more backend usage events. Only the
@@ -61,6 +71,18 @@ function mapEvent(params: AgentEventParams): WireEvent[] {
       }
       return events;
     }
+
+    // Failures make field reports diagnosable: only the technical error
+    // string travels (HTTP status + path, template param…), never content.
+    case 'action_failed':
+      return [
+        {
+          type: 'action_failed',
+          intent,
+          session_id: sessionId,
+          error: (params.errorDetail ?? '').slice(0, MAX_ERROR_DETAIL_CHARS) || null,
+        },
+      ];
 
     case 'action_confirmation_requested':
       return [{ type: 'confirmation_requested', intent, session_id: sessionId }];

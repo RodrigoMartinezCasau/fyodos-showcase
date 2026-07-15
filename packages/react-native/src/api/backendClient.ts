@@ -180,6 +180,9 @@ export function createFiodosBackendClient(options: FiodosBackendClientOptions): 
             intent: request.lastStep.intent,
             ...(request.lastStep.label ? { label: request.lastStep.label } : {}),
             success: request.lastStep.success,
+            // Technical error of a FAILED step: the backend renders it in the
+            // RECOVERY block so the model can diagnose and change path.
+            ...(request.lastStep.error ? { error: request.lastStep.error } : {}),
             // Bounded result payload of the executed step (product search
             // results…): the backend renders it so the model can read real
             // ids for the NEXT step's parameters.

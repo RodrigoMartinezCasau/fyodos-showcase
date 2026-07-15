@@ -35,6 +35,109 @@ const ORB_END = '<!-- FYODOS:ORB:END -->';
 /** Repo-relative folder of the synthetic storefront snapshot files. */
 const SNAPSHOT_DIR = '_fyodos/storefront';
 
+/**
+ * Canonical mechanics of the five guaranteed Shopify commerce actions.
+ *
+ * These execution templates are PLATFORM CONSTANTS (identical on every
+ * Shopify store), yet the analysis prompt asks the AI to reproduce them
+ * verbatim — and models sometimes omit or mangle the `execution` block. A
+ * manifest published without it is silently dead: the embed registers zero
+ * handlers and the orb promises cart actions it can never run (observed in
+ * production). `enforceShopifyGuaranteedExecutions` overwrites the MECHANICS
+ * (execution/parameters) of any action matching intent+handler while leaving
+ * the AI's personalized prose (labels, descriptions, examples) untouched.
+ * The backend applies the same guarantee at publish/serve time
+ * (backend/clients/shopify_guarantees.py) — keep both in sync.
+ */
+const SHOPIFY_GUARANTEED_ACTIONS = {
+  search_products: {
+    handler: 'shopifySearchProducts',
+    parameters: { query: { type: 'string', required: true } },
+    execution: {
+      kind: 'http',
+      method: 'GET',
+      url: '{baseUrl}/search/suggest.json?q={query}&resources[type]=product&resources[limit]=8',
+    },
+  },
+  get_product_details: {
+    handler: 'shopifyGetProductDetails',
+    parameters: { handle: { type: 'string', required: true } },
+    execution: { kind: 'http', method: 'GET', url: '{baseUrl}/products/{handle}.js' },
+  },
+  add_to_cart: {
+    handler: 'shopifyAddToCart',
+    parameters: {
+      variantId: { type: 'number', required: true },
+      quantity: { type: 'number', required: true },
+    },
+    execution: {
+      kind: 'http',
+      method: 'POST',
+      url: '{baseUrl}/cart/add.js',
+      headers: { 'Content-Type': 'application/json' },
+      body: { id: '{variantId}', quantity: '{quantity}' },
+    },
+  },
+  get_cart: {
+    handler: 'shopifyGetCart',
+    parameters: {},
+    execution: { kind: 'http', method: 'GET', url: '{baseUrl}/cart.js' },
+  },
+  // variantId-based on purpose (cart/change.js accepts a variant id as `id`):
+  // the theme snippet's cart screen context hands the agent variantIds, so
+  // the action contract must accept exactly what the agent can see.
+  update_cart_item: {
+    handler: 'shopifyUpdateCartItem',
+    parameters: {
+      variantId: { type: 'number', required: true },
+      quantity: { type: 'number', required: true },
+    },
+    execution: {
+      kind: 'http',
+      method: 'POST',
+      url: '{baseUrl}/cart/change.js',
+      headers: { 'Content-Type': 'application/json' },
+      body: { id: '{variantId}', quantity: '{quantity}' },
+    },
+  },
+};
+
+/**
+ * Enforce the canonical execution/parameters on every guaranteed commerce
+ * action of a Shopify manifest, in place. Prose fields are never touched;
+ * per-parameter descriptions written by the AI survive when the parameter
+ * survives. Returns the intents that were repaired (for logging).
+ */
+function enforceShopifyGuaranteedExecutions(manifest) {
+  const repaired = [];
+  if (!manifest || !Array.isArray(manifest.actions)) return repaired;
+  for (const action of manifest.actions) {
+    if (!action || typeof action !== 'object' || action.kind === 'link') continue;
+    const spec = SHOPIFY_GUARANTEED_ACTIONS[String(action.intent || '').trim()];
+    if (!spec || String(action.handler || '').trim() !== spec.handler) continue;
+
+    const params = {};
+    const prior = (action.parameters && typeof action.parameters === 'object') ? action.parameters : {};
+    for (const [name, shape] of Object.entries(spec.parameters)) {
+      params[name] = { ...shape };
+      const priorShape = prior[name];
+      if (priorShape && typeof priorShape.description === 'string') {
+        params[name].description = priorShape.description;
+      }
+    }
+
+    const already =
+      JSON.stringify(action.execution || null) === JSON.stringify(spec.execution) &&
+      JSON.stringify(Object.keys(prior).sort()) === JSON.stringify(Object.keys(spec.parameters).sort());
+    if (already) continue;
+
+    action.execution = JSON.parse(JSON.stringify(spec.execution));
+    action.parameters = params;
+    repaired.push(action.intent);
+  }
+  return repaired;
+}
+
 /** A Shopify theme repo is unmistakable: layout/theme.liquid is the layout
  *  every Online Store 2.0 theme must have, plus templates/ or sections/. */
 function isShopifyThemeRoot(appRoot) {
@@ -108,6 +211,10 @@ function universalSurfaceDoc(storeDomain) {
     universalRoutes: ['/', '/collections/all', '/search', '/cart'],
     universalActions: [
       { intent: 'search_products', handler: 'shopifySearchProducts', api: '{baseUrl}/search/suggest.json' },
+      // The search→cart bridge: suggest.json returns product ids/handles but
+      // NEVER variant ids, and cart/add.js only accepts variant ids. This
+      // endpoint (universal on every store) turns a handle into its variants.
+      { intent: 'get_product_details', handler: 'shopifyGetProductDetails', api: '{baseUrl}/products/{handle}.js' },
       { intent: 'add_to_cart', handler: 'shopifyAddToCart', api: '{baseUrl}/cart/add.js' },
       { intent: 'get_cart', handler: 'shopifyGetCart', api: '{baseUrl}/cart.js' },
       { intent: 'update_cart_item', handler: 'shopifyUpdateCartItem', api: '{baseUrl}/cart/change.js' },
@@ -354,6 +461,7 @@ function reportShopifyWire(result, colors = {}, { quiet = false } = {}) {
 }
 
 module.exports = {
+  enforceShopifyGuaranteedExecutions,
   isShopifyThemeRoot,
   readThemeMeta,
   fetchStorefrontSnapshot,

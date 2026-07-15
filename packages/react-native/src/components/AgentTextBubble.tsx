@@ -62,6 +62,12 @@ export interface AgentTextBubbleProps {
   autoSendSeed?: boolean;
   onSeedConsumed?: () => void;
   /**
+   * Ephemeral screen-aware greeting shown as an assistant message below the
+   * history (the thought bubble's question moved into the panel). The parent
+   * clears it when the user sends their first message — it never persists.
+   */
+  greetingText?: string | null;
+  /**
    * Temporarily hide the panel's native Modal WITHOUT unmounting it (the draft
    * and exchange are preserved). Used when another native Modal must take over
    * the screen — iOS only presents ONE Modal at a time, so a second one (e.g.
@@ -91,6 +97,7 @@ export function AgentTextBubble({
   seedText,
   autoSendSeed = false,
   onSeedConsumed,
+  greetingText,
   suppressed = false,
 }: AgentTextBubbleProps) {
   const t = { ...DEFAULT_MODAL_THEME, ...theme };
@@ -241,6 +248,21 @@ export function AgentTextBubble({
                 ) : null}
               </View>
             ))}
+            {greetingText ? (
+              // Ephemeral screen greeting — assistant styling, below the
+              // history, vanishes with the user's first message.
+              <Text
+                style={[
+                  styles.replyText,
+                  { color: t.titleColor },
+                  // Empty panel: keep clear of the overlaid × on the first line.
+                  exchanges.length === 0 ? styles.userTextFirst : null,
+                ]}
+                selectable
+              >
+                {greetingText}
+              </Text>
+            ) : null}
           </ScrollView>
           {busy ? (
             <View style={styles.busyRow}>

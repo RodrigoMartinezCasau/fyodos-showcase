@@ -23,7 +23,6 @@ import {
   normalizeKeyboardChipIcon,
   normalizeOrbGlowIntensity,
   resolveBubblePrompt,
-  bubblePromptToAffirmative,
   resolveBubbleTheme,
   resolveChipIconColor,
   resolveInnerBorderStrokeColor,
@@ -151,6 +150,17 @@ export function AgentOrb({
 
   const [textOpen, setTextOpen] = useState(false);
   const [textSeed, setTextSeed] = useState<{ text: string; autoSend: boolean } | null>(null);
+  /**
+   * Ephemeral panel GREETING: the screen's bubble question shown INSIDE the
+   * conversation as an assistant message when the panel opens (bubble tap or
+   * traditional open). Never enters the history; cleared by the user's first
+   * message (or any turn starting) and on close.
+   */
+  const [panelGreeting, setPanelGreeting] = useState<string | null>(null);
+  // A turn in flight (typed OR voice) replaces the ephemeral greeting.
+  useEffect(() => {
+    if (showThinking) setPanelGreeting(null);
+  }, [showThinking]);
   // Mic denied/unavailable: tapping still puts the orb in the "active" visual
   // and reveals the keyboard chip — text is always available (Change 1).
   const [micFallbackActive, setMicFallbackActive] = useState(false);
@@ -360,6 +370,9 @@ export function AgentOrb({
     cancelAll();
     const seed = opts?.seed?.trim();
     setTextSeed(seed ? { text: seed, autoSend: opts?.autoSend ?? false } : null);
+    // Welcome the user with this screen's bubble question as an assistant
+    // message (both open paths). Ephemeral: gone with the first user message.
+    setPanelGreeting(seed ? null : (bubblePrompt ?? null));
     setTextPanel(true);
   };
 
@@ -462,11 +475,15 @@ export function AgentOrb({
           visible={textOpen}
           onClose={() => {
             setTextPanel(false);
+            setPanelGreeting(null);
             // Collapse the paged history back to the initial page for next open.
             resetExchangeWindow();
           }}
           onSend={(text) => {
             haptics.trigger('send');
+            // The greeting is a welcome, not part of the conversation: the
+            // user's first real message replaces it.
+            setPanelGreeting(null);
             void submitTextTurn(text);
           }}
           onCancel={() => {
@@ -489,6 +506,7 @@ export function AgentOrb({
           seedText={textSeed?.text ?? null}
           autoSendSeed={textSeed?.autoSend ?? false}
           onSeedConsumed={() => setTextSeed(null)}
+          greetingText={panelGreeting}
           // iOS shows only ONE native Modal at a time: while the consent modal
           // is up, hide this panel's Modal so consent can actually appear (else
           // the screen goes black and the first turn silently stalls). `textOpen`
@@ -573,14 +591,9 @@ export function AgentOrb({
             accessibilityLabel={ui.orbAccessibilityLabel}
             onPress={() => {
               haptics.trigger('orbTap');
-              if (textInputEnabled) {
-                openTextPanel({
-                  seed: bubblePromptToAffirmative(bubblePrompt, {
-                    locale: config.locale,
-                    messages,
-                  }),
-                });
-              }
+              // The bubble's question moves INTO the panel as an assistant
+              // greeting (openTextPanel shows it) — never pre-typed.
+              if (textInputEnabled) openTextPanel();
               else void toggleListening();
             }}
           />

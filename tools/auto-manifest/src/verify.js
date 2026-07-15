@@ -298,6 +298,18 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
       });
       continue;
     }
+    // Shopify function action WITHOUT an execution block: nothing can ever run
+    // it (storefronts have no wireable code; the embed builds handlers ONLY
+    // from execution specs). Publishing it would make the orb promise an
+    // action that silently dies — drop it honestly. The guaranteed commerce
+    // set never lands here: its canonical execution is enforced pre-verify.
+    if (isShopify && action.kind !== 'link') {
+      provenance.actions.push({
+        intent: action.intent, included: false,
+        reason: 'shopify function action without a declarative execution block — nothing could ever run it — DROPPED',
+      });
+      continue;
+    }
     if (isShopify && action.kind === 'link' && String(action.navTarget || '').trim() === '/checkout') {
       action.handler = '';
       actions.push(action);

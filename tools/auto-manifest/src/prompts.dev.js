@@ -228,11 +228,12 @@ ROUTES: every storefront page a customer can navigate to:
 - NEVER invent a handle: every non-universal route must be backed by an exact handle visible in the provided files. Do NOT create one route per product (stores have thousands; products are reached through search_products). Skip account/login pages and checkout (checkout is an action, not a route).
 
 ACTIONS: what a customer can do by voice. Two kinds:
-(1) API actions (kind "function" WITH an "execution" block): the universal Shopify commerce set. ALWAYS include exactly these four, with EXACTLY these intent ids, handler names and execution templates (they are platform-guaranteed on every Shopify store); personalize ONLY their descriptions/examples to this store's catalog and language:
-  - search_products, handler "shopifySearchProducts", parameters {query: string required}, execution {"kind": "http", "method": "GET", "url": "{baseUrl}/search/suggest.json?q={query}&resources[type]=product&resources[limit]=8"}
-  - add_to_cart, handler "shopifyAddToCart", parameters {variantId: number required, quantity: number required}, execution {"kind": "http", "method": "POST", "url": "{baseUrl}/cart/add.js", "headers": {"Content-Type": "application/json"}, "body": {"id": "{variantId}", "quantity": "{quantity}"}}
+(1) API actions (kind "function" WITH an "execution" block): the universal Shopify commerce set. ALWAYS include exactly these five, with EXACTLY these intent ids, handler names and execution templates (they are platform-guaranteed on every Shopify store); personalize ONLY their descriptions/examples to this store's catalog and language:
+  - search_products, handler "shopifySearchProducts", parameters {query: string required}, execution {"kind": "http", "method": "GET", "url": "{baseUrl}/search/suggest.json?q={query}&resources[type]=product&resources[limit]=8"}. Its description MUST state that results carry each product's title, handle and PRODUCT id but NO variant ids — to add a result to the cart, get_product_details must be called with its handle first.
+  - get_product_details, handler "shopifyGetProductDetails", parameters {handle: string required}, execution {"kind": "http", "method": "GET", "url": "{baseUrl}/products/{handle}.js"}. THE BRIDGE between search and cart: returns the product's variants with their variantIds (what add_to_cart needs). Its description MUST say so.
+  - add_to_cart, handler "shopifyAddToCart", parameters {variantId: number required, quantity: number required}, execution {"kind": "http", "method": "POST", "url": "{baseUrl}/cart/add.js", "headers": {"Content-Type": "application/json"}, "body": {"id": "{variantId}", "quantity": "{quantity}"}}. Its description MUST warn that variantId is a VARIANT id (from the screen context or get_product_details), never a product id from search results.
   - get_cart, handler "shopifyGetCart", no parameters, execution {"kind": "http", "method": "GET", "url": "{baseUrl}/cart.js"}
-  - update_cart_item, handler "shopifyUpdateCartItem", parameters {line: number required, quantity: number required}, execution {"kind": "http", "method": "POST", "url": "{baseUrl}/cart/change.js", "headers": {"Content-Type": "application/json"}, "body": {"line": "{line}", "quantity": "{quantity}"}}
+  - update_cart_item, handler "shopifyUpdateCartItem", parameters {variantId: number required, quantity: number required}, execution {"kind": "http", "method": "POST", "url": "{baseUrl}/cart/change.js", "headers": {"Content-Type": "application/json"}, "body": {"id": "{variantId}", "quantity": "{quantity}"}}. variantId is the VARIANT id of the cart line to change (the cart screen context lists one per line); quantity 0 removes the line.
   "{baseUrl}" resolves to the store's own origin at runtime — never hardcode the domain in execution urls.
 (2) LINK actions (kind "link" + navTarget, no handler):
   - ALWAYS include go_checkout with navTarget "/checkout", requireConfirmation true and a confirmationMessageTemplate in the store's language. Payment happens ONLY on Shopify's secure checkout page, never in the conversation.
@@ -245,12 +246,12 @@ CRITICAL RULES:
 THE MANUAL (description/preconditions/effect/relatedIntents per action; description per route; appType/appFlow):
 This is the context the agent reads to understand the store. Derive every field from the snapshot and theme:
 - description: what the action/route does or shows, grounded in this store (e.g. the cart route of a supplement store: "Shows the supplements added so far with quantities and total").
-- preconditions: e.g. add_to_cart needs a concrete variant identified first (from search results or the visible product page); update_cart_item and go_checkout need a non-empty cart.
+- preconditions: e.g. add_to_cart needs a concrete VARIANT id identified first (from the visible product page/screen context, or via get_product_details on a search result's handle); update_cart_item and go_checkout need a non-empty cart.
 - effect: the observable outcome (item in cart, updated total, checkout page).
-- relatedIntents: the natural flows (search_products → add_to_cart → go_cart → go_checkout). showcaseRoute: add_to_cart/update_cart_item → the cart route.
+- relatedIntents: the natural flows (search_products → get_product_details → add_to_cart → go_cart → go_checkout). showcaseRoute: add_to_cart/update_cart_item → the cart route.
 - route bubblePrompt: a SHORT sales-driven CTA in the store's language (~6 words), pushing the most valuable action on THAT page: a collection page → offer its actual product type; the cart → closing the purchase. Distinct per route.
 - MULTILINGUAL stores: when the theme ships 2+ published locales (multiple files under locales/ or a storefront language selector), emit "appLanguages" (base codes, primary first) and give EVERY route a "bubblePrompts" map with the CTA translated into each of those languages — the orb bubble follows the language the shopper is browsing in. Single-locale store → omit both.
-- DASHBOARD "labels" (es/en) — REQUIRED, UNCONDITIONAL, unrelated to the store's own locale(s): every route and action (including the four guaranteed cart actions and go_checkout) needs a "labels" object with BOTH "es" and "en" translations of its "label", for the Fiodos dashboard's own bilingual operator UI. Personalize "label"/description/examples to the store's language as instructed above, but "labels" always covers both dashboard languages regardless.
+- DASHBOARD "labels" (es/en) — REQUIRED, UNCONDITIONAL, unrelated to the store's own locale(s): every route and action (including the five guaranteed commerce actions and go_checkout) needs a "labels" object with BOTH "es" and "en" translations of its "label", for the Fiodos dashboard's own bilingual operator UI. Personalize "label"/description/examples to the store's language as instructed above, but "labels" always covers both dashboard languages regardless.
 
 DISTINCTIVENESS:
 - Collection route descriptions must name the concrete product types of THAT collection so no two collections read alike.
@@ -260,7 +261,7 @@ SENSITIVE ACTIONS: go_checkout gets noticeably MORE detailed description/precond
 
 Also return EVIDENCE for every route and action: the file (exact relative path as given in the FILE headers) and symbol that justifies it:
 - Collection/page/blog routes → the snapshot file listing the handle; symbol: the handle itself.
-- Universal routes and the four API actions → the snapshot file "_fyodos/storefront/storefront.json"; symbol: "shopify_storefront".
+- Universal routes and the five API actions → the snapshot file "_fyodos/storefront/storefront.json"; symbol: "shopify_storefront".
 - Theme link actions → the .liquid file containing the href; symbol: the href.
 
 ${wiringGuide('shopify')}
@@ -372,12 +373,12 @@ Answer ONLY valid JSON (no markdown fences, no commentary). Start with { and end
     "<actionIntent>": {
       "strategy": "module" | "bridge",
       "imports": [{"kind": "named"|"default"|"namespace", "name": "<local name>", "from": "<repo-relative file path exactly as in a FILE header>"}],
-      "call": "<MODULE strategy only: a single JS expression that performs the action; use params['<name>'] for manifest parameters; may use await>",
+      "call": "<MODULE strategy only: a single JS expression that performs the action; use params['<name>'] for manifest parameters — ONLY names this action declares in its \\"parameters\\" (any other name is undefined at runtime and the verifier rejects it); may use await>",
       "bridge": {
         "file": "<BRIDGE strategy only: the component file that owns the state>",
         "scope": "statement" | "class-field",
         "anchor": "<an EXACT, UNIQUE line of existing code in that file. The registration is inserted right AFTER it (or just BEFORE it if the line begins with 'return'), so it must be in the SAME scope where the action's function/state/injected instance is visible>",
-        "invoke": "<a JS expression valid at the anchor that performs the action using args.<paramName> for parameters. Call the component's OWN functions or the REAL injected instance via this.<field> (e.g. addTodo(args.title) or this.todoService.updateTodos({ id: Date.now(), title: args.title, done: false })). NEVER instantiate a new service with new X() and NEVER call inject() here>",
+        "invoke": "<a JS expression valid at the anchor that performs the action using args.<paramName> for parameters — ONLY names this action declares in its \\"parameters\\" (any other name is undefined at runtime and the verifier rejects it). Call the component's OWN functions or the REAL injected instance via this.<field> (e.g. addTodo(args.title) or this.todoService.updateTodos({ id: Date.now(), title: args.title, done: false })). NEVER instantiate a new service with new X() and NEVER call inject() here>",
         "imports": [{"kind": "named"|"default"|"namespace", "name": "<local name>", "from": "<repo-relative file>"}]
       },
       "requiredSymbols": [{"name": "<identifier that MUST exist>", "file": "<repo-relative file>"}],

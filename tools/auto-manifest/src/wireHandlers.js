@@ -446,6 +446,41 @@ function relImport(fromDirRel, toFileRel) {
 }
 
 /**
+ * PARAMETER CONTRACT check shared by both wiring strategies: every
+ * `<receiver>.<name>` / `<receiver>['<name>']` the expression reads must be a
+ * parameter the manifest declares for this action. The executor builds that
+ * object exclusively from the manifest parameters, so any other name is
+ * ALWAYS undefined at runtime — the action then "succeeds" while silently
+ * doing the wrong thing (e.g. an invoke reading `args.voiceMode` when the
+ * manifest declares 'mode': every call fell back to a default value). It
+ * compiles clean, so only this check can catch it.
+ */
+function checkParamContract(expr, receiver, manifestParams) {
+  const declared = new Set((manifestParams || []).map((p) => p.name));
+  const refs = new Set();
+  let m;
+  const dotRe = new RegExp(`\\b${receiver}\\.([A-Za-z_$][\\w$]*)`, 'g');
+  while ((m = dotRe.exec(expr))) refs.add(m[1]);
+  const bracketRe = new RegExp(`\\b${receiver}\\[\\s*['"]([^'"]+)['"]\\s*\\]`, 'g');
+  while ((m = bracketRe.exec(expr))) refs.add(m[1]);
+  for (const ref of refs) {
+    if (!declared.has(ref)) {
+      const hint = declared.size
+        ? `the manifest declares: ${[...declared].map((n) => `'${n}'`).join(', ')}`
+        : 'the manifest declares NO parameters for this action';
+      return {
+        ok: false,
+        reason:
+          `the wiring reads '${receiver}.${ref}', but ${hint} — '${receiver}' only ever carries the ` +
+          'declared manifest parameters, so that value would always be undefined at runtime. ' +
+          'Use the declared parameter name(s) exactly.',
+      };
+    }
+  }
+  return { ok: true };
+}
+
+/**
  * Turn the AI's proposed wiring for ONE action into a verified `auto` entry, or
  * return { reason } when the proposal cannot be safely trusted. This is the
  * heart of the new model: the AI proposes (imports + a call expression read
@@ -517,6 +552,14 @@ function buildAiEntry({ appRoot, fyodosDirRel, base, aiW, manifestParams }) {
       reason: `the proposed call references '${id}', which could not be verified in your code — wire this action manually`,
     };
   }
+
+  // 5) PARAMETER CONTRACT (same guarantee as the bridge strategy): every
+  //    `params.<name>` / `params['<name>']` the call reads must be a parameter
+  //    the manifest declares for this action — anything else is ALWAYS
+  //    undefined at runtime and produces a silent wrong-value execution that
+  //    compiles clean and "succeeds".
+  const paramContract = checkParamContract(call, 'params', manifestParams);
+  if (!paramContract.ok) return { reason: paramContract.reason };
 
   return {
     ...base,
@@ -702,6 +745,11 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
         'instance disconnected from the one the UI sees. It must use the real instance (e.g. this.<service>), not instantiate it.',
     };
   }
+
+  // PARAMETER CONTRACT: every `args.<name>` the invoke reads must be a
+  // parameter the manifest declares for THIS action (see checkParamContract).
+  const paramContract = checkParamContract(invoke, 'args', base.manifestParams);
+  if (!paramContract.ok) return { reason: paramContract.reason };
 
   // Verify extra imports the invoke needs.
   const imports = [];
@@ -1345,6 +1393,44 @@ function stripFiodosBlocks(content) {
   );
 }
 
+/**
+ * Sweep GENERATED bridge blocks left behind in files this run does NOT wire.
+ *
+ * applyComponentEdits strips old blocks only in the files it edits THIS run,
+ * so when a re-analysis moves an action's wiring to a different component the
+ * previous component keeps a stale registerFiodosBridge() block: a duplicate
+ * registration for the same key whose argument contract may no longer match —
+ * whichever component mounts last silently wins (the select_voice_mode
+ * production bug: two components registered the key, one reading args.mode
+ * and the other args.voiceMode, and the action "ran" without doing anything).
+ *
+ * Only blocks carrying the generated header are removed; developer-authored
+ * FYODOS:BRIDGE blocks are preserved verbatim (same rule as
+ * stripFiodosBlocks). Returns backups compatible with revertAll so a combined
+ * build regression restores the swept files too.
+ */
+function sweepStaleGeneratedBlocks(appRoot, files, editedFiles) {
+  const edited = new Set((editedFiles || []).map((f) => normRel(f)));
+  const backups = [];
+  for (const f of files || []) {
+    const rel = normRel(f && f.rel);
+    if (!rel || edited.has(rel)) continue;
+    const abs = path.join(appRoot, rel);
+    let original;
+    try {
+      original = fs.readFileSync(abs, 'utf8');
+    } catch {
+      continue;
+    }
+    if (!original.includes(EDIT_START_PREFIX)) continue;
+    const swept = stripFiodosBlocks(original);
+    if (swept === original) continue;
+    backups.push({ file: rel, abs, original });
+    fs.writeFileSync(abs, swept);
+  }
+  return backups;
+}
+
 /** Insert an import block right after the file's last top-level import statement.
  *  Matches the WHOLE statement through its module string — a per-line regex put
  *  the block INSIDE multi-line imports (`import {\n  a,\n} from 'x';`), corrupting
@@ -1926,6 +2012,7 @@ async function wireHandlers(appRoot, opts = {}) {
       }
       fs.writeFileSync(registryAbs, buildRegistryModule(finalPlan, { ts, esm }));
       ({ backups } = applyComponentEdits(appRoot, finalEdits));
+      backups.push(...sweepStaleGeneratedBlocks(appRoot, files, finalEdits.map((e) => e.file)));
     } catch (err) {
       revertAll(backups, generatedFiles);
       return { status: 'failed', docPath: docAbs, error: err, plan: finalPlan, verification: loop.attemptsLog };
@@ -1972,6 +2059,9 @@ async function wireHandlers(appRoot, opts = {}) {
           }
           fs.writeFileSync(registryAbs, buildRegistryModule(survivorPlan, { ts, esm }));
           ({ backups: survivorBackups } = applyComponentEdits(appRoot, survivorEdits));
+          survivorBackups.push(
+            ...sweepStaleGeneratedBlocks(appRoot, files, survivorEdits.map((e) => e.file)),
+          );
         } catch (err) {
           revertAll(survivorBackups, survivorGenerated);
           return { status: 'failed', docPath: docAbs, error: err, plan: finalPlan, verification: loop.attemptsLog };
@@ -2041,6 +2131,7 @@ async function wireHandlers(appRoot, opts = {}) {
       throw new Error('post-write verification failed');
     }
     ({ backups } = applyComponentEdits(appRoot, componentEdits));
+    backups.push(...sweepStaleGeneratedBlocks(appRoot, files, componentEdits.map((e) => e.file)));
   } catch (err) {
     revertAll(backups, generatedFiles);
     return { status: 'failed', docPath: docAbs, error: err, plan };
@@ -2138,6 +2229,8 @@ module.exports = {
   planComponentEdits,
   applyComponentEdits,
   stripFiodosBlocks,
+  sweepStaleGeneratedBlocks,
+  checkParamContract,
   revertAll,
   runAutoCorrectionLoop,
   writeIsolated,

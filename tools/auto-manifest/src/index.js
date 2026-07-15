@@ -102,7 +102,7 @@ const {
 const { wireReactNativeOrb, reportReactNativeWire, connectRnSession } = require('./wireReactNative');
 const {
   isShopifyThemeRoot, fetchStorefrontSnapshot, wireShopifyTheme, reportShopifyWire,
-  normalizeStoreDomain,
+  normalizeStoreDomain, enforceShopifyGuaranteedExecutions,
 } = require('./shopifyTheme');
 const { wireFlutterOrb, writeFlutterEnv, reportFlutterWire } = require('./wireFlutter');
 const { wireHandlers, reportHandlerResult } = require('./wireHandlers');
@@ -538,6 +538,18 @@ async function main() {
     logDev(`[ai] model=${model} proposed routes=${(proposed.routes || []).length} ` +
       `actions=${(proposed.actions || []).length} in ${(elapsedMs / 1000).toFixed(1)}s`);
     logDev(`[ai] tokens in=${usage.prompt_tokens} out=${usage.completion_tokens} cost=$${costUSD.toFixed(4)}`);
+
+    // ── 3b. Shopify platform guarantee (BEFORE verification) ────────────────
+    // The five universal commerce actions carry platform-constant execution
+    // templates; never trust the AI to have reproduced them. Enforcing them
+    // here means verification's structural check always passes for the
+    // guaranteed set and a Shopify manifest can never publish inert.
+    if (platform === 'shopify') {
+      const repairedIntents = enforceShopifyGuaranteedExecutions(proposed);
+      if (repairedIntents.length) {
+        logDev(`[shopify] canonical execution enforced on: ${repairedIntents.join(', ')}`);
+      }
+    }
 
     // ── 4. Mechanical verification of the AI's claims ───────────────────────
     // Actions are always verified against real code. Routes are verified only

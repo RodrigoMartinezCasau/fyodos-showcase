@@ -61,6 +61,14 @@ declare const __DEV__: boolean;
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * How many FAILED-step recovery turns one chain may consume. A failed action
+ * (invented handle → 404, wrong id kind → 422, transient 5xx) no longer kills
+ * the task: the model gets the technical error back and picks a different
+ * path — bounded so a persistently failing action can never loop.
+ */
+const MAX_CHAIN_RECOVERIES = 2;
+
 type PendingConfirmation = {
   action: AgentAction;
   context: AgentScreenContext;
@@ -276,6 +284,8 @@ export function useAgent({
     visitedKeys: Set<string>;
     pendingKey?: string;
     pendingStep?: ChainStepInfo;
+    /** Failed-step recovery turns already consumed in this chain. */
+    recoveries?: number;
   } | null>(null);
   const runChainLoopRef = useRef<
     | ((state: {
@@ -283,6 +293,7 @@ export function useAgent({
         step: number;
         lastStep?: ChainStepInfo;
         visitedKeys: Set<string>;
+        recoveries?: number;
       }) => Promise<void>)
     | null
   >(null);
@@ -632,6 +643,8 @@ export function useAgent({
           pendingInProgress?: boolean;
           pendingStep?: ChainStepInfo;
           pendingKey?: string;
+          /** The step RAN and failed — canContinue then means a RECOVERY turn. */
+          stepFailed?: boolean;
         }> => {
           const { reply: aReply, audioBase64: aAudio, action, wasTruncated } = res;
           const latencyMs = Date.now() - actx.startedAt;
@@ -647,6 +660,7 @@ export function useAgent({
           let pendingInProgress = false;
           let pendingStep: ChainStepInfo | undefined;
           let pendingKey: string | undefined;
+          let stepFailed = false;
 
           if (action && action.type === 'navigate') {
             const actionStartedAt = Date.now();
@@ -705,6 +719,9 @@ export function useAgent({
                     intent: action.intent ?? null,
                     ...(preResult.error ? { error: preResult.error } : {}),
                   },
+                  ...(!preResult.success && !preResult.recoverable
+                    ? { errorDetail: preResult.error ?? null }
+                    : {}),
                   currentRoute: actx.routeAtInvocation,
                   latencyMs,
                   latencySttMs: actx.sttLatencyMs,
@@ -810,6 +827,9 @@ export function useAgent({
                   intent: action.intent ?? null,
                   ...(execResult.error ? { error: execResult.error } : {}),
                 },
+                ...(!execResult.success && !execResult.recoverable
+                  ? { errorDetail: execResult.error ?? null }
+                  : {}),
                 currentRoute: actx.routeAtInvocation,
                 latencyMs,
                 latencySttMs: actx.sttLatencyMs,
@@ -871,6 +891,22 @@ export function useAgent({
                 };
                 actionKey = `execute:${action.intent ?? ''}`;
                 canContinue = res.taskStatus === 'in_progress';
+              } else if (!execResult.success && !execResult.recoverable) {
+                // RECOVERY signal: the step RAN and FAILED. Feed the technical
+                // error back as a failed lastStep so the model can diagnose
+                // (invented handle → 404, wrong id kind → 422…) and take a
+                // DIFFERENT path. Bounded by the chain's recovery budget.
+                lastStep = {
+                  type: 'execute',
+                  intent: action.intent ?? '',
+                  label: manifestAction?.label,
+                  success: false,
+                  ...(execResult.error
+                    ? { error: String(execResult.error).slice(0, 300) }
+                    : {}),
+                };
+                stepFailed = true;
+                canContinue = chaining.enabled;
               }
             }
           } else {
@@ -895,6 +931,7 @@ export function useAgent({
             pendingInProgress,
             pendingStep,
             pendingKey,
+            stepFailed,
           };
         };
 
@@ -908,9 +945,12 @@ export function useAgent({
           step: number;
           lastStep?: ChainStepInfo;
           visitedKeys: Set<string>;
+          /** Failed-step recovery turns already consumed in this chain. */
+          recoveries?: number;
         }): Promise<void> => {
           let step = cs.step;
           let lastStep = cs.lastStep;
+          let recoveries = cs.recoveries ?? 0;
           const visitedKeys = cs.visitedKeys;
           try {
           while (step < chaining.maxSteps) {
@@ -1032,10 +1072,26 @@ export function useAgent({
                     visitedKeys,
                     pendingKey: oc.pendingKey,
                     pendingStep: oc.pendingStep,
+                    recoveries,
                   }
                 : null;
               await beginConfirmationWindowRef.current?.();
               return;
+            }
+            // Failed step: consume one recovery slot. The budget is what
+            // keeps a persistently failing action from looping; a chain that
+            // exhausts it ends with the honest failure reply on screen.
+            if (oc.stepFailed) {
+              recoveries += 1;
+              if (recoveries > MAX_CHAIN_RECOVERIES) {
+                telemetry.logEvent({
+                  eventType: 'agent_chain_aborted',
+                  sessionId: sessionIdRef.current,
+                  chainStep: step,
+                  chainAbortReason: 'no_progress',
+                });
+                return;
+              }
             }
             // No-progress guard: repeating a step already taken stops the chain.
             if (oc.actionKey && visitedKeys.has(oc.actionKey)) {
@@ -1135,6 +1191,7 @@ export function useAgent({
             step: 1,
             lastStep: first.lastStep,
             visitedKeys,
+            recoveries: first.stepFailed ? 1 : 0,
           });
         }
       } catch (e) {
@@ -1779,6 +1836,7 @@ export function useAgent({
         confirmed: true,
         ...(result.error ? { error: result.error } : {}),
       },
+      ...(!result.success ? { errorDetail: result.error ?? null } : {}),
       currentRoute: pending.routeAtInvocation,
       latencyMs: pending.latencyMs,
       latencySttMs: pending.latencySttMs,
@@ -1811,6 +1869,27 @@ export function useAgent({
           step: chainState.step,
           lastStep: chainState.pendingStep ?? chainState.lastStep,
           visitedKeys: chainState.visitedKeys,
+          recoveries: chainState.recoveries,
+        });
+      } else if (!result.success && chaining.enabled) {
+        // The CONFIRMED action failed: same recovery contract as any other
+        // failed step — the model reads the technical error and takes a
+        // different path (bounded by the recovery budget). A recovery that
+        // re-attempts a sensitive intent stages a NEW confirmation, so the
+        // human gate is never bypassed.
+        const failedStep: ChainStepInfo = {
+          type: 'execute',
+          intent: action.intent ?? '',
+          label: manifest.actions.find((a) => a.intent === action.intent)?.label,
+          success: false,
+          ...(result.error ? { error: String(result.error).slice(0, 300) } : {}),
+        };
+        await runChainLoopRef.current?.({
+          userMessage: chainState.userMessage,
+          step: chainState.step,
+          lastStep: failedStep,
+          visitedKeys: chainState.visitedKeys,
+          recoveries: (chainState.recoveries ?? 0) + 1,
         });
       } else if (!result.success) {
         telemetry.logEvent({
@@ -1824,6 +1903,7 @@ export function useAgent({
     chaining,
     endConfirmationVoiceWindow,
     executor,
+    manifest.actions,
     messages.doubleConfirmationQuestion,
     speakActionFeedback,
     speakReply,
