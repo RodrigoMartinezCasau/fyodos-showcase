@@ -511,6 +511,10 @@ async function main() {
   // --spec EXPLICITLY asked to regenerate, so the backend clears those (and
   // ONLY those) masking overrides on publish. Null when the spec asked nothing.
   let specResets = null;
+  // Open repair tickets (developer-reported failures from the Context agent)
+  // and the AI's per-ticket outcomes, cross-checked against the final manifest.
+  let repairTickets = null;
+  let repairResolutions = null;
 
   if (!useLLM) {
     // Static-only fallback: routes with mechanical naming, no actions.
@@ -554,12 +558,26 @@ async function main() {
       if (!explicitModel && quota && quota.model) {
         model = resolveModel(quota.model);
       }
+
+      // Open repair tickets: the backend injects them into the analysis prompt
+      // as mandatory work orders; here we only tell the developer what this
+      // re-analysis is required to fix (and keep the list to cross-check the
+      // AI's claimed resolutions after verification).
+      repairTickets = await fetchOpenRepairTickets({ apiKey, apiUrl });
+      if (repairTickets && repairTickets.length) {
+        logUser(
+          `${repairTickets.length} repair ticket(s) from your Context agent — this analysis is required to fix:`,
+        );
+        for (const t of repairTickets) {
+          logUser(`    · ${t.title}`);
+        }
+      }
     }
 
     // ── 3. AI reads the code ────────────────────────────────────────────────
     const { parsed, usage, costUSD, elapsedMs, promptChars, model: usedModel, analysisToken: token } =
       await withSpinner(
-        'Analyzing your project — may take 1–2 min',
+        'Analyzing your project in depth — may take several minutes',
         () => analyzeWithAI({
           appMeta, files: included, omitted, staticRoutes: routes, model, platform,
           useProxy, apiKey, apiUrl, surface, userSpec,
@@ -578,6 +596,12 @@ async function main() {
       ? parsed.specResets
       : null;
     if (specResets) logDev(`[ai] specResets=${JSON.stringify(specResets)}`);
+    // The AI's per-ticket repair outcomes (raw; reconciled against the FINAL
+    // verified manifest right before publish).
+    repairResolutions = (parsed.repairResolutions && typeof parsed.repairResolutions === 'object')
+      ? parsed.repairResolutions
+      : null;
+    if (repairResolutions) logDev(`[ai] repairResolutions=${JSON.stringify(repairResolutions)}`);
     logDev(`[ai] model=${model} proposed routes=${(proposed.routes || []).length} ` +
       `actions=${(proposed.actions || []).length} in ${(elapsedMs / 1000).toFixed(1)}s`);
     logDev(`[ai] tokens in=${usage.prompt_tokens} out=${usage.completion_tokens} cost=$${costUSD.toFixed(4)}`);
@@ -692,6 +716,22 @@ async function main() {
   logDev(`[done] output → ${outDir}`);
 
   const publishing = process.argv.includes('--publish');
+
+  // Repair tickets: cross-check the AI's claimed outcomes against the FINAL
+  // verified manifest (a "resolved" claim whose intent did not survive
+  // verification downgrades to blocked). The backend re-verifies on publish
+  // before closing any ticket; this keeps the CLI's own summary honest.
+  const finalRepairResolutions = reconcileRepairResolutions(repairResolutions, repairTickets, manifest);
+  if (finalRepairResolutions) {
+    const vals = Object.values(finalRepairResolutions);
+    const nResolved = vals.filter((r) => r.status === 'resolved').length;
+    const nBlocked = vals.length - nResolved;
+    logUser(
+      `Repair tickets: ${nResolved} fixed by this analysis` +
+      (nBlocked ? `, ${nBlocked} need app code changes first (see the dashboard)` : ''),
+    );
+  }
+
   const publishMeta = {
     ...analysisMeta,
     generatedAt: new Date().toISOString(),
@@ -709,6 +749,10 @@ async function main() {
     // previously-edited content (e.g. "rewrite all bubble prompts"): the backend
     // clears the matching dashboard overrides so the fresh values become live.
     ...(specResets ? { specResets } : {}),
+    // Per-ticket repair outcomes (resolved with a covering intent / blocked).
+    // The backend verifies each claim against the received manifest before
+    // closing any ticket — this meta alone can never close one.
+    ...(finalRepairResolutions ? { repairResolutions: finalRepairResolutions } : {}),
     // Opt-out of the backend's continuity guard (which keeps intent ids and
     // URL paths stable across re-analyses so dashboard customizations never
     // break). Only for developers who explicitly want a clean slate.
@@ -1736,6 +1780,74 @@ async function fetchAnalysisQuota({ apiKey, apiUrl }) {
   }
 }
 
+/**
+ * Open repair tickets for this project (developer-reported failures registered
+ * by the dashboard's Context agent). The backend injects them into the analysis
+ * prompt as MANDATORY work orders; the CLI fetches the list only to (a) tell
+ * the developer what this re-analysis is required to fix and (b) cross-check
+ * the AI's claimed resolutions against the final verified manifest. Best-effort:
+ * null on any failure (the analysis proceeds; the backend still enforces).
+ */
+async function fetchOpenRepairTickets({ apiKey, apiUrl }) {
+  if (!apiKey) return null;
+  try {
+    const res = await fetch(`${apiUrl}/v1/developer/repair-tickets?open_only=true`, {
+      headers: { 'x-api-key': apiKey },
+    });
+    if (!res.ok) return null;
+    const body = await res.json();
+    return Array.isArray(body.tickets) ? body.tickets : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Cross-check the AI's claimed repair resolutions against the FINAL manifest
+ * (after mechanical verification may have dropped unproven entries). A ticket
+ * claimed "resolved" whose covering intent did not survive verification is
+ * downgraded to "blocked" — the backend re-verifies on publish anyway, but
+ * downgrading here makes the CLI's own summary honest. Returns a clean
+ * { ticketId: {status, intent?, note?} } map, or null when there is nothing.
+ */
+function reconcileRepairResolutions(rawResolutions, tickets, manifest) {
+  if (!rawResolutions || typeof rawResolutions !== 'object' || !Array.isArray(tickets) || !tickets.length) {
+    return null;
+  }
+  const openIds = new Set(tickets.map((t) => String(t.id)));
+  const intents = new Set(
+    [...(manifest.routes || []), ...(manifest.actions || [])]
+      .map((e) => String((e && e.intent) || '').trim())
+      .filter(Boolean),
+  );
+  const out = {};
+  for (const [tid, res] of Object.entries(rawResolutions)) {
+    if (!openIds.has(String(tid)) || !res || typeof res !== 'object') continue;
+    const status = String(res.status || '').toLowerCase();
+    const intent = String(res.intent || '').trim();
+    const note = String(res.note || '').slice(0, 500);
+    if (status === 'resolved' && intent && intents.has(intent)) {
+      out[tid] = { status: 'resolved', intent, ...(note ? { note } : {}) };
+    } else if (status === 'resolved') {
+      out[tid] = {
+        status: 'blocked',
+        ...(intent ? { intent } : {}),
+        note: note || 'claimed intent did not survive mechanical verification',
+      };
+    } else if (status === 'blocked') {
+      out[tid] = { status: 'blocked', ...(intent ? { intent } : {}), ...(note ? { note } : {}) };
+    }
+  }
+  // Any open ticket the AI ignored → blocked, so the developer SEES it was not
+  // covered instead of it silently staying pending forever.
+  for (const t of tickets) {
+    if (!out[t.id]) {
+      out[t.id] = { status: 'blocked', note: 'the analysis did not report on this ticket' };
+    }
+  }
+  return Object.keys(out).length ? out : null;
+}
+
 /** Branded message shown when the plan's analysis quota is exhausted. */
 function printQuotaBlocked(quota) {
   const { blue, cyan, dim, reset } = fyodosTermColors();
@@ -1791,6 +1903,14 @@ async function publishManifest(manifest, meta, analysisToken = null, opts = {}) 
     logUser(
       `Your specifications asked to regenerate previously-edited content: ` +
       `${body.overridesCleared} dashboard override(s) were cleared so the new values are live`,
+    );
+  }
+  // Repair-ticket confirmation from the backend (it re-verified each claim
+  // against the received manifest before closing anything).
+  if (body.repairsResolved > 0 || body.repairsBlocked > 0) {
+    logUser(
+      `Repair tickets confirmed by the server: ${body.repairsResolved || 0} closed` +
+      (body.repairsBlocked ? `, ${body.repairsBlocked} blocked pending app code` : ''),
     );
   }
   // Continuity guard feedback: the backend kept the previous intent ids /
