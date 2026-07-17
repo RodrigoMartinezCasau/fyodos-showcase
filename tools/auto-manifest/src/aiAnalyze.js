@@ -265,7 +265,6 @@ async function completeAnthropic({ model, system, user }) {
   // assistant prefill (bounded) — mirrors the backend proxy's continuation
   // (clients/analysis_proxy.py).
   const MAX_CONTINUATIONS = 4;
-  const PER_ROUND_MAX_TOKENS = 14000;
   const CONTINUE_INSTRUCTION =
     'Your previous message was cut off mid-JSON. Continue EXACTLY from where it stopped: ' +
     'output ONLY the remaining characters of the same JSON object. Do NOT repeat anything ' +
@@ -300,8 +299,8 @@ async function completeAnthropic({ model, system, user }) {
       },
       body: JSON.stringify({
         model,
-        max_tokens: PER_ROUND_MAX_TOKENS,
-        system: `${system}\n\nRespond with raw JSON only. No markdown code fences. No text before or after the JSON object.`,
+        max_tokens: 30000,
+        system: `${system}\n\nRespond with raw JSON only. No markdown code fences. No text before or after the JSON object. Emit COMPACT JSON: no indentation and no newlines between tokens — minimize total output length.`,
         messages,
       }),
     });
