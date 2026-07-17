@@ -89,9 +89,18 @@ function restoreDroppedActions({ manifest, wiring, provenance, previousManifest,
   const prevActions = (previousManifest && previousManifest.actions) || [];
   if (!prevActions.length) return [];
 
+  const prevIntents = new Set(prevActions.map((a) => String(a.intent || '')));
   const newIntents = new Set((manifest.actions || []).map((a) => String(a.intent || '')));
-  const newHandlers = new Set(
-    (manifest.actions || []).map((a) => String(a.handler || '').trim()).filter(Boolean),
+  // Handlers of GENUINELY NEW actions only (intent not previously published).
+  // A shared SETTER (patchOrbTheme backing size, logo AND haptics) must never
+  // block restoring a sibling: only a NEW intent with the same handler can be
+  // this action's rename. Keying on all new handlers silently skipped
+  // change_haptic_intensity and go_to_login in production (17/07 round 3).
+  const newOnlyHandlers = new Set(
+    (manifest.actions || [])
+      .filter((a) => !prevIntents.has(String(a.intent || '')))
+      .map((a) => String(a.handler || '').trim())
+      .filter(Boolean),
   );
 
   let registrations = null; // lazy: only scan the repo when something dropped
@@ -99,11 +108,11 @@ function restoreDroppedActions({ manifest, wiring, provenance, previousManifest,
   for (const prev of prevActions) {
     const intent = String(prev.intent || '').trim();
     if (!intent || newIntents.has(intent)) continue;
-    // Same handler under a new intent = probable RENAME: the backend's
-    // continuity reconciliation maps it back to the previous id at publish.
-    // Restoring here would duplicate the action.
+    // Same handler under a genuinely NEW intent = probable RENAME: the
+    // backend's continuity reconciliation maps it back to the previous id at
+    // publish. Restoring here would duplicate the action.
     const prevHandler = String(prev.handler || '').trim();
-    if (prevHandler && newHandlers.has(prevHandler)) continue;
+    if (prevHandler && newOnlyHandlers.has(prevHandler)) continue;
 
     if (registrations == null) registrations = extractBridgeRegistrations(appRoot);
     const reg = registrations.get(intent);

@@ -147,3 +147,23 @@ test('a probable rename (same handler under a new intent) is NOT restored', () =
     fs.rmSync(appRoot, { recursive: true, force: true });
   }
 });
+
+test('a KEPT sibling sharing the handler does not block restoration', () => {
+  const appRoot = makeRepo();
+  try {
+    // go_to_signup (kept, same handler setScreen) is NOT a rename of
+    // go_to_login — production regression: the shared handler blocked the
+    // restore and voice navigation to the login screen silently died.
+    const manifest = { actions: [prevAction('go_to_signup', 'setScreen')] };
+    const provenance = { actions: [] };
+    const previousManifest = {
+      actions: [prevAction('go_to_signup', 'setScreen'), prevAction('go_to_login', 'setScreen')],
+    };
+    const wiring = {};
+    const restored = restoreDroppedActions({ manifest, wiring, provenance, previousManifest, appRoot });
+    assert.deepEqual(restored, ['go_to_login']);
+    assert.equal(wiring.go_to_login.bridge.invoke, "setScreen('login')");
+  } finally {
+    fs.rmSync(appRoot, { recursive: true, force: true });
+  }
+});
