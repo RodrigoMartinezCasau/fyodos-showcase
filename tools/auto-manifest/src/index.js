@@ -90,9 +90,9 @@ const { loadEnv, loadAppEnv } = require('./loadEnv');
 loadEnv();
 
 const { scanRoutes } = require('./routes');
-const { collectFiles } = require('./collect');
+const { collectFiles, isAuditRelevantFile } = require('./collect');
 const { resolveAnalysisRoot } = require('./resolveAnalysisRoot');
-const { analyzeWithAI, correctActionWiring, generateGuardianWithAI, DEFAULT_MODEL, resolveModel } = require('./aiAnalyze');
+const { analyzeWithAI, correctActionWiring, coverageAudit, generateGuardianWithAI, DEFAULT_MODEL, resolveModel } = require('./aiAnalyze');
 const { verifyManifest } = require('./verify');
 const {
   wireWebOrb, reportWireResult, connectOrbRegistries, reportRegistriesResult,
@@ -615,6 +615,65 @@ async function main() {
       const repairedIntents = enforceShopifyGuaranteedExecutions(proposed);
       if (repairedIntents.length) {
         logDev(`[shopify] canonical execution enforced on: ${repairedIntents.join(', ')}`);
+      }
+    }
+
+    // ── 3c. COVERAGE AUDIT (second pass) ────────────────────────────────────
+    // A single analysis pass is non-deterministic and under-enumerates
+    // multi-field setters on big apps (clean-room: 22 vs 33 actions on
+    // identical inputs). A focused second pass re-reads the control-surface +
+    // provider + config files with the already-detected actions in hand and
+    // returns ONLY what was missed. Candidates are merged into `proposed` and
+    // go through the SAME verification + wiring below — nothing is wired blind.
+    // Additive and fail-open; skip with --no-coverage-audit.
+    if (
+      !process.argv.includes('--no-coverage-audit') &&
+      platform !== 'shopify' &&
+      (proposed.actions || []).length > 0
+    ) {
+      try {
+        const auditFiles = included.filter((f) => isAuditRelevantFile(f.rel));
+        if (auditFiles.length) {
+          const detectedActions = (proposed.actions || []).map((a) => ({
+            intent: a.intent, handler: a.handler, description: a.description,
+          }));
+          const audit = await withSpinner(
+            'Auditing coverage — checking for missed actions',
+            () => coverageAudit({
+              detectedActions, files: auditFiles, model, platform,
+              useProxy, apiKey, apiUrl,
+            }),
+          );
+          // Merge: dedup by intent (hard) and by handler+param-signature (so a
+          // re-detection of an existing action is dropped, but sibling setters
+          // that share a handler with DIFFERENT params are kept).
+          proposed.actions = proposed.actions || [];
+          evidence.actions = evidence.actions || {};
+          const sig = (a) =>
+            `${(a.handler || '').trim()}|${Object.keys(a.parameters || {}).sort().join(',')}`;
+          const seenIntents = new Set(proposed.actions.map((a) => a.intent));
+          const seenSigs = new Set(proposed.actions.map(sig));
+          let added = 0;
+          for (const a of audit.actions) {
+            if (!a || !a.intent || seenIntents.has(a.intent)) continue;
+            if (seenSigs.has(sig(a))) continue;
+            proposed.actions.push(a);
+            seenIntents.add(a.intent);
+            seenSigs.add(sig(a));
+            if (audit.evidence.actions && audit.evidence.actions[a.intent]) {
+              evidence.actions[a.intent] = audit.evidence.actions[a.intent];
+            }
+            if (audit.wiring && audit.wiring[a.intent]) {
+              wiring[a.intent] = audit.wiring[a.intent];
+            }
+            added += 1;
+          }
+          logDev(`[audit] proposed ${audit.actions.length} candidate(s), merged ${added} new (cost $${audit.costUSD.toFixed(4)})`);
+          if (added) logUser(`Coverage audit added ${added} action(s) the first pass missed`);
+        }
+      } catch (e) {
+        // Fail-open: the audit is additive; never block the analysis on it.
+        logDev(`[audit] skipped: ${e.message}`);
       }
     }
 

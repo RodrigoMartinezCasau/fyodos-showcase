@@ -456,6 +456,31 @@ function correctionSystemPrompt(platform, intent) {
   );
 }
 
+/** Second-pass COVERAGE AUDIT: find the actions the first pass missed. */
+function coverageAuditSystemPrompt(platform) {
+  return (
+    'You are AUDITING an already-produced Fiodos analysis for MISSED actions. You receive (1) the list of actions the first pass ALREADY detected (intent + handler + short description) and (2) the FULL source of the app\'s settings, personalization/studio, central provider/store and config/type files. Find EVERY user-meaningful control that is NOT already covered and output it as NEW action candidates — nothing else.\n\n' +
+    'WHAT GETS MISSED (hunt these specifically):\n' +
+    '- MULTI-FIELD SETTERS: one function that patches many fields (patchWorkspace({orbEnabled}/{voiceMode}/{imageInputEnabled}), patchOrbTheme({...}), patchBubbleTheme({backgroundColor,textColor,borderColor,...}), patchConversationTheme, patchKeyboardButtonTheme). Emit ONE action PER user-meaningful FIELD, each grounded in a field that literally appears in the code or its config/type definition. Sibling fields sharing ONE setter are DIFFERENT actions.\n' +
+    '- Every toggle/switch/slider/select in a settings or advanced-options component.\n' +
+    '- Account/security/team/workspace ops: save vs discard vs publish, remove member, open audit/change log, 2FA setup, change/reset password, redeem code, switch active project/workspace.\n\n' +
+    'HARD RULES:\n' +
+    '- Output ONLY capabilities NOT already in the provided list. Do NOT repeat an existing capability under a different name (judge by MEANING, not just id). If a capability is already covered, skip it.\n' +
+    '- Every action MUST be backed by a REAL function visible in the provided code, with the same evidence + wiring rules as the main analysis. PREFER the deepest reusable handler (store/context/API) over a component wrapper. Ground every field in the code; NEVER invent a control that is not there.\n' +
+    '- Same JSON shapes for action, evidence and wiring as the main analysis.\n\n' +
+    `${wiringGuide(platform)}\n\n` +
+    'Answer ONLY valid JSON (no markdown, no prose). Start with { and end with }:\n' +
+    '{\n' +
+    '  "actions": [ { ...AppManifest action per the schema... } ],\n' +
+    '  "evidence": { "actions": {"<intent>": {"file": "...", "symbol": "...", "whatItDoes": "..."}} },\n' +
+    '  "wiring": { "<intent>": { ...one wiring entry per the schema... } },\n' +
+    '  "uncertain": ["<anything you could not ground>"]\n' +
+    '}\n' +
+    'If the first pass already covered everything, return {"actions": []}.\n\n' +
+    `Manifest schema:\n${manifestSchemaDoc()}`
+  );
+}
+
 /** System prompt for the agent-to-agent guardian personality step (summary-only). */
 function guardianSystemPrompt() {
   return (
@@ -476,6 +501,7 @@ module.exports = {
   wiringGuide,
   userSpecSystemRule,
   correctionSystemPrompt,
+  coverageAuditSystemPrompt,
   guardianSystemPrompt,
   PLATFORM_GUIDES,
 };

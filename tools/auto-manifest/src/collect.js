@@ -275,4 +275,15 @@ function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' }
   };
 }
 
-module.exports = { collectFiles };
+/** Files the COVERAGE AUDIT (second pass) re-reads to find missed actions:
+ *  central state + config/types (the setters and the field enumerations) plus
+ *  the control-surface components (settings/studio/panels) where those setters
+ *  are invoked. Keeps the audit focused and cheap. */
+function isAuditRelevantFile(rel) {
+  const p = rel.replace(/\\/g, '/');
+  const file = p.split('/').pop() || '';
+  if (isCentralStateFile(rel) || isConfigTypesFile(rel)) return true;
+  return /(settings?|preferences?|profile|account|security|totp|2fa|team|members?|invit\w*|audit|switcher|advanced|section|panel|studio|config)[^/]*\.(tsx?|jsx?|vue|svelte|dart|kt|swift)$/i.test(file);
+}
+
+module.exports = { collectFiles, isCentralStateFile, isConfigTypesFile, isAuditRelevantFile };
