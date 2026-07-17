@@ -10,7 +10,7 @@
 'use strict';
 
 const assert = require('assert');
-const { buildSystemPrompt, manifestSchemaDoc } = require('../src/aiAnalyze');
+const { buildSystemPrompt, manifestSchemaDoc } = require('../src/prompts.dev');
 
 function assertHas(haystack, needle, label) {
   assert.ok(haystack.includes(needle), `missing: ${label}`);

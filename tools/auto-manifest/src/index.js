@@ -622,12 +622,45 @@ async function main() {
     // Actions are always verified against real code. Routes are verified only
     // when there is filesystem ground truth (mobile); for web they are kept as
     // AI-proposed and flagged unverified in provenance.
-    ({ manifest, provenance } = verifyManifest(proposed, evidence, included, routes, { verifyRoutes, platform }));
+    ({ manifest, provenance } = verifyManifest(proposed, evidence, included, routes, { verifyRoutes, platform, appRoot: analysisRoot }));
     ensureBackRoute(manifest, provenance);
     const droppedActions = provenance.actions.filter((a) => !a.included).length;
     const droppedRoutes = provenance.routes.filter((r) => !r.included).length;
     logDev(`[verify] kept routes=${manifest.routes.length} actions=${manifest.actions.length}` +
       ` | dropped: ${droppedRoutes} routes, ${droppedActions} actions (unproven evidence)`);
+
+    // ── 4-bis. CONTINUITY FLOOR (re-analyses): a previously-published action
+    // whose bridge registration still exists in the repo must never vanish
+    // because one model pass forgot it. Restored entries re-enter the normal
+    // wiring verification below — nothing is ever wired blind.
+    if (!process.argv.includes('--fresh-intents') && platform !== 'shopify') {
+      const { apiKey: cfKey, apiUrl: cfUrl } = resolveApiTarget();
+      if (cfKey && cfUrl) {
+        try {
+          const res = await fetch(`${cfUrl}/v1/client/manifest`, { headers: { 'x-api-key': cfKey } });
+          if (res.ok) {
+            const prevPayload = await res.json();
+            const { restoreDroppedActions } = require('./continuityFloor');
+            const restoredIntents = restoreDroppedActions({
+              manifest,
+              wiring,
+              provenance,
+              previousManifest: prevPayload && prevPayload.manifest,
+              appRoot: analysisRoot,
+              log: logDev,
+            });
+            if (restoredIntents.length) {
+              logUser(
+                `Continuity: restored ${restoredIntents.length} previously-published action(s) ` +
+                `the re-analysis missed (${restoredIntents.join(', ')})`,
+              );
+            }
+          }
+        } catch (e) {
+          logDev(`[continuity] previous-manifest fetch failed (${e.message}) — floor skipped`);
+        }
+      }
+    }
     logUser('Analysis complete');
 
     fs.writeFileSync(path.join(outDir, 'evidence.json'), JSON.stringify({

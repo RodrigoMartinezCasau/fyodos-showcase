@@ -218,6 +218,34 @@ function normalizeHref(href) {
 function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) {
   const byRel = new Map(sentFiles.map((f) => [f.rel.replace(/\\/g, '/'), f.content]));
   const verifyRoutes = opts.verifyRoutes ?? staticRoutes.length > 0;
+  // Evidence files OMITTED from the prompt for size can still be real: the
+  // model legitimately names them from imports it saw (e.g. a settings screen
+  // importing redeemPromo from '@/lib/api/…'). Verification reads them from
+  // DISK — the hallucination-proofing is identical (file must exist, symbol
+  // must literally appear); only the "was it sent to the AI" restriction is
+  // dropped, because it silently discarded real account/settings actions.
+  const appRoot = opts.appRoot || '';
+  const diskCache = new Map();
+  const readFromRepo = (rel) => {
+    if (!appRoot || !rel) return undefined;
+    if (diskCache.has(rel)) return diskCache.get(rel);
+    let content;
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      const full = path.resolve(appRoot, rel);
+      // Path safety: never read outside the analyzed project.
+      if (full === path.resolve(appRoot) || !full.startsWith(path.resolve(appRoot) + path.sep)) {
+        content = undefined;
+      } else if (fs.existsSync(full) && fs.statSync(full).isFile()) {
+        content = fs.readFileSync(full, 'utf8');
+      }
+    } catch {
+      content = undefined;
+    }
+    diskCache.set(rel, content);
+    return content;
+  };
   const provenance = {
     engine: 'auto-manifest-v3-ai-first',
     routeVerification: verifyRoutes ? 'filesystem' : 'ai-proposed (no static ground truth)',
@@ -272,7 +300,12 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
   for (const action of manifest.actions || []) {
     const ev = evidence.actions?.[action.intent] || {};
     const evFile = String(ev.file || '').replace(/\\/g, '/').replace(/^\.\//, '');
-    const content = byRel.get(evFile);
+    let content = byRel.get(evFile);
+    let evidenceSource = 'sent';
+    if (!content) {
+      content = readFromRepo(evFile);
+      if (content) evidenceSource = 'disk (omitted from the AI prompt for size)';
+    }
 
     // Shopify (closed platform): the ground truth for API actions is the
     // platform itself, not app code. An action carrying a declarative
@@ -324,7 +357,7 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
     if (!content) {
       provenance.actions.push({
         intent: action.intent, included: false,
-        reason: `evidence file '${ev.file || '(none)'}' was not among the files sent — DROPPED`,
+        reason: `evidence file '${ev.file || '(none)'}' does not exist in the project — DROPPED`,
       });
       continue;
     }
@@ -374,7 +407,8 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
     actions.push(action);
     provenance.actions.push({
       intent: action.intent, included: true,
-      verification: `identifier '${found}' confirmed in ${evFile}`,
+      verification: `identifier '${found}' confirmed in ${evFile}`
+        + (evidenceSource === 'sent' ? '' : ` — verified on ${evidenceSource}`),
       evidence: ev,
     });
   }
