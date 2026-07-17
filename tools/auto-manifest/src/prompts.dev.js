@@ -181,6 +181,10 @@ For EVERY action, also return a "wiring" entry describing how a separate module 
       "invoke":"this.todoSignalsService.updateTodos({ id: Date.now(), title: args.title, description: args.description, done: false })" },
     "requiredSymbols":[{"name":"todoSignalsService","file":"src/app/.../todo-add-new-entry-form.component.ts"},{"name":"updateTodos","file":"src/app/services/todo-signals.service.ts"}] }
 - "requiredSymbols": list every identifier your "call"/"invoke"/"imports" depend on together with the file it lives in. These are verified mechanically; if any is missing, that action is flagged for review rather than wired wrong.
+- COMPILE-SAFE EXPRESSIONS (the #1 cause of reverted wirings — your call/invoke is type-checked by the app's OWN compiler and reverted on any error):
+  · NULLABLES: any value that can be null/undefined per its type (a session, an optional field) must be accessed with optional chaining and a safe fallback (session?.token ?? '') — never bare session.token. TypeScript strict mode rejects it (TS18047) and the whole action falls to manual.
+  · TYPE FIDELITY: pass parameters with the EXACT type the target function declares. When it takes an OBJECT (switchProject(project: Project)) and the voice parameter is a name/id string, look up the object in scope first (e.g. projects.find(p => p.name === args.project) — and pass THAT), or anchor where the object exists. Never pass the raw string where an object is expected (TS2345).
+  · Only use identifiers the anchor file really has in scope; when a lookup needs a list (projects, members), anchor where that list is declared.
 - NEVER reference secrets, env vars, or network calls. Only app state/data operations.
 - The confirmation flow is enforced by the engine BEFORE your handler runs, so never add your own confirmation logic; just perform the action.
 

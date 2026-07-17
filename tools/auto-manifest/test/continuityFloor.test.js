@@ -105,6 +105,33 @@ test('a dropped action with no remaining bridge registration stays dropped', () 
   }
 });
 
+test('wireHandlers falls back to the previous-install bridge when fresh wiring fails', () => {
+  const { prepareHandlerPlan } = require('../src/wireHandlers');
+  const appRoot = makeRepo();
+  try {
+    const manifest = {
+      appName: 'App',
+      actions: [prevAction('go_to_login', 'setScreen')],
+    };
+    // The new run proposed NO usable wiring (the exact production case: the
+    // model re-emitted the action but its fresh anchor/invoke failed).
+    const plan = prepareHandlerPlan({
+      appRoot,
+      manifest,
+      evidence: { actions: { go_to_login: { file: 'src/pages/PublicScreens.tsx', symbol: 'setScreen' } } },
+      wiring: {},
+      fyodosDirRel: 'src/fyodos',
+    });
+    const entry = plan.entries.find((e) => e.intent === 'go_to_login');
+    assert.equal(entry.confidence, 'auto');
+    assert.equal(entry.kind, 'bridge');
+    assert.equal(entry.source, 'previous-install bridge');
+    assert.equal(entry.bridge.invoke, "setScreen('login')");
+  } finally {
+    fs.rmSync(appRoot, { recursive: true, force: true });
+  }
+});
+
 test('a probable rename (same handler under a new intent) is NOT restored', () => {
   const appRoot = makeRepo();
   try {

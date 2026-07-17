@@ -41,6 +41,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { probeEffect, compileRegressed, classifyErrorLines } = require('./verifyWire');
+const { extractBridgeRegistrations } = require('./continuityFloor');
 
 const DOC_BASENAME = 'FYODOS_HANDLERS.md';
 const REGISTRY_BASENAME = 'handlers.generated';
@@ -879,6 +880,11 @@ function prepareHandlerPlan({ appRoot, manifest, evidence, wiring = {}, fyodosDi
   const evActions = (evidence && evidence.actions) || {};
   const aiWiring = wiring || {};
   const entries = [];
+  // Lazy index of the repo's EXISTING FYODOS:BRIDGE registrations (from the
+  // previous verified install). When this run's AI wiring fails for an intent
+  // a prior run already wired, the proven registration is reused as a
+  // candidate — re-verified exactly like fresh AI wiring, never applied blind.
+  let repoBridgeRegs = null;
 
   for (const action of actions) {
     const intent = action.intent;
@@ -920,7 +926,31 @@ function prepareHandlerPlan({ appRoot, manifest, evidence, wiring = {}, fyodosDi
       continue;
     }
 
-    // 3) Neither could be verified → needs review, with both reasons.
+    // 3) PREVIOUS-RUN BRIDGE (continuity): a prior install already wired this
+    // intent and its registration still exists in the repo. Reuse it — the
+    // full bridge verification (anchor ladder, symbol/param checks) runs
+    // again, so a stale registration can never be applied blind.
+    if (repoBridgeRegs == null) repoBridgeRegs = extractBridgeRegistrations(appRoot);
+    const prevReg = repoBridgeRegs.get(intent);
+    if (prevReg) {
+      const prevTry = buildAiBridgeEntry({
+        appRoot,
+        fyodosDirRel,
+        base,
+        aiW: {
+          strategy: 'bridge',
+          bridgeReason: 'reused from the previous verified install (this run\'s proposal failed verification)',
+          bridge: { file: prevReg.file, anchor: '', invoke: prevReg.invoke, scope: 'statement' },
+          requiredSymbols: [],
+        },
+      });
+      if (prevTry.confidence === 'auto') {
+        entries.push({ ...prevTry, source: 'previous-install bridge', aiReason: aiTry.reason });
+        continue;
+      }
+    }
+
+    // 4) Nothing could be verified → needs review, with both reasons.
     entries.push({
       ...base,
       confidence: 'review',
