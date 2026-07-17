@@ -90,9 +90,30 @@ function tierFor(rel, platform) {
  *  provider is worth more than any single screen for ACTION detection. */
 function isCentralStateFile(rel) {
   const p = rel.replace(/\\/g, '/');
+  const file = p.split('/').pop() || '';
   return (
     /(^|\/)(state|stores?|context|contexts|redux|providers?|blocs?|cubits?|viewmodels?)\//i.test(p) ||
-    /(viewmodel|notifier|bloc|cubit|store|controller)\.(dart|kt|swift)$/i.test(p)
+    /(viewmodel|notifier|bloc|cubit|store|controller)\.(dart|kt|swift)$/i.test(p) ||
+    // Persisted-state / store modules by filename (e.g. clientStore.ts,
+    // appStore.ts) even when they live under lib/ — they hold the app's
+    // config and the persistence the provider patches.
+    /[a-z0-9]*store\.(ts|tsx|js|jsx)$/i.test(file)
+  );
+}
+
+/** CONFIG / TYPE-DEFINITION modules: the files that ENUMERATE the fields a
+ *  provider's patch functions accept (theme configs, workspace/settings shapes,
+ *  default constants). Guaranteeing them lets the analyzer emit one action PER
+ *  field for multi-field setters (patchOrbTheme, patchBubbleTheme,
+ *  patchKeyboardButtonTheme, patchConversationTheme…) — without the field list
+ *  in view it under-enumerates and whole personalization families vanish
+ *  (clean-room finding). Small, evidence-dense; safe to force in. */
+function isConfigTypesFile(rel) {
+  const p = rel.replace(/\\/g, '/');
+  const file = p.split('/').pop() || '';
+  return (
+    /(^|\/)(lib|data|config|constants|types|models|theme|themes|settings)\//i.test(p) &&
+    /(config|defaults?|theme|themes|types?|schema|constants|settings|workspace|manifest)/i.test(file)
   );
 }
 
@@ -183,8 +204,15 @@ function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' }
   const TOTAL_STATE_CAP = 0.55 * budgetChars;
   const mustSet = new Set();
   const centralState = files
-    .filter((f) => isCentralStateFile(f.rel) && f.chars <= PER_FILE_CAP)
-    .sort((a, b) => a.chars - b.chars); // small first → fit as many as possible
+    .filter(
+      (f) => (isCentralStateFile(f.rel) || isConfigTypesFile(f.rel)) && f.chars <= PER_FILE_CAP,
+    )
+    // Central state first, then config/types; small first so as many fit as possible.
+    .sort((a, b) => {
+      const ca = isCentralStateFile(a.rel) ? 0 : 1;
+      const cb = isCentralStateFile(b.rel) ? 0 : 1;
+      return ca - cb || a.chars - b.chars;
+    });
   for (const f of centralState) {
     if (used + f.chars > TOTAL_STATE_CAP) continue; // overflow → normal tiering
     included.push(f);

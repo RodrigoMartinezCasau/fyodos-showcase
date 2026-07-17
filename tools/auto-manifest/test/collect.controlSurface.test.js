@@ -39,6 +39,29 @@ test('a large central-state provider is GUARANTEED in, even when screens fill th
   }
 });
 
+test('config/type files that enumerate settings fields are guaranteed in', () => {
+  const appRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fyodos-collect-cfg-'));
+  try {
+    const mk = (rel, bytes) => {
+      const full = path.join(appRoot, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, 'x'.repeat(bytes));
+    };
+    mk('src/lib/clientStore.ts', 30000);      // persisted store + config types
+    mk('src/data/uiThemeDefaults.ts', 8000);  // theme field enumerations
+    for (let i = 0; i < 12; i++) mk(`src/components/sections/Section${i}.tsx`, 40000);
+    const { included } = collectFiles(appRoot, {
+      maxInputTokens: Math.round(300000 / 3.0),
+      platform: 'web',
+    });
+    const rels = new Set(included.map((f) => f.rel.replace(/\\/g, '/')));
+    assert.ok(rels.has('src/lib/clientStore.ts'), 'persisted store/config must be included');
+    assert.ok(rels.has('src/data/uiThemeDefaults.ts'), 'theme-field definitions must be included');
+  } finally {
+    fs.rmSync(appRoot, { recursive: true, force: true });
+  }
+});
+
 test('a pathological monster provider does NOT consume the whole budget', () => {
   const appRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fyodos-collect-monster-'));
   try {
