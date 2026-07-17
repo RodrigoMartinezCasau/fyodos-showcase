@@ -83,6 +83,19 @@ function tierFor(rel, platform) {
   return tierForApp(p);
 }
 
+/** Central-state files: the providers/stores/contexts that DEFINE the setters
+ *  which turn screen controls into wireable actions (patchWorkspace, saveAll,
+ *  switchProject…). These are guaranteed into the analysis (see collectFiles):
+ *  a screen without its provider yields navigation but no actions, so the
+ *  provider is worth more than any single screen for ACTION detection. */
+function isCentralStateFile(rel) {
+  const p = rel.replace(/\\/g, '/');
+  return (
+    /(^|\/)(state|stores?|context|contexts|redux|providers?|blocs?|cubits?|viewmodels?)\//i.test(p) ||
+    /(viewmodel|notifier|bloc|cubit|store|controller)\.(dart|kt|swift)$/i.test(p)
+  );
+}
+
 function tierForApp(p) {
   if (/^(src\/)?app\//.test(p)) return 0; // expo-router / Next screens
   // `sections/` and `panels/` are SCREEN BODIES in shell-based apps (a Shell
@@ -103,8 +116,10 @@ function tierForApp(p) {
   // live in the tree. Ranked as generic components (tier 4) they were the
   // first thing the budget cut — and the audit showed the analyzer then missed
   // whole capability families (2FA setup, promo codes, project switching, the
-  // team audit log). Same priority as central state.
-  if (/(settings?|preferences?|config|profile|account|security|totp|2fa|team|members?|invit\w*|audit|switcher|onboard\w*)[^/]*\.(tsx?|jsx?|vue|svelte|dart|kt|swift)$/i.test(p.split('/').pop() || '')) return 1;
+  // team audit log). Same priority as central state. NOTE: 'onboard' is
+  // intentionally EXCLUDED — install/onboarding UI is not a runtime control
+  // surface for the orb and its files tend to be huge (would starve the budget).
+  if (/(settings?|preferences?|config|profile|account|security|totp|2fa|team|members?|invit\w*|audit|switcher)[^/]*\.(tsx?|jsx?|vue|svelte|dart|kt|swift)$/i.test(p.split('/').pop() || '')) return 1;
   if (/(^|\/)(services?|api|db|data|domain|agent|handlers?|actions?|lib|utils|repositories|repository|usecases?)\//i.test(p)) return 2;
   if (/(^|\/)(hooks)\//.test(p)) return 3;
   return 4; // generic components / ui
@@ -153,21 +168,41 @@ function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' }
 
   const budgetChars = maxInputTokens * CHARS_PER_TOKEN;
 
-  // Floor-reserved fill. A pure greedy fill let a fat tier 0 (many large
-  // screen files) consume the WHOLE budget and push out tier 1 entirely —
-  // i.e. the app's central state/providers (AppProvider, stores) vanished
-  // from the analysis, so the AI could not see the setters that make
-  // configuration controls real actions and had to guess every handler name.
-  // Each lower tier gets a guaranteed FLOOR (share of the total budget,
-  // capped at its real demand); screens still get everything left over, and a
-  // final backfill hands unused room to deferred files in tier order.
+  const included = [];
+  let used = 0;
+
+  // GUARANTEED CENTRAL STATE (do this BEFORE the tiered fill). The audit of a
+  // virgin analysis showed the single richest file — AppProvider (~82KB), which
+  // defines patchWorkspace/saveAll/resetChanges/switchProject/patchBubbleTheme
+  // and the rest of the setters — losing the budget race to the many screen
+  // files, so ~12 real capabilities vanished from the manifest. Force the
+  // central-state files in first, capped per file (a pathological monster
+  // provider can't consume everything) and capped in total (never starve
+  // screens completely), letting any overflow fall back to normal tiering.
+  const PER_FILE_CAP = 0.4 * budgetChars;
+  const TOTAL_STATE_CAP = 0.55 * budgetChars;
+  const mustSet = new Set();
+  const centralState = files
+    .filter((f) => isCentralStateFile(f.rel) && f.chars <= PER_FILE_CAP)
+    .sort((a, b) => a.chars - b.chars); // small first → fit as many as possible
+  for (const f of centralState) {
+    if (used + f.chars > TOTAL_STATE_CAP) continue; // overflow → normal tiering
+    included.push(f);
+    used += f.chars;
+    mustSet.add(f.rel);
+  }
+  const rest = files.filter((f) => !mustSet.has(f.rel));
+
+  // Floor-reserved fill over the REMAINING files. A pure greedy fill let a fat
+  // tier 0 (many large screen files) consume the WHOLE budget and push out
+  // tier 1 entirely. Each lower tier gets a guaranteed FLOOR (share of the
+  // total budget, capped at its real demand); screens still get what is left,
+  // and a final backfill hands unused room to deferred files in tier order.
   const FLOOR_SHARE = { 1: 0.2, 2: 0.05, 3: 0.02, 4: 0.02 };
   const demand = new Map();
-  for (const f of files) demand.set(f.tier, (demand.get(f.tier) ?? 0) + f.chars);
+  for (const f of rest) demand.set(f.tier, (demand.get(f.tier) ?? 0) + f.chars);
 
-  const included = [];
   const deferred = [];
-  let used = 0;
   const tiers = [...demand.keys()].sort((a, b) => a - b);
   for (const tier of tiers) {
     // Reserve, for every LOWER-priority tier that still has files, the smaller
@@ -179,7 +214,7 @@ function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' }
     }
     const available = budgetChars - used - reserved;
     let tierUsed = 0;
-    for (const f of files) {
+    for (const f of rest) {
       if (f.tier !== tier) continue;
       if (tierUsed + f.chars <= available) {
         included.push(f);

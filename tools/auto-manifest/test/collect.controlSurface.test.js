@@ -14,6 +14,55 @@ const { collectFiles } = require('../src/collect');
 // switching, team management). They must rank with central state (tier 1),
 // ahead of generic components.
 
+test('a large central-state provider is GUARANTEED in, even when screens fill the budget', () => {
+  const appRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fyodos-collect-state-'));
+  try {
+    const mk = (rel, bytes) => {
+      const full = path.join(appRoot, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, 'x'.repeat(bytes));
+    };
+    // A big provider (like AppProvider ~82KB) + many big screens that would win
+    // a naive tiered fill and squeeze the provider out (the audited bug).
+    mk('src/context/AppProvider.tsx', 82000);
+    for (let i = 0; i < 12; i++) mk(`src/components/sections/Section${i}.tsx`, 40000);
+
+    const { included, omitted } = collectFiles(appRoot, {
+      maxInputTokens: Math.round(300000 / 3.0), // ~300k chars: NOT enough for all
+      platform: 'web',
+    });
+    const rels = new Set(included.map((f) => f.rel.replace(/\\/g, '/')));
+    assert.ok(rels.has('src/context/AppProvider.tsx'), 'central-state provider must always be included');
+    assert.ok(omitted.length > 0, 'budget pressure was real (some screens omitted)');
+  } finally {
+    fs.rmSync(appRoot, { recursive: true, force: true });
+  }
+});
+
+test('a pathological monster provider does NOT consume the whole budget', () => {
+  const appRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fyodos-collect-monster-'));
+  try {
+    const mk = (rel, bytes) => {
+      const full = path.join(appRoot, rel);
+      fs.mkdirSync(path.dirname(full), { recursive: true });
+      fs.writeFileSync(full, 'x'.repeat(bytes));
+    };
+    const budgetChars = 300000;
+    mk('src/store/MegaStore.ts', Math.round(budgetChars * 0.9)); // >40% per-file cap
+    mk('src/pages/Home.tsx', 20000);
+    const { included } = collectFiles(appRoot, {
+      maxInputTokens: Math.round(budgetChars / 3.0),
+      platform: 'web',
+    });
+    const rels = new Set(included.map((f) => f.rel.replace(/\\/g, '/')));
+    // The monster exceeds the per-file cap → it is NOT force-included, so the
+    // screen still makes it in (no starvation).
+    assert.ok(rels.has('src/pages/Home.tsx'), 'screen not starved by a monster provider');
+  } finally {
+    fs.rmSync(appRoot, { recursive: true, force: true });
+  }
+});
+
 test('control-surface components survive budget pressure ahead of generic UI', () => {
   const appRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'fyodos-collect-'));
   try {
