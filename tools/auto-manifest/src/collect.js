@@ -98,6 +98,13 @@ function tierForApp(p) {
   // out AppProvider-style files, and the AI had to guess every handler name.
   if (/(^|\/)(state|store|stores|context|contexts|redux|providers?|blocs?|cubits?|viewmodels?)\//i.test(p)) return 1;
   if (/(viewmodel|notifier|bloc|cubit|store|controller)\.(dart|kt|swift)$/i.test(p)) return 1;
+  // CONTROL-SURFACE components: settings/account/security/team/project-switch
+  // panels are exactly what users ask the assistant to operate, wherever they
+  // live in the tree. Ranked as generic components (tier 4) they were the
+  // first thing the budget cut — and the audit showed the analyzer then missed
+  // whole capability families (2FA setup, promo codes, project switching, the
+  // team audit log). Same priority as central state.
+  if (/(settings?|preferences?|config|profile|account|security|totp|2fa|team|members?|invit\w*|audit|switcher|onboard\w*)[^/]*\.(tsx?|jsx?|vue|svelte|dart|kt|swift)$/i.test(p.split('/').pop() || '')) return 1;
   if (/(^|\/)(services?|api|db|data|domain|agent|handlers?|actions?|lib|utils|repositories|repository|usecases?)\//i.test(p)) return 2;
   if (/(^|\/)(hooks)\//.test(p)) return 3;
   return 4; // generic components / ui
