@@ -634,42 +634,56 @@ async function main() {
       try {
         const auditFiles = included.filter((f) => isAuditRelevantFile(f.rel));
         if (auditFiles.length) {
-          const detectedActions = (proposed.actions || []).map((a) => ({
-            intent: a.intent, handler: a.handler, description: a.description,
-          }));
-          const audit = await withSpinner(
-            'Auditing coverage — checking for missed actions',
-            () => coverageAudit({
-              detectedActions, files: auditFiles, model, platform,
-              useProxy, apiKey, apiUrl,
-            }),
-          );
-          // Merge: dedup by intent (hard) and by handler+param-signature (so a
-          // re-detection of an existing action is dropped, but sibling setters
-          // that share a handler with DIFFERENT params are kept).
           proposed.actions = proposed.actions || [];
           evidence.actions = evidence.actions || {};
+          // Dedup key: intent (hard) + handler+param-signature (so a re-detection
+          // of an existing action is dropped, but sibling setters that share a
+          // handler with DIFFERENT params are kept).
           const sig = (a) =>
             `${(a.handler || '').trim()}|${Object.keys(a.parameters || {}).sort().join(',')}`;
           const seenIntents = new Set(proposed.actions.map((a) => a.intent));
           const seenSigs = new Set(proposed.actions.map(sig));
-          let added = 0;
-          for (const a of audit.actions) {
-            if (!a || !a.intent || seenIntents.has(a.intent)) continue;
-            if (seenSigs.has(sig(a))) continue;
-            proposed.actions.push(a);
-            seenIntents.add(a.intent);
-            seenSigs.add(sig(a));
-            if (audit.evidence.actions && audit.evidence.actions[a.intent]) {
-              evidence.actions[a.intent] = audit.evidence.actions[a.intent];
+          // LOOP: a single audit pass is itself non-deterministic and can miss a
+          // few; repeat until a pass finds nothing new (converges to full
+          // coverage) or the safety cap is hit. Each pass sees the GROWING list
+          // so it only proposes what is still missing. Bounded by cost.
+          const MAX_AUDIT_PASSES = Math.max(1, Number(process.env.FYODOS_AUDIT_PASSES || 3));
+          let totalAdded = 0;
+          let auditCostUSD = 0;
+          for (let pass = 1; pass <= MAX_AUDIT_PASSES; pass += 1) {
+            const detectedActions = proposed.actions.map((a) => ({
+              intent: a.intent, handler: a.handler, description: a.description,
+            }));
+            // eslint-disable-next-line no-await-in-loop
+            const audit = await withSpinner(
+              `Auditing coverage (pass ${pass}/${MAX_AUDIT_PASSES}) — checking for missed actions`,
+              () => coverageAudit({
+                detectedActions, files: auditFiles, model, platform,
+                useProxy, apiKey, apiUrl,
+              }),
+            );
+            auditCostUSD += audit.costUSD || 0;
+            let added = 0;
+            for (const a of audit.actions) {
+              if (!a || !a.intent || seenIntents.has(a.intent)) continue;
+              if (seenSigs.has(sig(a))) continue;
+              proposed.actions.push(a);
+              seenIntents.add(a.intent);
+              seenSigs.add(sig(a));
+              if (audit.evidence.actions && audit.evidence.actions[a.intent]) {
+                evidence.actions[a.intent] = audit.evidence.actions[a.intent];
+              }
+              if (audit.wiring && audit.wiring[a.intent]) {
+                wiring[a.intent] = audit.wiring[a.intent];
+              }
+              added += 1;
             }
-            if (audit.wiring && audit.wiring[a.intent]) {
-              wiring[a.intent] = audit.wiring[a.intent];
-            }
-            added += 1;
+            totalAdded += added;
+            logDev(`[audit] pass ${pass}: proposed ${audit.actions.length}, merged ${added} new (cost $${(audit.costUSD || 0).toFixed(4)})`);
+            if (added === 0) break; // converged — nothing new to find
           }
-          logDev(`[audit] proposed ${audit.actions.length} candidate(s), merged ${added} new (cost $${audit.costUSD.toFixed(4)})`);
-          if (added) logUser(`Coverage audit added ${added} action(s) the first pass missed`);
+          logDev(`[audit] total new actions ${totalAdded} over up to ${MAX_AUDIT_PASSES} pass(es) (audit cost $${auditCostUSD.toFixed(4)})`);
+          if (totalAdded) logUser(`Coverage audit added ${totalAdded} action(s) the first pass missed`);
         }
       } catch (e) {
         // Fail-open: the audit is additive; never block the analysis on it.
