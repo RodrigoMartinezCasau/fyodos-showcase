@@ -259,11 +259,13 @@ async function completeAnthropic({ model, system, user }) {
     throw new Error('ANTHROPIC_API_KEY is required (auto-loaded from backend/.env or your shell)');
   }
 
-  // Large apps produce manifests bigger than one completion's output ceiling.
-  // When the model stops at max_tokens, CONTINUE the same JSON via assistant
-  // prefill (bounded) instead of failing on truncated output — mirrors the
-  // backend proxy's continuation (clients/analysis_proxy.py).
-  const MAX_CONTINUATIONS = 3;
+  // Large apps produce manifests bigger than one completion's output ceiling,
+  // and the provider silently truncates completions that run too long. Ask for
+  // a slice per round (finishes reliably) and CONTINUE the same JSON via
+  // assistant prefill (bounded) — mirrors the backend proxy's continuation
+  // (clients/analysis_proxy.py).
+  const MAX_CONTINUATIONS = 4;
+  const PER_ROUND_MAX_TOKENS = 14000;
   let acc = '';
   const usage = { prompt_tokens: 0, completion_tokens: 0 };
   for (let round = 0; round <= MAX_CONTINUATIONS; round += 1) {
@@ -281,7 +283,7 @@ async function completeAnthropic({ model, system, user }) {
       },
       body: JSON.stringify({
         model,
-        max_tokens: 30000,
+        max_tokens: PER_ROUND_MAX_TOKENS,
         system: `${system}\n\nRespond with raw JSON only. No markdown code fences. No text before or after the JSON object.`,
         messages,
       }),
@@ -292,7 +294,13 @@ async function completeAnthropic({ model, system, user }) {
     acc += textPart?.text || '';
     usage.prompt_tokens += data.usage?.input_tokens || 0;
     usage.completion_tokens += data.usage?.output_tokens || 0;
-    if (data.stop_reason !== 'max_tokens') break;
+    if (data.stop_reason !== 'max_tokens') {
+      // Whatever the stop reason claims, unparseable JSON means truncation —
+      // keep continuing while rounds remain (observed in production 17/07).
+      let complete = true;
+      try { JSON.parse(acc.trim()); } catch { complete = false; }
+      if (complete) break;
+    }
   }
   return { parsed: parseJsonContent(acc), usage };
 }
