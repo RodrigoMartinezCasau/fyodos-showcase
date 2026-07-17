@@ -259,29 +259,42 @@ async function completeAnthropic({ model, system, user }) {
     throw new Error('ANTHROPIC_API_KEY is required (auto-loaded from backend/.env or your shell)');
   }
 
-  const res = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'x-api-key': apiKey,
-      'anthropic-version': '2023-06-01',
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 30000,
-      system: `${system}\n\nRespond with raw JSON only. No markdown code fences. No text before or after the JSON object.`,
-      messages: [{ role: 'user', content: user }],
-    }),
-  });
-  if (!res.ok) throw new Error(`Anthropic API ${res.status}: ${(await res.text()).slice(0, 400)}`);
-  const data = await res.json();
-  const textPart = (data.content || []).find((b) => b.type === 'text');
-  const raw = textPart?.text || '';
-  const usage = {
-    prompt_tokens: data.usage?.input_tokens || 0,
-    completion_tokens: data.usage?.output_tokens || 0,
-  };
-  return { parsed: parseJsonContent(raw), usage };
+  // Large apps produce manifests bigger than one completion's output ceiling.
+  // When the model stops at max_tokens, CONTINUE the same JSON via assistant
+  // prefill (bounded) instead of failing on truncated output — mirrors the
+  // backend proxy's continuation (clients/analysis_proxy.py).
+  const MAX_CONTINUATIONS = 3;
+  let acc = '';
+  const usage = { prompt_tokens: 0, completion_tokens: 0 };
+  for (let round = 0; round <= MAX_CONTINUATIONS; round += 1) {
+    const messages = [{ role: 'user', content: user }];
+    if (acc) {
+      acc = acc.replace(/\s+$/, ''); // Anthropic rejects trailing whitespace in prefill
+      messages.push({ role: 'assistant', content: acc });
+    }
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model,
+        max_tokens: 30000,
+        system: `${system}\n\nRespond with raw JSON only. No markdown code fences. No text before or after the JSON object.`,
+        messages,
+      }),
+    });
+    if (!res.ok) throw new Error(`Anthropic API ${res.status}: ${(await res.text()).slice(0, 400)}`);
+    const data = await res.json();
+    const textPart = (data.content || []).find((b) => b.type === 'text');
+    acc += textPart?.text || '';
+    usage.prompt_tokens += data.usage?.input_tokens || 0;
+    usage.completion_tokens += data.usage?.output_tokens || 0;
+    if (data.stop_reason !== 'max_tokens') break;
+  }
+  return { parsed: parseJsonContent(acc), usage };
 }
 
 async function completeOpenAI({ model, system, user }) {
@@ -391,8 +404,25 @@ async function analyzeViaProxy({ apiKey, apiUrl, model, user, task = 'analysis',
       `the ${platform} platform spec. Update/redeploy the backend and re-run the analysis.`,
     );
   }
+  let parsed;
+  try {
+    parsed = parseJsonContent(data.text || '{}');
+  } catch (e) {
+    // Diagnosis dump: a malformed model response after a multi-minute run is
+    // unreproducible without the raw text. Save it so the failure is debuggable
+    // (and the analysis potentially salvageable) instead of lost.
+    try {
+      const os = require('os');
+      const nodePath = require('path');
+      const nodeFs = require('fs');
+      const dumpPath = nodePath.join(os.tmpdir(), `fiodos-analysis-raw-${Date.now()}.txt`);
+      nodeFs.writeFileSync(dumpPath, data.text || '', 'utf8');
+      e.message += ` — raw model response saved to ${dumpPath}`;
+    } catch { /* dump is best-effort */ }
+    throw e;
+  }
   return {
-    parsed: parseJsonContent(data.text || '{}'),
+    parsed,
     usage: {
       prompt_tokens: data.promptTokens || 0,
       completion_tokens: data.completionTokens || 0,
