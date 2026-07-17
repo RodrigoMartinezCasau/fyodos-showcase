@@ -266,13 +266,30 @@ async function completeAnthropic({ model, system, user }) {
   // (clients/analysis_proxy.py).
   const MAX_CONTINUATIONS = 4;
   const PER_ROUND_MAX_TOKENS = 14000;
+  const CONTINUE_INSTRUCTION =
+    'Your previous message was cut off mid-JSON. Continue EXACTLY from where it stopped: ' +
+    'output ONLY the remaining characters of the same JSON object. Do NOT repeat anything ' +
+    'already emitted, do NOT add any preamble, prose or markdown fences — your reply is ' +
+    'concatenated verbatim to the previous message to form the complete JSON.';
+  const stripFences = (chunk) => {
+    let c = chunk.trim();
+    if (c.startsWith('```')) {
+      const nl = c.indexOf('\n');
+      c = nl !== -1 ? c.slice(nl + 1) : '';
+    }
+    if (c.endsWith('```')) c = c.slice(0, -3).replace(/\s+$/, '');
+    return c;
+  };
   let acc = '';
   const usage = { prompt_tokens: 0, completion_tokens: 0 };
   for (let round = 0; round <= MAX_CONTINUATIONS; round += 1) {
     const messages = [{ role: 'user', content: user }];
     if (acc) {
-      acc = acc.replace(/\s+$/, ''); // Anthropic rejects trailing whitespace in prefill
+      // Multi-turn continuation (Opus 4.8 rejects assistant prefill): show the
+      // partial output as the assistant's prior turn and ask for the rest.
+      acc = acc.replace(/\s+$/, '');
       messages.push({ role: 'assistant', content: acc });
+      messages.push({ role: 'user', content: CONTINUE_INSTRUCTION });
     }
     const res = await fetch('https://api.anthropic.com/v1/messages', {
       method: 'POST',
@@ -291,7 +308,8 @@ async function completeAnthropic({ model, system, user }) {
     if (!res.ok) throw new Error(`Anthropic API ${res.status}: ${(await res.text()).slice(0, 400)}`);
     const data = await res.json();
     const textPart = (data.content || []).find((b) => b.type === 'text');
-    acc += textPart?.text || '';
+    const chunk = textPart?.text || '';
+    acc += round > 0 ? stripFences(chunk) : chunk;
     usage.prompt_tokens += data.usage?.input_tokens || 0;
     usage.completion_tokens += data.usage?.output_tokens || 0;
     if (data.stop_reason !== 'max_tokens') {
