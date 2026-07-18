@@ -1110,15 +1110,40 @@ async function main() {
       }
     };
 
+    // AUTO-WIRED OR ABSENT: wire FIRST, then publish only what actually wired.
+    // This guarantees the published manifest never contains an action a human
+    // would have to wire by hand — an unwireable action is dropped so the
+    // developer sees it is missing and re-runs the analysis to include it.
+    const pruneAndReport = () => {
+      const dropped = pruneUnwiredActions(manifest, provenance, handlerWireResult);
+      if (dropped.length) {
+        logUser(
+          `${dropped.length} action(s) could not be wired automatically and were LEFT OUT ` +
+          `(not published) — re-run the analysis (add --spec to guide it) to include them: ${dropped.join(', ')}`,
+        );
+        logDev(`[prune] excluded unwired actions: ${dropped.join(', ')}`);
+      }
+      try {
+        fs.writeFileSync(path.join(outDir, 'manifest.json'), JSON.stringify(manifest, null, 2));
+        fs.writeFileSync(path.join(outDir, 'provenance.json'), JSON.stringify(provenance, null, 2));
+      } catch (e) {
+        logDev(`[prune] could not rewrite local artifacts: ${e.message}`);
+      }
+    };
+
     if (publishing) {
       loadAppEnv(analysisRoot);
-      await withSpinner('Publishing to your project', async (spinner) => {
-        await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true });
+      await withSpinner('Installing on your project', async (spinner) => {
         await runWebWire(spinner);
+        pruneAndReport();
+        publishMeta.actionsIncluded = manifest.actions.length;
+        publishMeta.routesIncluded = manifest.routes.length;
+        await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true });
       });
       logUser('Published to your project');
     } else {
       await withSpinner(orbMountSpinnerLabel(platform), runWebWire);
+      pruneAndReport();
     }
 
     // ── 8. API key in environment (LAST step — always asks; independent of --yes)
@@ -2252,6 +2277,58 @@ async function runRewireOnly(target) {
  * Returns null when wiring did not actually run (declined/skipped): with no
  * verdict the backend must not filter anything.
  */
+/**
+ * "AUTO-WIRED OR ABSENT" invariant (founder rule: never hand a human manual
+ * wiring). After wiring, DROP from the manifest every function action that
+ * could not be wired automatically, so the PUBLISHED manifest only ever
+ * contains actions the orb can actually run. A dropped action simply does not
+ * exist — the developer notices it is missing and re-runs the analysis (with
+ * --spec if needed) to have the AI wire it. Link actions never need wiring, so
+ * they are always kept.
+ *
+ * Guarded to ONLY prune on a per-action verdict: when wiring succeeded
+ * (status applied / applied-untested). On a wholesale revert/failure or a
+ * declined/skipped run there is no trustworthy per-action verdict, so nothing
+ * is pruned (the backend's serve-time "wired or nonexistent" invariant still
+ * protects the orb). Mutates `manifest` and `provenance`; returns dropped intents.
+ */
+function pruneUnwiredActions(manifest, provenance, handlerResult) {
+  const r = handlerResult || {};
+  if (r.status !== 'applied' && r.status !== 'applied-untested') return [];
+  const detail = actionsDetailFromHandlerResult(manifest, handlerResult);
+  if (!detail) return [];
+  const manualIntents = new Set(
+    detail.filter((d) => d.status === 'manual').map((d) => d.intent),
+  );
+  if (manualIntents.size === 0) return [];
+  const dropped = [];
+  manifest.actions = (manifest.actions || []).filter((a) => {
+    if (manualIntents.has(a.intent)) {
+      dropped.push(a.intent);
+      return false;
+    }
+    return true;
+  });
+  // Scrub dangling references from routes' actionIntents.
+  for (const route of manifest.routes || []) {
+    if (Array.isArray(route.actionIntents)) {
+      route.actionIntents = route.actionIntents.filter((i) => !manualIntents.has(i));
+      if (route.actionIntents.length === 0) delete route.actionIntents;
+    }
+  }
+  if (provenance && Array.isArray(provenance.actions)) {
+    for (const p of provenance.actions) {
+      if (manualIntents.has(p.intent)) {
+        p.included = false;
+        p.reason =
+          'could not be wired automatically — EXCLUDED from the manifest (not published). ' +
+          'Re-run the analysis (add --spec to guide it) to have the AI wire it.';
+      }
+    }
+  }
+  return dropped;
+}
+
 function actionsDetailFromHandlerResult(manifest, handlerResult) {
   const r = handlerResult || {};
   const ranStatuses = new Set(['applied', 'applied-untested', 'manual-only', 'reverted', 'failed']);
@@ -2345,7 +2422,13 @@ async function verifyOrbCanFetch({ apiKey, apiUrl }) {
   return false;
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(1);
-});
+// Exported for unit tests (the pure manifest-pruning helper). Requiring this
+// module for tests does NOT run the CLI thanks to the require.main guard.
+module.exports = { pruneUnwiredActions, actionsDetailFromHandlerResult };
+
+if (require.main === module) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(1);
+  });
+}
