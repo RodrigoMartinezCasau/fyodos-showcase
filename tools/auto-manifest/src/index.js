@@ -544,18 +544,22 @@ async function main() {
     // Ask the backend whether this project's plan still allows an analysis. The
     // Free plan includes exactly one; paid plans allow several. Both the proxy
     // and the publish step re-check server-side, so this is a courtesy to fail
-    // fast (and, in own-key mode, to avoid wasting the developer's tokens).
+    // fast. OWN-KEY EXCEPTION: when the developer brings their own AI key
+    // (--own-ai-key), the analysis runs on THEIR provider and costs Fiodos
+    // nothing, so the Fiodos plan quota does NOT gate it and must NOT force the
+    // plan's (possibly cheaper) model. The quota is only a hard gate in proxy
+    // mode, where Fiodos pays for the AI.
     if (apiKey) {
       const quota = await fetchAnalysisQuota({ apiKey, apiUrl });
-      if (quota && quota.allowed === false) {
+      if (useProxy && quota && quota.allowed === false) {
         printQuotaBlocked(quota);
         return;
       }
       // Tier-based model: the backend tells us which model this plan is
       // entitled to. The user never sees or sets it. An explicit --model
-      // (operator override) always wins. In proxy mode the server forces the
-      // model regardless; this only matters for the own-key path.
-      if (!explicitModel && quota && quota.model) {
+      // (operator override) always wins. Applied ONLY in proxy mode; own-key
+      // keeps the strongest default (the developer pays for their own tokens).
+      if (!explicitModel && useProxy && quota && quota.model) {
         model = resolveModel(quota.model);
       }
 
