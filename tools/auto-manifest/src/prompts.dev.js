@@ -463,7 +463,8 @@ function coverageAuditSystemPrompt(platform) {
     'WHAT GETS MISSED (hunt these specifically):\n' +
     '- MULTI-FIELD SETTERS: one function that patches many fields (patchWorkspace({orbEnabled}/{voiceMode}/{imageInputEnabled}), patchOrbTheme({...}), patchBubbleTheme({backgroundColor,textColor,borderColor,...}), patchConversationTheme, patchKeyboardButtonTheme). Emit ONE action PER user-meaningful FIELD, each grounded in a field that literally appears in the code or its config/type definition. Sibling fields sharing ONE setter are DIFFERENT actions.\n' +
     '- Every toggle/switch/slider/select in a settings or advanced-options component.\n' +
-    '- Account/security/team/workspace ops: save vs discard vs publish, remove member, open audit/change log, 2FA setup, change/reset password, redeem code, switch active project/workspace.\n\n' +
+    '- Account/security/team/workspace ops: save vs discard vs publish, remove member, open audit/change log, 2FA setup, change/reset password, redeem code, switch active project/workspace.\n' +
+    '- ACCOUNT FORMS ARE THEIR OWN ACTIONS: redeem-code, change/reset-password and report-a-problem/send-feedback each have a dedicated handler and are SEPARATE actions — do NOT skip them just because a generic contact/support action exists. A user asking "redeem this code" or "reset my password" needs the specific action, not the support channel.\n\n' +
     'HARD RULES:\n' +
     '- Output ONLY capabilities NOT already in the provided list. Do NOT repeat an existing capability under a different name (judge by MEANING, not just id). If a capability is already covered, skip it.\n' +
     '- Every action MUST be backed by a REAL function visible in the provided code, with the same evidence + wiring rules as the main analysis. PREFER the deepest reusable handler (store/context/API) over a component wrapper. Ground every field in the code; NEVER invent a control that is not there.\n' +

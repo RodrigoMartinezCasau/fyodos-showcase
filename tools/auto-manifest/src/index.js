@@ -651,7 +651,13 @@ async function main() {
           // few; repeat until a pass finds nothing new (converges to full
           // coverage) or the safety cap is hit. Each pass sees the GROWING list
           // so it only proposes what is still missing. Bounded by cost.
-          const MAX_AUDIT_PASSES = Math.max(1, Number(process.env.FYODOS_AUDIT_PASSES || 3));
+          // Default 2 (main analysis + up to 2 audit passes, early-stop on
+          // 0-new): the FIRST audit pass delivers the big coverage jump; a
+          // second adds robustness against a weak main pass; a THIRD mostly
+          // fragments into micro-fields without closing real gaps (measured:
+          // 1 pass ≈ 54 clean actions, 3 passes ≈ 78 with over-fragmentation).
+          // Tunable via FYODOS_AUDIT_PASSES for exhaustive runs.
+          const MAX_AUDIT_PASSES = Math.max(1, Number(process.env.FYODOS_AUDIT_PASSES || 2));
           let totalAdded = 0;
           let auditCostUSD = 0;
           for (let pass = 1; pass <= MAX_AUDIT_PASSES; pass += 1) {
