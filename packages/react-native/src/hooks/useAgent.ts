@@ -1869,7 +1869,19 @@ export function useAgent({
         ? (messages.confirmedActionDone ?? null)
         : (speakableActionError(result.error) ?? messages.actionFailed));
     if (feedback) {
-      setLastExchange((prev) => (prev ? { ...prev, replyText: feedback } : prev));
+      // The DECISION is part of the conversation: record "Confirmar → outcome"
+      // as its own exchange (live AND persisted), so a reload never shows the
+      // question as if it were still unanswered.
+      const decision = messages.confirmDecisionLabel ?? 'Confirm';
+      setLastExchange({ userText: decision, replyText: feedback });
+      recordConversationExchange(
+        conversationRef.current,
+        decision,
+        feedback,
+        Date.now(),
+        conversationOptionsRef.current,
+      );
+      persistConversation();
       await speakActionFeedback(feedback);
     }
 
@@ -1894,8 +1906,10 @@ export function useAgent({
     executor,
     manifest.actions,
     messages.actionFailed,
+    messages.confirmDecisionLabel,
     messages.confirmedActionDone,
     messages.doubleConfirmationQuestion,
+    persistConversation,
     speakActionFeedback,
     speakReply,
     startConfirmationVoiceFlow,
@@ -1929,10 +1943,28 @@ export function useAgent({
       currentRoute: pending.routeAtInvocation,
     });
     // Immediate, cheap feedback: device TTS (one-word phrase). In silent
-    // text mode speakReply is a no-op and the bubble shows it instead.
-    setLastExchange((prev) => (prev ? { ...prev, replyText: messages.cancelled } : prev));
+    // text mode speakReply is a no-op and the bubble shows it instead. The
+    // rejection is recorded in the conversation (same persistence contract as
+    // confirming) so a reload never shows the question as still waiting.
+    const decision = messages.cancelDecisionLabel ?? 'Cancel';
+    setLastExchange({ userText: decision, replyText: messages.cancelled });
+    recordConversationExchange(
+      conversationRef.current,
+      decision,
+      messages.cancelled,
+      Date.now(),
+      conversationOptionsRef.current,
+    );
+    persistConversation();
     void speakReply(messages.cancelled, null);
-  }, [endConfirmationVoiceWindow, messages.cancelled, speakReply, telemetry]);
+  }, [
+    endConfirmationVoiceWindow,
+    messages.cancelDecisionLabel,
+    messages.cancelled,
+    persistConversation,
+    speakReply,
+    telemetry,
+  ]);
 
   // Cross-refs: the voice window resolves with the SAME functions as the
   // modal buttons (the tactile decision always wins).
