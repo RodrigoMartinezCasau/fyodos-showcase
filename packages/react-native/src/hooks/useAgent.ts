@@ -1069,21 +1069,17 @@ export function useAgent({
               chainStep: step,
             });
 
-            // A sensitive action surfaced: ALWAYS pause for confirmation. Park
-            // the chain so confirmPendingAction can resume it (only if the model
-            // wants to keep going); a rejection stops it cleanly.
+            // A sensitive action surfaced: ALWAYS pause for confirmation, and
+            // the pause is FINAL for the chain — a confirmation is a hard
+            // task boundary (the chain never resumes after the human decides;
+            // see confirmPendingAction). No parked state is kept.
             if (pendingConfirmationRef.current) {
-              chainStateRef.current = oc.pendingInProgress
-                ? {
-                    userMessage: cs.userMessage,
-                    step,
-                    lastStep,
-                    visitedKeys,
-                    pendingKey: oc.pendingKey,
-                    pendingStep: oc.pendingStep,
-                    recoveries,
-                  }
-                : null;
+              chainStateRef.current = null;
+              telemetry.logEvent({
+                eventType: 'agent_chain_completed',
+                sessionId: sessionIdRef.current,
+                chainStep: step,
+              });
               await beginConfirmationWindowRef.current?.();
               return;
             }
@@ -1170,23 +1166,9 @@ export function useAgent({
         // voice mode ('disabled' → tap only) and silent text mode.
         if (pendingConfirmationRef.current) {
           await beginConfirmationWindowRef.current?.();
-          // If the first step is a sensitive action AND the model wants to keep
-          // going, park the chain so it RESUMES after the user confirms.
-          if (chaining.enabled && first.pendingInProgress) {
-            telemetry.logEvent({
-              eventType: 'agent_chain_started',
-              sessionId: sessionIdRef.current,
-              chainStep: 1,
-            });
-            chainStateRef.current = {
-              userMessage: msg,
-              step: 1,
-              lastStep: first.pendingStep,
-              visitedKeys: new Set<string>(),
-              pendingKey: first.pendingKey,
-              pendingStep: first.pendingStep,
-            };
-          }
+          // Confirmation is a hard task boundary: the chain never continues
+          // past the human's decision (see confirmPendingAction) — no parking.
+          chainStateRef.current = null;
         } else if (chaining.enabled && first.canContinue) {
           telemetry.logEvent({
             eventType: 'agent_chain_started',
@@ -1859,54 +1841,20 @@ export function useAgent({
       await speakActionFeedback(result.message);
     }
 
-    // RESUME the autonomous chain if this sensitive action paused one — the
-    // human confirmation requirement is fully preserved: the chain only
-    // advances past a sensitive step AFTER the user confirmed and it executed.
+    // CONFIRMATION IS A HARD TASK BOUNDARY: a confirmed sensitive action is
+    // always the LAST act of an autonomous chain — the chain NEVER resumes
+    // after it, on success or failure (runaway-autonomy incident: asked only
+    // to turn the orb green, the agent chained an unrequested production
+    // publish and kept planning after the confirm). If more work is needed,
+    // the model says so in its reply and the USER decides with a new message.
     const chainState = chainStateRef.current;
     if (chainState) {
       chainStateRef.current = null;
-      if (result.success && chaining.enabled) {
-        telemetry.logEvent({
-          eventType: 'agent_chain_step',
-          intentDetected: action.intent ?? null,
-          sessionId: sessionIdRef.current,
-          chainStep: chainState.step,
-        });
-        if (chainState.pendingKey) chainState.visitedKeys.add(chainState.pendingKey);
-        await runChainLoopRef.current?.({
-          userMessage: chainState.userMessage,
-          step: chainState.step,
-          lastStep: chainState.pendingStep ?? chainState.lastStep,
-          visitedKeys: chainState.visitedKeys,
-          recoveries: chainState.recoveries,
-        });
-      } else if (!result.success && chaining.enabled) {
-        // The CONFIRMED action failed: same recovery contract as any other
-        // failed step — the model reads the technical error and takes a
-        // different path (bounded by the recovery budget). A recovery that
-        // re-attempts a sensitive intent stages a NEW confirmation, so the
-        // human gate is never bypassed.
-        const failedStep: ChainStepInfo = {
-          type: 'execute',
-          intent: action.intent ?? '',
-          label: manifest.actions.find((a) => a.intent === action.intent)?.label,
-          success: false,
-          ...(result.error ? { error: String(result.error).slice(0, 300) } : {}),
-        };
-        await runChainLoopRef.current?.({
-          userMessage: chainState.userMessage,
-          step: chainState.step,
-          lastStep: failedStep,
-          visitedKeys: chainState.visitedKeys,
-          recoveries: (chainState.recoveries ?? 0) + 1,
-        });
-      } else if (!result.success) {
-        telemetry.logEvent({
-          eventType: 'agent_chain_aborted',
-          sessionId: sessionIdRef.current,
-          chainAbortReason: 'error',
-        });
-      }
+      telemetry.logEvent({
+        eventType: 'agent_chain_completed',
+        sessionId: sessionIdRef.current,
+        chainStep: chainState.step,
+      });
     }
   }, [
     chaining,
