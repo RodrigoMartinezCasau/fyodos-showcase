@@ -1484,6 +1484,47 @@ function insertImportBlock(content, importBlock) {
   return content.slice(0, lastEnd) + importBlock + '\n' + content.slice(lastEnd);
 }
 
+/**
+ * Brace depth at `idx`, skipping comments and string/template literals. Used
+ * to detect that a candidate insertion point sits in a NESTED function body
+ * (deeper scope) instead of the component's top level: a registration there
+ * only runs if that inner function is ever called — the exact "wired,
+ * compiles, but the bridge never registers" runtime failure.
+ */
+function braceDepthAt(content, idx) {
+  const end = Math.min(idx, content.length);
+  let depth = 0;
+  let mode = 'code'; // 'line' | 'block' | 's1' | 's2' | 'tpl'
+  for (let i = 0; i < end; ) {
+    const c = content[i];
+    const n = content[i + 1];
+    if (mode === 'code') {
+      if (c === '/' && n === '/') { mode = 'line'; i += 2; continue; }
+      if (c === '/' && n === '*') { mode = 'block'; i += 2; continue; }
+      if (c === "'") { mode = 's1'; i += 1; continue; }
+      if (c === '"') { mode = 's2'; i += 1; continue; }
+      if (c === '`') { mode = 'tpl'; i += 1; continue; }
+      if (c === '{') depth += 1;
+      else if (c === '}') depth -= 1;
+      i += 1;
+      continue;
+    }
+    if (mode === 'line') { if (c === '\n') mode = 'code'; i += 1; continue; }
+    if (mode === 'block') {
+      if (c === '*' && n === '/') { mode = 'code'; i += 2; continue; }
+      i += 1;
+      continue;
+    }
+    // Inside a string/template literal.
+    if (c === '\\') { i += 2; continue; }
+    if ((mode === 's1' && c === "'") || (mode === 's2' && c === '"') || (mode === 'tpl' && c === '`')) {
+      mode = 'code';
+    }
+    i += 1;
+  }
+  return depth;
+}
+
 /** Index of the JSX/paren `return (` or `return <` line nearest to `anchorIdx`. */
 function nearestJsxReturn(content, anchorIdx) {
   const re = /^[ \t]*return\s*[(<]/gm;
@@ -1543,7 +1584,20 @@ function insertRegisterBlock(content, file, anchor, block, scope) {
     const semi = content.indexOf(';', at);
     const stmtEnd = semi === -1 ? (anchorLineEnd === -1 ? content.length : anchorLineEnd) : content.indexOf('\n', semi);
     const endIdx = stmtEnd === -1 ? content.length : stmtEnd;
-    return content.slice(0, endIdx) + '\n' + block + content.slice(endIdx);
+    // SCOPE GUARD: only insert after the statement when it lives at the SAME
+    // (or shallower) brace depth as the component's JSX `return`. A statement
+    // inside a NESTED function body (an event handler, a helper closure) would
+    // compile fine but the registration would only run if that inner function
+    // is ever called — actions then die at runtime with HANDLER_UNREADY (this
+    // exact bug shipped a registerFiodosBridge inside a color-picker callback
+    // on the Fiodos dashboard). Deeper than the return → fall through to the
+    // return placement, which is the component's top level.
+    const retForDepth = nearestJsxReturn(content, at);
+    const stmtDepth = braceDepthAt(content, endIdx === -1 ? content.length : endIdx);
+    const retDepth = retForDepth === -1 ? Infinity : braceDepthAt(content, retForDepth);
+    if (stmtDepth <= retDepth) {
+      return content.slice(0, endIdx) + '\n' + block + content.slice(endIdx);
+    }
   }
 
   const ret = nearestJsxReturn(content, at);
@@ -2294,4 +2348,5 @@ module.exports = {
   BRIDGE_BASENAME,
   insertImportBlock,
   insertRegisterBlock,
+  braceDepthAt,
 };

@@ -264,6 +264,34 @@ function makeThemeFixture() {
   console.log('PASS wireShopifyTheme also wires layout/password.liquid when present');
 }
 
+// ── 7. Agent-to-agent discovery tag: baked in when the project's MCP connector
+//      is known at wire time (external channel enabled); absent otherwise
+//      (closed by default) ─────────────────────────────────────────────────
+{
+  const root = makeThemeFixture();
+  const base = { apiKey: 'fyo_test_key', apiUrl: 'https://api.fyodos.com' };
+
+  // Without a connector URL (channel disabled / lookup failed): no tag.
+  wireShopifyTheme(root, base);
+  let source = fs.readFileSync(path.join(root, 'layout/theme.liquid'), 'utf8');
+  assert.ok(!source.includes('rel="mcp-server"'), 'no discovery tag when the channel is off');
+
+  // With a connector URL: the tag is advertised inside the orb block, and a
+  // re-run refreshes the block in place (idempotent markers).
+  const withMcp = { ...base, mcpConnectorUrl: 'https://api.fyodos.com/mcp/app-123' };
+  const result = wireShopifyTheme(root, withMcp);
+  assert.strictEqual(result.status, 'added', 'snippet refreshed with the discovery tag');
+  source = fs.readFileSync(path.join(root, 'layout/theme.liquid'), 'utf8');
+  assert.ok(
+    source.includes('<link rel="mcp-server" href="https://api.fyodos.com/mcp/app-123" data-fyodos-mcp>'),
+    'discovery link advertised in the theme layout',
+  );
+  assert.strictEqual((source.match(/rel="mcp-server"/g) || []).length, 1, 'exactly one discovery tag');
+
+  fs.rmSync(root, { recursive: true, force: true });
+  console.log('PASS shopify snippet advertises the MCP connector when enabled');
+}
+
 // ── 7. Themes without a password.liquid (older/simpler themes) are unaffected
 {
   const root = makeThemeFixture(); // no password.liquid in this fixture

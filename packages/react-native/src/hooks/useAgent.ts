@@ -692,10 +692,14 @@ export function useAgent({
             }
           } else if (action && action.type === 'execute') {
             const executeContext: AgentScreenContext = actx.screenContext;
-            // Confirmation source of truth: the MANIFEST, never the LLM
-            // (double validation — the backend instructs, the client enforces).
+            // Confirmation: STRICTER-WINS between the manifest flag and the
+            // model's own requireConfirmation. The LLM can never SKIP a
+            // manifest confirmation (double validation), but when it marks an
+            // unflagged action sensitive the client honours that caution
+            // instead of executing while the reply asks for confirmation.
             const manifestAction = manifest.actions.find((a) => a.intent === action.intent);
-            const needsConfirmation = manifestAction?.requireConfirmation === true;
+            const needsConfirmation =
+              manifestAction?.requireConfirmation === true || action.requireConfirmation === true;
 
             if (needsConfirmation) {
               // Precheck (context + idempotency) BEFORE bothering with the
@@ -906,7 +910,12 @@ export function useAgent({
                     : {}),
                 };
                 stepFailed = true;
-                canContinue = chaining.enabled;
+                // HANDLER_UNREADY = structural wiring failure on this build:
+                // no model recovery turn can fix it — do not burn chain turns.
+                const unrecoverableWiring =
+                  typeof execResult.error === 'string' &&
+                  execResult.error.includes('FYODOS_HANDLER_UNREADY');
+                canContinue = chaining.enabled && !unrecoverableWiring;
               }
             }
           } else {

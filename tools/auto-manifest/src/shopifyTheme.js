@@ -337,11 +337,19 @@ function shopifyScreenContextLiquidLines() {
  * collection, search and cart pages) so the agent knows the visible items and
  * their variant ids (what add_to_cart / update_cart_item need by voice).
  */
-function buildShopifySnippet({ apiKey, apiUrl }) {
+function buildShopifySnippet({ apiKey, apiUrl, mcpConnectorUrl = '' }) {
   const key = apiKey || '<your-api-key>';
   const url = String(apiUrl || '').replace(/\/$/, '');
+  // Agent-to-agent discovery (static): when the project's external channel is
+  // enabled at wire time, advertise the MCP connector in the raw HTML so even
+  // non-JS crawlers/agents find it. The SDK also injects/removes the same tag
+  // at runtime following the dashboard toggle, so a later enable still works.
+  const discovery = String(mcpConnectorUrl || '').trim();
   return [
     ORB_START,
+    ...(discovery
+      ? [`<link rel="mcp-server" href="${discovery}" data-fyodos-mcp>`]
+      : []),
     `<script src="${FIODOS_EMBED_CDN_URL}" defer></script>`,
     '<script>',
     ...shopifyScreenContextLiquidLines(),
@@ -420,8 +428,8 @@ function injectSnippetInLayout(file, relFile, snippet, { noWire = false } = {}) 
  * — `password` mirrors the same shape for layout/password.liquid, or null
  * when that file does not exist in this theme.
  */
-function wireShopifyTheme(appRoot, { apiKey, apiUrl, noWire = false } = {}) {
-  const snippet = buildShopifySnippet({ apiKey, apiUrl });
+function wireShopifyTheme(appRoot, { apiKey, apiUrl, noWire = false, mcpConnectorUrl = '' } = {}) {
+  const snippet = buildShopifySnippet({ apiKey, apiUrl, mcpConnectorUrl });
 
   const themeRelFile = path.join('layout', 'theme.liquid');
   const themeFile = path.join(appRoot, themeRelFile);
@@ -437,6 +445,28 @@ function wireShopifyTheme(appRoot, { apiKey, apiUrl, noWire = false } = {}) {
     : null;
 
   return { ...themeResult, password: passwordResult };
+}
+
+/**
+ * Best-effort lookup of the project's MCP connector URL for the static
+ * discovery tag: GET /v1/client/config (x-api-key). Returns '' when the
+ * external-agents channel is disabled (the backend then omits the URL —
+ * closed by default) or on any failure; a missing tag never blocks a wire,
+ * and the SDK still injects it at runtime once the developer enables the
+ * channel.
+ */
+async function fetchMcpConnectorUrl({ apiKey, apiUrl }) {
+  if (!apiKey || !apiUrl) return '';
+  try {
+    const res = await fetch(`${String(apiUrl).replace(/\/$/, '')}/v1/client/config`, {
+      headers: { 'x-api-key': apiKey },
+    });
+    if (!res.ok) return '';
+    const data = await res.json();
+    return typeof data.mcpConnectorUrl === 'string' ? data.mcpConnectorUrl : '';
+  } catch {
+    return '';
+  }
 }
 
 function reportShopifyWire(result, colors = {}, { quiet = false } = {}) {
@@ -467,6 +497,7 @@ module.exports = {
   fetchStorefrontSnapshot,
   shopifyScreenContextLiquidLines,
   buildShopifySnippet,
+  fetchMcpConnectorUrl,
   wireShopifyTheme,
   reportShopifyWire,
   normalizeStoreDomain,

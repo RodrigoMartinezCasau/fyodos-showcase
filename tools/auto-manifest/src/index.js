@@ -102,6 +102,7 @@ const {
 const { wireReactNativeOrb, reportReactNativeWire, connectRnSession } = require('./wireReactNative');
 const {
   isShopifyThemeRoot, fetchStorefrontSnapshot, wireShopifyTheme, reportShopifyWire,
+  fetchMcpConnectorUrl,
   normalizeStoreDomain, enforceShopifyGuaranteedExecutions,
 } = require('./shopifyTheme');
 const { wireFlutterOrb, writeFlutterEnv, reportFlutterWire } = require('./wireFlutter');
@@ -1210,7 +1211,11 @@ async function main() {
       await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true });
       if (!noWire && !process.argv.includes('--no-orb-wire')) {
         setLabel(orbMountSpinnerLabel(platform));
-        orbWireResult = wireShopifyTheme(analysisRoot, { apiKey, apiUrl, noWire });
+        // Static agent-to-agent discovery tag (best-effort): present only when
+        // the project's external channel is already enabled; otherwise the SDK
+        // injects it at runtime once the developer flips the toggle.
+        const mcpConnectorUrl = await fetchMcpConnectorUrl({ apiKey, apiUrl });
+        orbWireResult = wireShopifyTheme(analysisRoot, { apiKey, apiUrl, noWire, mcpConnectorUrl });
         pause();
         reportShopifyWire(orbWireResult, fyodosTermColors(), { quiet: !isVerbose() });
         resume();
