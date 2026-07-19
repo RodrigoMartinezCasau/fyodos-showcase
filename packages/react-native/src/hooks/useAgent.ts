@@ -1081,6 +1081,9 @@ export function useAgent({
                 chainStep: step,
               });
               await beginConfirmationWindowRef.current?.();
+              // Settle the phase on silent/text turns (see the main-turn
+              // path): waiting on the human is not 'thinking'.
+              if (phaseRef.current === 'thinking') setPhaseSafe('idle');
               return;
             }
             // Failed step: consume one recovery slot. The budget is what
@@ -1169,6 +1172,11 @@ export function useAgent({
           // Confirmation is a hard task boundary: the chain never continues
           // past the human's decision (see confirmPendingAction) — no parking.
           chainStateRef.current = null;
+          // SETTLE THE PHASE: on a silent/text turn the voice window is
+          // skipped and the phase would stay 'thinking' forever (UI stuck on
+          // the busy state and typed input gated). Waiting on the human is
+          // not 'thinking'.
+          if (phaseRef.current === 'thinking') setPhaseSafe('idle');
         } else if (chaining.enabled && first.canContinue) {
           telemetry.logEvent({
             eventType: 'agent_chain_started',
@@ -1230,7 +1238,9 @@ export function useAgent({
     handleTranscriptRef.current = handleTranscript;
   }, [handleTranscript]);
 
-  const handleConfirmationTranscriptRef = useRef<((text: string) => Promise<void>) | null>(null);
+  const handleConfirmationTranscriptRef = useRef<
+    ((text: string, opts?: { typed?: boolean }) => Promise<void>) | null
+  >(null);
 
   const onTranscriptReady = useCallback((text: string) => {
     // While a confirmation is pending (active window or late transcript with
@@ -1370,7 +1380,7 @@ export function useAgent({
 
   /** Resolves the transcript of the confirmation window. */
   const handleConfirmationTranscript = useCallback(
-    async (text: string) => {
+    async (text: string, opts?: { typed?: boolean }) => {
       confirmationVoiceActiveRef.current = false;
       clearConfirmationTimers();
       const trimmed = text.trim();
@@ -1378,9 +1388,10 @@ export function useAgent({
       // The user may have decided via modal while the transcript arrived.
       const pending = pendingConfirmationRef.current;
       if (!pending) return;
-      // Safety net: a stray transcript can NEVER resolve a tap-only
+      // Safety net: a stray VOICE transcript can NEVER resolve a tap-only
       // confirmation (voice disabled in the dashboard, or silent text mode).
-      if (pending.voiceMode === 'disabled' || pending.silent) return;
+      // A TYPED reply is deliberate — same trust level as tapping the modal.
+      if (!opts?.typed && (pending.voiceMode === 'disabled' || pending.silent)) return;
 
       if (trimmed.length < 2) {
         // Noise/empty → like a timeout: the modal remains available.
@@ -1576,6 +1587,13 @@ export function useAgent({
           if (verdict.message) notifyError(verdict.message);
           return;
         }
+      }
+      // A pending confirmation steals the next typed turn (a typed "sí"/"no"
+      // resolves it instead of starting a fresh turn) — checked BEFORE the
+      // phase gate so a staged confirmation can always be answered by text.
+      if (pendingConfirmationRef.current) {
+        await handleConfirmationTranscriptRef.current?.(msg, { typed: true });
+        return;
       }
       if (
         phaseRef.current === 'thinking' ||
