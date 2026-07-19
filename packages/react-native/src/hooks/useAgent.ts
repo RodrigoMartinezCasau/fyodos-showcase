@@ -790,11 +790,14 @@ export function useAgent({
                   currentRoute: actx.routeAtInvocation,
                 });
                 devLog(turnId, 'confirmation modal shown', `${action.intent} (voice=${voiceMode})`);
-                // The question is spoken (the prompt instructs the LLM that its
-                // reply BE the question; if it strayed, the modal still shows
-                // the canonical text). The chain PAUSES here: canContinue stays
-                // false, so no autonomous step runs until the user confirms.
-                spokenReply = aReply;
+                // HONESTY ON PAUSE: the shown/spoken reply must BE the
+                // confirmation question — never the model's execution
+                // narration ("Sending your request…"), which makes the user
+                // believe it already happened while the pending action dies
+                // unanswered. The chain PAUSES here: canContinue stays false,
+                // so no autonomous step runs until the user confirms.
+                spokenReply = confirmationMessage;
+                spokenAudio = null;
                 // If the model wants to keep going after this sensitive step,
                 // the chain will RESUME once the user confirms (Phase 2).
                 hasPending = true;
