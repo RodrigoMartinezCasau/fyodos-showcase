@@ -35,6 +35,7 @@ import {
   conversationRetentionOptions,
   classifyStrictConfirmationReply,
   combineContexts,
+  speakableActionError,
   createConversationSession,
   formatMessage,
   persistConversationSession,
@@ -874,8 +875,9 @@ export function useAgent({
                 // `message` (e.g. a declarative execution call — OData/Dynamics
                 // actions on native — that hit a network/HTTP/template error).
                 // Without this, the LLM's pre-action narration stays as if the
-                // action had happened — a silent false success.
-                spokenReply = messages.actionFailed;
+                // action had happened — a silent false success. Intentional
+                // user-facing handler errors are spoken (honest failure speech).
+                spokenReply = speakableActionError(execResult.error) ?? messages.actionFailed;
                 spokenAudio = null;
               }
               if (execResult.success && !execResult.recoverable) {
@@ -1863,7 +1865,9 @@ export function useAgent({
     // done/failed phrase.
     const feedback =
       result.message ??
-      (result.success ? (messages.confirmedActionDone ?? null) : messages.actionFailed);
+      (result.success
+        ? (messages.confirmedActionDone ?? null)
+        : (speakableActionError(result.error) ?? messages.actionFailed));
     if (feedback) {
       setLastExchange((prev) => (prev ? { ...prev, replyText: feedback } : prev));
       await speakActionFeedback(feedback);
