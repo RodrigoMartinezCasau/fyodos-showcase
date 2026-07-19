@@ -1854,9 +1854,16 @@ export function useAgent({
       contextChars: pending.contextChars,
       redactionsApplied: pending.redactions,
     });
-    if (result.message) {
-      setLastExchange((prev) => (prev ? { ...prev, replyText: result.message! } : prev));
-      await speakActionFeedback(result.message);
+    // FEEDBACK GUARANTEE after a confirmation: the user just said YES — the
+    // orb must always report the outcome. Silence here is indistinguishable
+    // from a silent failure. Handler message wins; otherwise a generic
+    // done/failed phrase.
+    const feedback =
+      result.message ??
+      (result.success ? (messages.confirmedActionDone ?? null) : messages.actionFailed);
+    if (feedback) {
+      setLastExchange((prev) => (prev ? { ...prev, replyText: feedback } : prev));
+      await speakActionFeedback(feedback);
     }
 
     // CONFIRMATION IS A HARD TASK BOUNDARY: a confirmed sensitive action is
@@ -1879,6 +1886,8 @@ export function useAgent({
     endConfirmationVoiceWindow,
     executor,
     manifest.actions,
+    messages.actionFailed,
+    messages.confirmedActionDone,
     messages.doubleConfirmationQuestion,
     speakActionFeedback,
     speakReply,
