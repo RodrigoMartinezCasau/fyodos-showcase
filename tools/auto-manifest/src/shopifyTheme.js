@@ -64,10 +64,29 @@ const SHOPIFY_GUARANTEED_ACTIONS = {
     parameters: { handle: { type: 'string', required: true } },
     execution: { kind: 'http', method: 'GET', url: '{baseUrl}/products/{handle}.js' },
   },
+  // variantId OR handle: models kept INVENTING variant ids when none was
+  // visible (422 Cannot find variant). The handle IS in the model's evidence
+  // (search results, /products/<handle> urls), so the contract accepts it and
+  // the SDK resolves handle → default variant mechanically (products/….js) —
+  // the same thing the theme's own Add button does.
   add_to_cart: {
     handler: 'shopifyAddToCart',
     parameters: {
-      variantId: { type: 'number', required: true },
+      variantId: {
+        type: 'number',
+        required: false,
+        description:
+          'Exact VARIANT id, only when visible in the screen context, cart data ' +
+          'or product details. Never a product id from search results, never invented.',
+      },
+      handle: {
+        type: 'string',
+        required: false,
+        description:
+          'Product handle copied EXACTLY from a search result or a /products/<handle> ' +
+          'url. Pass it whenever no variantId is visible — the store resolves the ' +
+          'default variant automatically. At least one of variantId/handle is required.',
+      },
       quantity: { type: 'number', required: true },
     },
     execution: {
@@ -76,6 +95,9 @@ const SHOPIFY_GUARANTEED_ACTIONS = {
       url: '{baseUrl}/cart/add.js',
       headers: { 'Content-Type': 'application/json' },
       body: { id: '{variantId}', quantity: '{quantity}' },
+      resolve: [
+        { param: 'variantId', url: '{baseUrl}/products/{handle}.js', path: 'variants.0.id' },
+      ],
     },
   },
   get_cart: {
