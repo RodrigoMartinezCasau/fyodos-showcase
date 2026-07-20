@@ -40,6 +40,7 @@ import {
   formatMessage,
   persistConversationSession,
   prepareConversationForTurn,
+  recordConversationChainReply,
   recordConversationExchange,
   restoreConversationSession,
   stripWakePhrase,
@@ -69,6 +70,18 @@ const sleep = (ms: number): Promise<void> =>
  * path — bounded so a persistently failing action can never loop.
  */
 const MAX_CHAIN_RECOVERIES = 2;
+
+function stableActionParams(parameters: Record<string, unknown> | undefined): string {
+  if (!parameters || typeof parameters !== 'object') return '';
+  const keys = Object.keys(parameters).sort();
+  const sorted: Record<string, unknown> = {};
+  for (const k of keys) sorted[k] = parameters[k];
+  try {
+    return JSON.stringify(sorted);
+  } catch {
+    return '';
+  }
+}
 
 type PendingConfirmation = {
   action: AgentAction;
@@ -915,6 +928,7 @@ export function useAgent({
                     : {}),
                 };
                 stepFailed = true;
+                actionKey = `fail:${action.intent ?? ''}:${stableActionParams(action.parameters)}`;
                 // HANDLER_UNREADY = structural wiring failure on this build:
                 // no model recovery turn can fix it — do not burn chain turns.
                 const unrecoverableWiring =
@@ -1057,16 +1071,33 @@ export function useAgent({
               redactions: red2,
               contextChars: san2?.length ?? 0,
             });
-            setLastExchange({ userText: cs.userMessage, replyText: oc.spokenReply });
-            recordConversationExchange(
-              conversationRef.current,
-              cs.userMessage,
-              oc.spokenReply,
-              Date.now(),
-              conversationOptionsRef.current,
-            );
-            persistConversation();
-            await speakReply(oc.spokenReply, oc.spokenAudio);
+            if (oc.stepFailed) {
+              recoveries += 1;
+            }
+            const recoveryExhausted = Boolean(oc.stepFailed && recoveries > MAX_CHAIN_RECOVERIES);
+            const sameFailureAgain = Boolean(oc.actionKey && visitedKeys.has(oc.actionKey));
+            const hideIntermediateFailure =
+              Boolean(oc.stepFailed) &&
+              !recoveryExhausted &&
+              !sameFailureAgain &&
+              Boolean(oc.canContinue) &&
+              !pendingConfirmationRef.current;
+
+            if (oc.spokenReply && !hideIntermediateFailure) {
+              setLastExchange({ userText: cs.userMessage, replyText: oc.spokenReply });
+              recordConversationChainReply(
+                conversationRef.current,
+                cs.userMessage,
+                oc.spokenReply,
+                Date.now(),
+                conversationOptionsRef.current,
+              );
+              persistConversation();
+              await speakReply(oc.spokenReply, oc.spokenAudio);
+            } else if (oc.spokenReply && hideIntermediateFailure) {
+              setLastExchange({ userText: cs.userMessage, replyText: '' });
+              setPhaseSafe('thinking');
+            }
             telemetry.logEvent({
               eventType: 'agent_chain_step',
               intentDetected: oc.lastStep?.intent ?? oc.pendingStep?.intent ?? null,
@@ -1091,23 +1122,8 @@ export function useAgent({
               if (phaseRef.current === 'thinking') setPhaseSafe('idle');
               return;
             }
-            // Failed step: consume one recovery slot. The budget is what
-            // keeps a persistently failing action from looping; a chain that
-            // exhausts it ends with the honest failure reply on screen.
-            if (oc.stepFailed) {
-              recoveries += 1;
-              if (recoveries > MAX_CHAIN_RECOVERIES) {
-                telemetry.logEvent({
-                  eventType: 'agent_chain_aborted',
-                  sessionId: sessionIdRef.current,
-                  chainStep: step,
-                  chainAbortReason: 'no_progress',
-                });
-                return;
-              }
-            }
-            // No-progress guard: repeating a step already taken stops the chain.
-            if (oc.actionKey && visitedKeys.has(oc.actionKey)) {
+
+            if (recoveryExhausted || sameFailureAgain) {
               telemetry.logEvent({
                 eventType: 'agent_chain_aborted',
                 sessionId: sessionIdRef.current,
@@ -1158,16 +1174,27 @@ export function useAgent({
         });
 
         // The bubble shows the exchange in text (voice and text turns alike).
-        setLastExchange({ userText: msg, replyText: first.spokenReply });
-        recordConversationExchange(
-          conversationRef.current,
-          msg,
-          first.spokenReply,
-          Date.now(),
-          conversationOptionsRef.current,
-        );
-        persistConversation();
-        await speakReply(first.spokenReply, first.spokenAudio);
+        // Defer failure UI when the chain will recover — avoids ghost duplicates.
+        const deferFailureUi =
+          chaining.enabled &&
+          Boolean(first.stepFailed) &&
+          Boolean(first.canContinue) &&
+          !pendingConfirmationRef.current;
+        if (first.spokenReply && !deferFailureUi) {
+          setLastExchange({ userText: msg, replyText: first.spokenReply });
+          recordConversationExchange(
+            conversationRef.current,
+            msg,
+            first.spokenReply,
+            Date.now(),
+            conversationOptionsRef.current,
+          );
+          persistConversation();
+          await speakReply(first.spokenReply, first.spokenAudio);
+        } else if (deferFailureUi) {
+          setLastExchange({ userText: msg, replyText: '' });
+          setPhaseSafe('thinking');
+        }
         // Voice confirmation: after speaking the question, listen for the
         // reply for a few seconds. The modal stays visible as the tactile
         // fallback and its decision always wins. Respects the action's
