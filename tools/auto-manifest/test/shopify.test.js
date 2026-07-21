@@ -219,6 +219,18 @@ function makeThemeFixture() {
     'collection context lists the visible products',
   );
   assert.ok(
+    snippet.includes('fyodosCollectViewportProducts'),
+    'viewport scrape publishes products the customer is looking at',
+  );
+  assert.ok(
+    snippet.includes('__fyodosRefreshScreen'),
+    'screen context refreshes before each agent turn',
+  );
+  assert.ok(
+    snippet.includes('__fyodosVariantMap'),
+    'Liquid handle→variant map for collection cards without cart forms',
+  );
+  assert.ok(
     /collection[\s\S]*variantId \{\{ fyodos_p\.selected_or_first_available_variant\.id \}\}/.test(snippet),
     'collection items carry their add-to-cart variantId',
   );
