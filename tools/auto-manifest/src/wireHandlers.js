@@ -42,6 +42,7 @@ const path = require('path');
 const readline = require('readline');
 const { probeEffect, compileRegressed, classifyErrorLines } = require('./verifyWire');
 const { extractBridgeRegistrations } = require('./continuityFloor');
+const { checkBridgeMountGate } = require('./mountGate');
 
 const DOC_BASENAME = 'FYODOS_HANDLERS.md';
 const REGISTRY_BASENAME = 'handlers.generated';
@@ -684,15 +685,34 @@ function ambiguousAnchorSameInsertion(content, anchor) {
  */
 function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
   const b = aiW.bridge || {};
-  const file = normRel(b.file);
+  let file = normRel(b.file);
   let anchor = String(b.anchor || '').trim();
   const invoke = String(b.invoke || '').trim();
   const why = aiW.bridgeReason ? ` (${aiW.bridgeReason})` : '';
 
   if (!file) return { reason: `the AI marked a bridge but did not indicate the component file${why}` };
+  if (!invoke) return { reason: `the AI did not provide the bridge 'invoke' expression for '${file}'` };
+
+  // MOUNT GATE: context/provider hooks must not register in conditionally-mounted
+  // leaves (Settings panel, inactive tab, …). Auto-promote to Provider/shell or fail.
+  let mountGateDetail = '';
+  const mountGate = checkBridgeMountGate({
+    appRoot,
+    bridgeFile: file,
+    invoke,
+    requiredSymbols: Array.isArray(aiW.requiredSymbols) ? aiW.requiredSymbols : [],
+    bridgeImports: Array.isArray(b.imports) ? b.imports : [],
+    deriveAnchor: deriveBridgeAnchor,
+  });
+  if (mountGate.action === 'reject') return { reason: mountGate.reason };
+  if (mountGate.action === 'promote') {
+    file = mountGate.file;
+    anchor = mountGate.anchor;
+    mountGateDetail = mountGate.detail || '';
+  }
+
   const rawContent = readFileSafe(appRoot, file);
   if (rawContent == null) return { reason: `could not read the component '${file}' to apply the bridge` };
-  if (!invoke) return { reason: `the AI did not provide the bridge 'invoke' expression for '${file}'` };
   // Anchor decisions must be made on the content the block will ACTUALLY be
   // inserted into: applyComponentEdits strips our previous blocks first. On a
   // re-run over an already-wired file, the old generated block contains the
@@ -704,9 +724,9 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
   // anchor → mechanically derived declaration anchor → review. The old behavior
   // (reject on 0/>1 occurrences) left real, wireable actions "manual" whenever
   // the AI picked a repeated line in a big file.
-  let anchorDerived = false;
+  let anchorDerived = mountGate.action === 'promote';
   const occ = anchor ? countOccurrences(content, anchor) : 0;
-  if (occ !== 1) {
+  if (occ !== 1 && mountGate.action !== 'promote') {
     const scope = b.scope === 'class-field' ? 'class-field' : 'statement';
     const reused = reuseExistingBlockAnchor(rawContent, content, base.intent);
     if (reused) {
@@ -791,7 +811,7 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
   return {
     ...base,
     confidence: 'auto',
-    source: 'ai',
+    source: mountGate.action === 'promote' ? 'ai-mount-gate' : 'ai',
     kind: 'bridge',
     bridge: {
       file,
@@ -804,6 +824,7 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
     },
     callExpr: `getFiodosBridge()[${JSON.stringify(bridgeMethod)}](params)`,
     usesParams: true,
+    ...(mountGateDetail ? { mountGateDetail } : {}),
   };
 }
 
@@ -2325,6 +2346,7 @@ module.exports = {
   findStoreMethod,
   mapParams,
   deriveBridgeAnchor,
+  buildAiBridgeEntry,
   ambiguousAnchorSameInsertion,
   // shared with wireSession (same verification + injection machinery)
   fileHasSymbol,

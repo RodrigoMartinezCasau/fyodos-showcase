@@ -220,6 +220,26 @@ function extractBalancedJsonObject(text) {
   return null;
 }
 
+function looksTruncatedJson(text) {
+  const t = (text || '').trim();
+  if (!t.startsWith('{') && !t.startsWith('[')) return false;
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < t.length; i += 1) {
+    const ch = t[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === '\\') { if (inString) escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === '{' || ch === '[') depth += 1;
+    else if (ch === '}' || ch === ']') depth -= 1;
+  }
+  // Unbalanced braces, or cut mid-key after a colon (…"requiredSymbols":).
+  if (depth !== 0) return true;
+  return /:\s*$/.test(t) || /,\s*$/.test(t);
+}
+
 function parseJsonContent(raw) {
   let trimmed = (raw || '').trim();
   if (!trimmed) return {};
@@ -230,7 +250,14 @@ function parseJsonContent(raw) {
   // 1) Happy path: the response is exactly one JSON value.
   try {
     return JSON.parse(trimmed);
-  } catch {
+  } catch (e) {
+    if (looksTruncatedJson(trimmed)) {
+      throw new Error(
+        `analysis_output_truncated: model JSON incomplete (${trimmed.length} chars). ` +
+        'Retry analyze, lower --max-input-tokens, or use --own-ai-key. ' +
+        `Parse error: ${e.message}`,
+      );
+    }
     /* fall through to tolerant extraction */
   }
   // 2) Tolerant path: take the FIRST balanced {…} object and ignore anything

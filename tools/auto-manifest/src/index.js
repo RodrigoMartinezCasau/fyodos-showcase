@@ -709,6 +709,32 @@ async function main() {
     // AI-proposed and flagged unverified in provenance.
     ({ manifest, provenance } = verifyManifest(proposed, evidence, included, routes, { verifyRoutes, platform, appRoot: analysisRoot }));
     ensureBackRoute(manifest, provenance);
+
+    // Shopify/web URL routes have no filesystem ground truth — probe the live
+    // storefront so hallucinated paths (contacto vs contact) never publish.
+    if (platform === 'shopify' && shopifyStoreDomain) {
+      try {
+        const { probeLiveRoutes, dropDeadRoutes } = require('./probeLiveRoutes');
+        const probe = await withSpinner('Checking storefront routes', () =>
+          probeLiveRoutes({
+            store: shopifyStoreDomain,
+            routes: manifest.routes,
+            log: logDev,
+          }),
+        );
+        const liveDropped = dropDeadRoutes(manifest, provenance, probe.dead);
+        if (liveDropped.length) {
+          logUser(
+            `Live route probe dropped ${liveDropped.length} dead path(s) ` +
+            `(404 on ${shopifyStoreDomain}): ${liveDropped.join(', ')}`,
+          );
+        }
+        logDev(`[probe] checked=${probe.checked} dead=${probe.dead.length}`);
+      } catch (e) {
+        logDev(`[probe] skipped: ${e.message}`);
+      }
+    }
+
     const droppedActions = provenance.actions.filter((a) => !a.included).length;
     const droppedRoutes = provenance.routes.filter((r) => !r.included).length;
     logDev(`[verify] kept routes=${manifest.routes.length} actions=${manifest.actions.length}` +

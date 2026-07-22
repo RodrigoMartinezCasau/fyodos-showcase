@@ -105,14 +105,24 @@ const SHOPIFY_GUARANTEED_ACTIONS = {
     parameters: {},
     execution: { kind: 'http', method: 'GET', url: '{baseUrl}/cart.js' },
   },
-  // variantId-based on purpose (cart/change.js accepts a variant id as `id`):
-  // the theme snippet's cart screen context hands the agent variantIds, so
-  // the action contract must accept exactly what the agent can see.
+  // variantId-based: cart screen context hands the agent variantIds.
+  // SDK coerces numeric id → string for /cart/change.js (JSON number 400s
+  // on some storefronts; digit-string works).
   update_cart_item: {
     handler: 'shopifyUpdateCartItem',
     parameters: {
-      variantId: { type: 'number', required: true },
-      quantity: { type: 'number', required: true },
+      variantId: {
+        type: 'number',
+        required: true,
+        description:
+          'Variant id of the cart line (from get_cart or cart screen context). Never invent.',
+      },
+      quantity: {
+        type: 'number',
+        required: true,
+        description:
+          "ABSOLUTE target quantity after the change (not a delta). Use 0 to remove the line. 'two more' with current 1 → 3.",
+      },
     },
     execution: {
       kind: 'http',
