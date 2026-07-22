@@ -242,6 +242,14 @@ function makeThemeFixture() {
     snippet.includes('cart.items'),
     'cart context lists the cart lines',
   );
+  assert.ok(
+    snippet.includes("base.kind === 'cart'"),
+    'cart page keeps Liquid cart context (viewport scrape must not replace it)',
+  );
+  assert.ok(
+    snippet.includes('Never use add_to_cart for remove/quantity changes'),
+    'cart screen text steers remove/qty to update_cart_item',
+  );
 
   fs.rmSync(root, { recursive: true, force: true });
   console.log('PASS wireShopifyTheme idempotent injection');

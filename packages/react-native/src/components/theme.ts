@@ -12,6 +12,8 @@ import {
 export interface AgentModalTheme {
   backdropColor: string;
   cardBackgroundColor: string;
+  /** 0–1 panel fill opacity (dashboard Conversation slider). */
+  cardBackgroundOpacity?: number;
   cardBorderColor: string;
   titleColor: string;
   bodyColor: string;

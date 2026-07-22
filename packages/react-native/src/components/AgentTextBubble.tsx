@@ -26,7 +26,7 @@ import {
   TextInput,
   View,
 } from 'react-native';
-import type { OrbDeployment } from '@fiodos/core';
+import { resolveConversationPanelBackground, type OrbDeployment } from '@fiodos/core';
 import type { AgentExchange } from '../hooks/useAgent';
 import { DEFAULT_MODAL_THEME, type AgentModalTheme } from './theme';
 
@@ -186,7 +186,10 @@ export function AgentTextBubble({
           style={[
             styles.bubble,
             {
-              backgroundColor: t.cardBackgroundColor,
+              backgroundColor: resolveConversationPanelBackground(
+                t.cardBackgroundColor,
+                t.cardBackgroundOpacity,
+              ),
               borderColor: t.cardBorderColor,
               borderRadius: t.borderRadius ?? 18,
               marginBottom: 16,
