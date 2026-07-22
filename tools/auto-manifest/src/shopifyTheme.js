@@ -94,7 +94,11 @@ const SHOPIFY_GUARANTEED_ACTIONS = {
       method: 'POST',
       url: '{baseUrl}/cart/add.js',
       headers: { 'Content-Type': 'application/json' },
-      body: { id: '{variantId}', quantity: '{quantity}' },
+      body: {
+        id: '{variantId}',
+        quantity: '{quantity}',
+        sections: 'cart-drawer,template--cart',
+      },
       resolve: [
         { param: 'variantId', url: '{baseUrl}/products/{handle}.js', path: 'variants.0.id' },
       ],
@@ -129,7 +133,11 @@ const SHOPIFY_GUARANTEED_ACTIONS = {
       method: 'POST',
       url: '{baseUrl}/cart/change.js',
       headers: { 'Content-Type': 'application/json' },
-      body: { id: '{variantId}', quantity: '{quantity}' },
+      body: {
+        id: '{variantId}',
+        quantity: '{quantity}',
+        sections: 'cart-drawer,template--cart',
+      },
     },
   },
 };
