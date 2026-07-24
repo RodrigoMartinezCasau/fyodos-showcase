@@ -41,6 +41,7 @@ import { FiodosProvider } from '../provider/FiodosProvider';
 import { AgentLayer } from '../components/AgentLayer';
 import { AgentOrb } from '../components/AgentOrb';
 import { DEFAULT_ORB_THEME, type AgentModalTheme, type AgentOrbTheme } from '../components/theme';
+import { ensureContactFiodosAction, withContactFiodosHandler } from '@fiodos/core';
 import { createFiodosBackendClient } from '../api/backendClient';
 import { createFiodosTelemetry } from '../api/backendTelemetry';
 import { resolveImageDataUrlForDisplay } from '../utils/imageUri';
@@ -172,7 +173,7 @@ export function FiodosExpoAgent({
     return { navigation, storage, voice, backend, telemetry };
   }, [resolvedUrl, resolvedKey, backFallbackRoute, stableGetUserId]);
 
-  const { remoteOrb, publishedVoiceActivation, ready: orbReady } = usePublishedConfig(
+  const { remoteOrb, publishedVoiceActivation, orbProfile, ready: orbReady } = usePublishedConfig(
     resolvedUrl,
     resolvedKey,
     stable.storage,
@@ -198,23 +199,40 @@ export function FiodosExpoAgent({
   );
 
   const config = useMemo<FiodosAgentConfig>(
-    () => ({
-      manifest,
-      locale,
-      sttLocale: sttLocale ?? sttLocaleFor(locale),
-      navigation: stable.navigation,
-      registries: registries ?? EMPTY_REGISTRIES,
-      backend: stable.backend,
-      voice: stable.voice,
-      storage: stable.storage,
-      telemetry: stable.telemetry,
-      isAuthenticated,
-      getSessionCapabilities,
-      getUserContextText,
-      getUserId: stableGetUserId,
-      publishedVoiceActivation: publishedVoiceActivation ?? undefined,
-    }),
-    [manifest, locale, sttLocale, stable, registries, isAuthenticated, getSessionCapabilities, getUserContextText, stableGetUserId, publishedVoiceActivation],
+    () => {
+      // Internal orbs only. When published config reports the profile, inject
+      // or strip accordingly; until then repair-only (never invent for public).
+      const guaranteedManifest = ensureContactFiodosAction(manifest, {
+        enabled:
+          orbProfile === 'internal' ? true : orbProfile === 'public' ? false : undefined,
+      });
+      const guaranteedRegistries = withContactFiodosHandler(
+        registries ?? EMPTY_REGISTRIES,
+        (message) => {
+          if (!stable.backend.contactFiodos) {
+            return Promise.reject(new Error('contact_fiodos_unavailable'));
+          }
+          return stable.backend.contactFiodos(message);
+        },
+      );
+      return {
+        manifest: guaranteedManifest,
+        locale,
+        sttLocale: sttLocale ?? sttLocaleFor(locale),
+        navigation: stable.navigation,
+        registries: guaranteedRegistries,
+        backend: stable.backend,
+        voice: stable.voice,
+        storage: stable.storage,
+        telemetry: stable.telemetry,
+        isAuthenticated,
+        getSessionCapabilities,
+        getUserContextText,
+        getUserId: stableGetUserId,
+        publishedVoiceActivation: publishedVoiceActivation ?? undefined,
+      };
+    },
+    [manifest, locale, sttLocale, stable, registries, isAuthenticated, getSessionCapabilities, getUserContextText, stableGetUserId, publishedVoiceActivation, orbProfile],
   );
 
   return (
@@ -307,11 +325,13 @@ function usePublishedConfig(
 ): {
   remoteOrb: RemoteOrbAppearance | null;
   publishedVoiceActivation: PublishedVoiceActivation | null;
+  orbProfile: 'public' | 'internal' | null;
   ready: boolean;
 } {
   const [remoteOrb, setRemoteOrb] = useState<RemoteOrbAppearance | null>(null);
   const [publishedVoiceActivation, setPublishedVoiceActivation] =
     useState<PublishedVoiceActivation | null>(null);
+  const [orbProfile, setOrbProfile] = useState<'public' | 'internal' | null>(null);
   const [ready, setReady] = useState(false);
 
   const client = useMemo(
@@ -335,6 +355,7 @@ function usePublishedConfig(
       if (!alive) return;
       setRemoteOrb(orb);
       setPublishedVoiceActivation(voice);
+      setOrbProfile(published.orbProfile === 'internal' ? 'internal' : 'public');
       setReady(true);
       if (fromNetwork) {
         try {
@@ -376,5 +397,5 @@ function usePublishedConfig(
     };
   }, [client, storage, cacheKey]);
 
-  return { remoteOrb, publishedVoiceActivation, ready };
+  return { remoteOrb, publishedVoiceActivation, orbProfile, ready };
 }

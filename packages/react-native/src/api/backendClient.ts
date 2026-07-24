@@ -265,6 +265,22 @@ export function createFiodosBackendClient(options: FiodosBackendClientOptions): 
       return (await res.json()) as ClientConfigResponse;
     },
 
+    async contactFiodos(message: string): Promise<{ id: string }> {
+      const res = await fetchWithTimeout(
+        `${baseUrl}/v1/client/contact-fiodos`,
+        {
+          method: 'POST',
+          headers: buildHeaders(),
+          body: JSON.stringify({ message: message.trim() }),
+        },
+        12_000,
+      );
+      if (!res.ok) throw await errorFromResponse(res);
+      const data = (await res.json()) as { id?: string };
+      if (!data.id) throw new AgentApiError('invalid_response');
+      return { id: data.id };
+    },
+
     async reportOrbSeen(platform = 'mobile'): Promise<void> {
       // Best-effort: prove the orb booted in the running app so the dashboard
       // onboarding can confirm a real install. Never throws / never blocks.

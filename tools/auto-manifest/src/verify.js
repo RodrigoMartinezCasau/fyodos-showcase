@@ -307,6 +307,22 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
       if (content) evidenceSource = 'disk (omitted from the AI prompt for size)';
     }
 
+    // Platform-guaranteed: SDK registers fiodosContactFiodos and POSTs to
+    // Fiodos — there is no host-app identifier to prove in source.
+    if (
+      action.intent === 'contact_fiodos' &&
+      String(action.handler || '').trim() === 'fiodosContactFiodos'
+    ) {
+      actions.push(action);
+      provenance.actions.push({
+        intent: action.intent,
+        included: true,
+        verification: 'platform-guaranteed contact_fiodos (SDK → /v1/client/contact-fiodos)',
+        evidence: ev,
+      });
+      continue;
+    }
+
     // Shopify (closed platform): the ground truth for API actions is the
     // platform itself, not app code. An action carrying a declarative
     // `execution` block is verified STRUCTURALLY (http kind + method + url and

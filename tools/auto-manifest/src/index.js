@@ -94,6 +94,7 @@ const { collectFiles, isAuditRelevantFile } = require('./collect');
 const { resolveAnalysisRoot } = require('./resolveAnalysisRoot');
 const { analyzeWithAI, correctActionWiring, coverageAudit, generateGuardianWithAI, DEFAULT_MODEL, resolveModel } = require('./aiAnalyze');
 const { verifyManifest } = require('./verify');
+const { ensureContactFiodosAction } = require('./fiodosGuarantees');
 const {
   wireWebOrb, reportWireResult, connectOrbRegistries, reportRegistriesResult,
   connectOrbSession, reportSessionConnectResult,
@@ -540,6 +541,10 @@ async function main() {
     loadAppEnv(analysisRoot);
     const { apiKey, apiUrl } = resolveApiTarget();
     const useProxy = !process.argv.includes('--own-ai-key');
+    // contact_fiodos is internal-orbs only; default public when unknown.
+    const orbProfile = apiKey
+      ? ((await fetchOrbProfile({ apiKey, apiUrl })) || 'public')
+      : 'public';
 
     // ── 2b. Plan quota pre-check (before spending any AI tokens) ─────────────
     // Ask the backend whether this project's plan still allows an analysis. The
@@ -707,7 +712,10 @@ async function main() {
     // Actions are always verified against real code. Routes are verified only
     // when there is filesystem ground truth (mobile); for web they are kept as
     // AI-proposed and flagged unverified in provenance.
+    // Platform guarantee BEFORE verify: contact_fiodos is SDK-native (internal orbs only).
+    proposed = ensureContactFiodosAction(proposed, { orbProfile });
     ({ manifest, provenance } = verifyManifest(proposed, evidence, included, routes, { verifyRoutes, platform, appRoot: analysisRoot }));
+    manifest = ensureContactFiodosAction(manifest, { orbProfile });
     ensureBackRoute(manifest, provenance);
 
     // Shopify/web URL routes have no filesystem ground truth — probe the live
@@ -1948,6 +1956,22 @@ async function fetchAnalysisQuota({ apiKey, apiUrl }) {
     });
     if (!res.ok) return null;
     return await res.json();
+  } catch {
+    return null;
+  }
+}
+
+/** Orb audience profile ('public' | 'internal') from GET /v1/client/config. */
+async function fetchOrbProfile({ apiKey, apiUrl }) {
+  if (!apiKey) return null;
+  try {
+    const res = await fetch(`${apiUrl}/v1/client/config`, {
+      headers: { 'x-api-key': apiKey },
+    });
+    if (!res.ok) return null;
+    const data = await res.json();
+    const profile = data?.published?.orbProfile;
+    return profile === 'internal' ? 'internal' : profile === 'public' ? 'public' : null;
   } catch {
     return null;
   }

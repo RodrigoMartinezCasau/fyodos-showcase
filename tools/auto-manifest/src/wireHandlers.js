@@ -912,6 +912,10 @@ function prepareHandlerPlan({ appRoot, manifest, evidence, wiring = {}, fyodosDi
     // Link/navigation actions have no handler and need NO wiring — the client
     // performs the navigation in navTarget. Skip them entirely here.
     if (action.kind === 'link') continue;
+    // Platform-guaranteed: SDK registers fiodosContactFiodos natively.
+    if (intent === 'contact_fiodos' && String(action.handler || '').trim() === 'fiodosContactFiodos') {
+      continue;
+    }
     const handler = action.handler || intent;
     const ev = evActions[intent] || {};
     const evFile = normRel(ev.file);
