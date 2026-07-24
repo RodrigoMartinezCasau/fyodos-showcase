@@ -36,7 +36,7 @@ const ORB_END = '<!-- FYODOS:ORB:END -->';
 const SNAPSHOT_DIR = '_fyodos/storefront';
 
 /**
- * Canonical mechanics of the five guaranteed Shopify commerce actions.
+ * Canonical mechanics of the guaranteed Shopify commerce actions.
  *
  * These execution templates are PLATFORM CONSTANTS (identical on every
  * Shopify store), yet the analysis prompt asks the AI to reproduce them
@@ -125,7 +125,7 @@ const SHOPIFY_GUARANTEED_ACTIONS = {
         type: 'number',
         required: true,
         description:
-          "ABSOLUTE target quantity after the change (not a delta). Use 0 to remove the line. 'two more' with current 1 → 3.",
+          "ABSOLUTE target quantity after the change (not a delta). 'two more' with current 1 → 3. Whole-line remove → remove_from_cart.",
       },
     },
     execution: {
@@ -136,6 +136,28 @@ const SHOPIFY_GUARANTEED_ACTIONS = {
       body: {
         id: '{variantId}',
         quantity: '{quantity}',
+        sections: 'cart-drawer,template--cart',
+      },
+    },
+  },
+  remove_from_cart: {
+    handler: 'shopifyRemoveFromCart',
+    parameters: {
+      variantId: {
+        type: 'number',
+        required: true,
+        description:
+          'Variant id of the cart line to remove entirely (from get_cart or cart screen context). Never invent.',
+      },
+    },
+    execution: {
+      kind: 'http',
+      method: 'POST',
+      url: '{baseUrl}/cart/change.js',
+      headers: { 'Content-Type': 'application/json' },
+      body: {
+        id: '{variantId}',
+        quantity: 0,
         sections: 'cart-drawer,template--cart',
       },
     },
@@ -258,6 +280,7 @@ function universalSurfaceDoc(storeDomain) {
       { intent: 'add_to_cart', handler: 'shopifyAddToCart', api: '{baseUrl}/cart/add.js' },
       { intent: 'get_cart', handler: 'shopifyGetCart', api: '{baseUrl}/cart.js' },
       { intent: 'update_cart_item', handler: 'shopifyUpdateCartItem', api: '{baseUrl}/cart/change.js' },
+      { intent: 'remove_from_cart', handler: 'shopifyRemoveFromCart', api: '{baseUrl}/cart/change.js' },
       { intent: 'go_checkout', kind: 'link', navTarget: '/checkout' },
     ],
     note:
@@ -366,7 +389,7 @@ function shopifyScreenContextLiquidLines() {
     '  {% capture fyodos_screen_text %}The customer is viewing search results for "{{ search.terms }}". Products visible on screen (title — price — add-to-cart variantId): {% for fyodos_r in search.results limit: 12 %}{% if fyodos_r.object_type == \'product\' %}{{ fyodos_r.title }} — {{ fyodos_r.price | money | strip_html }} — variantId {{ fyodos_r.selected_or_first_available_variant.id }}; {% endif %}{% endfor %}To add one to the cart, call add_to_cart with its variantId from this list.{% endcapture %}',
     "  window.__fyodosScreen = { kind: 'search', text: {{ fyodos_screen_text | json }} };",
     "  {% elsif template contains 'cart' %}",
-    '  {% capture fyodos_screen_text %}The customer is viewing their cart: {{ cart.item_count }} item(s), total {{ cart.total_price | money | strip_html }}. Lines (title × quantity — variantId): {% for fyodos_i in cart.items %}{{ fyodos_i.product.title }} × {{ fyodos_i.quantity }} — variantId {{ fyodos_i.variant_id }}; {% endfor %}To change quantity or remove a line, call update_cart_item with that line\'s variantId and the ABSOLUTE target quantity (0 removes the line). Never use add_to_cart for remove/quantity changes.{% endcapture %}',
+    '  {% capture fyodos_screen_text %}The customer is viewing their cart: {{ cart.item_count }} item(s), total {{ cart.total_price | money | strip_html }}. Lines (title × quantity — variantId): {% for fyodos_i in cart.items %}{{ fyodos_i.product.title }} × {{ fyodos_i.quantity }} — variantId {{ fyodos_i.variant_id }}; {% endfor %}To REMOVE a line, call remove_from_cart with that line\'s variantId. To change quantity (keep the line), call update_cart_item with variantId and the ABSOLUTE target quantity. Never use add_to_cart for remove/quantity changes.{% endcapture %}',
     "  window.__fyodosScreen = { kind: 'cart', text: {{ fyodos_screen_text | json }} };",
     '  {% endif %}',
   ];

@@ -234,18 +234,21 @@ ROUTES: every storefront page a customer can navigate to:
 - NEVER invent a handle: every non-universal route must be backed by an exact handle visible in the provided files. Do NOT create one route per product (stores have thousands; products are reached through search_products). Skip account/login pages and checkout (checkout is an action, not a route).
 
 ACTIONS: what a customer can do by voice. Two kinds:
-(1) API actions (kind "function" WITH an "execution" block): the universal Shopify commerce set. ALWAYS include exactly these five, with EXACTLY these intent ids, handler names and execution templates (they are platform-guaranteed on every Shopify store); personalize ONLY their descriptions/examples to this store's catalog and language:
+(1) API actions (kind "function" WITH an "execution" block): the universal Shopify commerce set. ALWAYS include exactly these six, with EXACTLY these intent ids, handler names and execution templates (they are platform-guaranteed on every Shopify store); personalize ONLY their descriptions/examples to this store's catalog and language:
   - search_products, handler "shopifySearchProducts", parameters {query: string required}, execution {"kind": "http", "method": "GET", "url": "{baseUrl}/search/suggest.json?q={query}&resources[type]=product&resources[limit]=8"}. Its description MUST state that results carry each product's title, handle and PRODUCT id but NO variant ids — to add a result to the cart, get_product_details must be called with its handle first.
   - get_product_details, handler "shopifyGetProductDetails", parameters {handle: string required}, execution {"kind": "http", "method": "GET", "url": "{baseUrl}/products/{handle}.js"}. THE BRIDGE between search and cart: returns the product's variants with their variantIds (what add_to_cart needs). Its description MUST say so.
   - add_to_cart, handler "shopifyAddToCart", parameters {variantId: number OPTIONAL, handle: string OPTIONAL, quantity: number required} — at least one of variantId/handle. execution {"kind": "http", "method": "POST", "url": "{baseUrl}/cart/add.js", "headers": {"Content-Type": "application/json"}, "body": {"id": "{variantId}", "quantity": "{quantity}"}, "resolve": [{"param": "variantId", "url": "{baseUrl}/products/{handle}.js", "path": "variants.0.id"}]}. Its description MUST say: pass the exact variantId when it is visible (screen context, cart, product details); otherwise pass the product HANDLE copied exactly from a search result or /products/<handle> url and the store resolves the default variant — never a product id from search results, never an invented id.
   - get_cart, handler "shopifyGetCart", no parameters, execution {"kind": "http", "method": "GET", "url": "{baseUrl}/cart.js"}
-  - update_cart_item, handler "shopifyUpdateCartItem", parameters {variantId: number required, quantity: number required}, execution {"kind": "http", "method": "POST", "url": "{baseUrl}/cart/change.js", "headers": {"Content-Type": "application/json"}, "body": {"id": "{variantId}", "quantity": "{quantity}"}}. variantId is the VARIANT id of the cart line to change (the cart screen context lists one per line); quantity 0 removes the line.
+  - update_cart_item, handler "shopifyUpdateCartItem", parameters {variantId: number required, quantity: number required}, execution {"kind": "http", "method": "POST", "url": "{baseUrl}/cart/change.js", "headers": {"Content-Type": "application/json"}, "body": {"id": "{variantId}", "quantity": "{quantity}"}}. Absolute quantity change (keep the line). labels: es "Cambiar cantidad en el carrito", en "Change cart quantity".
+  - remove_from_cart, handler "shopifyRemoveFromCart", parameters {variantId: number required}, execution {"kind": "http", "method": "POST", "url": "{baseUrl}/cart/change.js", "headers": {"Content-Type": "application/json"}, "body": {"id": "{variantId}", "quantity": 0}}. FIRST-CLASS remove — labels: es "Eliminar del carrito", en "Remove from cart". Examples must include elimina/quita/remove from cart.
   "{baseUrl}" resolves to the store's own origin at runtime — never hardcode the domain in execution urls.
-(2) LINK actions (kind "link" + navTarget, no handler):
+(2) LINK actions (kind "link" + navTarget, no handler) — THIS is how a store gets MORE than the six commerce actions. Scan the Liquid THEME end-to-end:
   - ALWAYS include go_checkout with navTarget "/checkout", requireConfirmation true and a confirmationMessageTemplate in the store's language. Payment happens ONLY on Shopify's secure checkout page, never in the conversation.
-  - The store's real contact / social / policy links found in the THEME files (mailto:, tel:, social profile URLs, "/policies/…"): navTarget must be the EXACT href as written in the .liquid file. Group obvious duplicates.
+  - EVERY customer-facing href/CTA in the theme: mailto:, tel:, WhatsApp/wa.me, social profiles (one per network), "/policies/…", newsletter/subscribe URLs, locale/language switchers, contact/about/FAQ button hrefs, PDF downloads, booking links, public track-order pages. navTarget = EXACT href from the .liquid file. Group duplicates.
+  - A storefront whose Actions list is ONLY the six Ajax intents + checkout — while the theme still has contact/social/policy/newsletter/locale CTAs — is a FAILED analysis (under-detection).
 CRITICAL RULES:
-- Do NOT invent other API actions: the anonymous storefront surface is exactly the set above. Orders history, customer accounts, discounts or admin operations need credentials a theme embed does not have — leaving them out is correct.
+- The six API actions above are the MINIMUM commerce FLOOR (always present). They are NOT a ceiling: keep discovering link actions from the theme. Do NOT invent extra Ajax/API actions that need customer accounts, order history, discounts or admin credentials.
+- ACTION SURFACE SWEEP: re-walk every primary template and emit an action for each real customer verb grounded in the theme (create/add, find/search, update, remove, contact/help/legal/social/locale…). Stopping after the fixed commerce catalog while CTAs remain is under-detection.
 - Everything on a storefront is PUBLIC: never set requiresAuth, audience or requiredCapabilities. policies.allowedWithoutAuth must list EVERY intent id.
 - go_checkout is the only action with requireConfirmation true; cart operations are reversible and must NOT ask for confirmation.
 
@@ -459,16 +462,48 @@ function correctionSystemPrompt(platform, intent) {
 
 /** Second-pass COVERAGE AUDIT: find the actions the first pass missed. */
 function coverageAuditSystemPrompt(platform) {
+  if (platform === 'shopify') {
+    return (
+      'You are AUDITING an already-produced Fiodos Shopify storefront analysis for MISSED actions. ' +
+      'You receive (1) the actions the first pass ALREADY detected and (2) Liquid theme + storefront snapshot files. ' +
+      'The six Ajax commerce actions are a FLOOR — find every ADDITIONAL customer-facing capability still missing, ' +
+      'almost always as kind "link" actions grounded in exact hrefs.\n\n' +
+      'WHAT GETS MISSED (hunt these in the theme):\n' +
+      '- mailto:, tel:, WhatsApp/wa.me and other contact hrefs\n' +
+      '- Social profile URLs (one action per network)\n' +
+      '- /policies/…, privacy, terms, shipping, refunds\n' +
+      '- Newsletter/subscribe URLs, locale/language switchers\n' +
+      '- Contact/about/FAQ/blog CTAs, PDF downloads, booking links, public track-order pages\n\n' +
+      'HARD RULES:\n' +
+      '- Output ONLY capabilities NOT already in the provided list (judge by MEANING).\n' +
+      '- Prefer kind "link" with navTarget = EXACT href from the theme. Do NOT invent new Ajax commerce intents.\n' +
+      '- Do NOT propose customer-account, order-history, discount-code or admin actions.\n' +
+      '- Ground every candidate in a file + symbol (the href). NEVER invent hrefs.\n' +
+      '- Same JSON shapes for action + evidence as the main analysis. wiring may be {}.\n\n' +
+      `${wiringGuide('shopify')}\n\n` +
+      'Answer ONLY valid JSON (no markdown, no prose). Start with { and end with }:\n' +
+      '{\n' +
+      '  "actions": [ { ...AppManifest action... } ],\n' +
+      '  "evidence": { "actions": {"<intent>": {"file": "...", "symbol": "...", "whatItDoes": "..."}} },\n' +
+      '  "wiring": {},\n' +
+      '  "uncertain": ["<anything you could not ground>"]\n' +
+      '}\n' +
+      'If the first pass already covered everything, return {"actions": []}.\n\n' +
+      `Manifest schema:\n${manifestSchemaDoc(true)}`
+    );
+  }
   return (
-    'You are AUDITING an already-produced Fiodos analysis for MISSED actions. You receive (1) the list of actions the first pass ALREADY detected (intent + handler + short description) and (2) the FULL source of the app\'s settings, personalization/studio, central provider/store and config/type files. Find EVERY user-meaningful control that is NOT already covered and output it as NEW action candidates — nothing else.\n\n' +
+    'You are AUDITING an already-produced Fiodos analysis for MISSED actions. You receive (1) the list of actions the first pass ALREADY detected (intent + handler + short description) and (2) the FULL source of the app\'s settings, personalization/studio, central provider/store, config/type files, AND primary UI screens with buttons/forms. Find EVERY user-meaningful control that is NOT already covered and output it as NEW action candidates — nothing else.\n\n' +
     'WHAT GETS MISSED (hunt these specifically):\n' +
+    '- ACTION SURFACE: create/add/submit, search/filter/sort, update/edit/toggle, remove/delete/clear, share/export/download, contact/help/legal/social/locale — each as its own action when a real handler or href exists.\n' +
     '- MULTI-FIELD SETTERS: one function that patches many fields (patchWorkspace({orbEnabled}/{voiceMode}/{imageInputEnabled}), patchOrbTheme({...}), patchBubbleTheme({backgroundColor,textColor,borderColor,...}), patchConversationTheme, patchKeyboardButtonTheme). Emit ONE action PER user-meaningful FIELD, each grounded in a field that literally appears in the code or its config/type definition. Sibling fields sharing ONE setter are DIFFERENT actions.\n' +
     '- Every toggle/switch/slider/select in a settings or advanced-options component.\n' +
     '- Account/security/team/workspace ops: save vs discard vs publish, remove member, open audit/change log, 2FA setup, change/reset password, redeem code, switch active project/workspace.\n' +
-    '- ACCOUNT FORMS ARE THEIR OWN ACTIONS: redeem-code, change/reset-password and report-a-problem/send-feedback each have a dedicated handler and are SEPARATE actions — do NOT skip them just because a generic contact/support action exists. A user asking "redeem this code" or "reset my password" needs the specific action, not the support channel.\n\n' +
+    '- ACCOUNT FORMS ARE THEIR OWN ACTIONS: redeem-code, change/reset-password and report-a-problem/send-feedback each have a dedicated handler and are SEPARATE actions — do NOT skip them just because a generic contact/support action exists. A user asking "redeem this code" or "reset my password" needs the specific action, not the support channel.\n' +
+    '- LINK actions on marketing/landing surfaces: download, mailto, tel, social, anchors.\n\n' +
     'HARD RULES:\n' +
     '- Output ONLY capabilities NOT already in the provided list. Do NOT repeat an existing capability under a different name (judge by MEANING, not just id). If a capability is already covered, skip it.\n' +
-    '- Every action MUST be backed by a REAL function visible in the provided code, with the same evidence + wiring rules as the main analysis. PREFER the deepest reusable handler (store/context/API) over a component wrapper. Ground every field in the code; NEVER invent a control that is not there.\n' +
+    '- Every action MUST be backed by a REAL function or href visible in the provided code, with the same evidence + wiring rules as the main analysis. PREFER the deepest reusable handler (store/context/API) over a component wrapper. Ground every field in the code; NEVER invent a control that is not there.\n' +
     '- Same JSON shapes for action, evidence and wiring as the main analysis.\n\n' +
     `${wiringGuide(platform)}\n\n` +
     'Answer ONLY valid JSON (no markdown, no prose). Start with { and end with }:\n' +

@@ -278,12 +278,20 @@ function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' }
 /** Files the COVERAGE AUDIT (second pass) re-reads to find missed actions:
  *  central state + config/types (the setters and the field enumerations) plus
  *  the control-surface components (settings/studio/panels) where those setters
- *  are invoked. Keeps the audit focused and cheap. */
-function isAuditRelevantFile(rel) {
+ *  are invoked. Shopify: Liquid theme + storefront snapshot (link CTAs). */
+function isAuditRelevantFile(rel, platform) {
   const p = rel.replace(/\\/g, '/');
   const file = p.split('/').pop() || '';
+  if (platform === 'shopify') {
+    if (p.includes('_fyodos/storefront/')) return true;
+    return /\.(liquid|json)$/i.test(file);
+  }
   if (isCentralStateFile(rel) || isConfigTypesFile(rel)) return true;
-  return /(settings?|preferences?|profile|account|security|totp|2fa|team|members?|invit\w*|audit|switcher|advanced|section|panel|studio|config)[^/]*\.(tsx?|jsx?|vue|svelte|dart|kt|swift)$/i.test(file);
+  // Primary screens with CTAs — not only settings panels.
+  if (/(page|screen|view|layout|nav|header|footer|sidebar|menu|form|modal|dialog|drawer)[^/]*\.(tsx?|jsx?|vue|svelte)$/i.test(file)) {
+    return true;
+  }
+  return /(settings?|preferences?|profile|account|security|totp|2fa|team|members?|invit\w*|audit|switcher|advanced|section|panel|studio|config|cart|checkout|product|catalog|todo|list)[^/]*\.(tsx?|jsx?|vue|svelte|dart|kt|swift)$/i.test(file);
 }
 
 module.exports = { collectFiles, isCentralStateFile, isConfigTypesFile, isAuditRelevantFile };

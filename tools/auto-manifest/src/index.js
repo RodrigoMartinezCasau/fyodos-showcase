@@ -636,13 +636,14 @@ async function main() {
     // returns ONLY what was missed. Candidates are merged into `proposed` and
     // go through the SAME verification + wiring below — nothing is wired blind.
     // Additive and fail-open; skip with --no-coverage-audit.
+    // Shopify used to skip this pass — that left storefronts stuck at the six
+    // Ajax commerce actions. The audit now also hunts theme link CTAs.
     if (
       !process.argv.includes('--no-coverage-audit') &&
-      platform !== 'shopify' &&
       (proposed.actions || []).length > 0
     ) {
       try {
-        const auditFiles = included.filter((f) => isAuditRelevantFile(f.rel));
+        const auditFiles = included.filter((f) => isAuditRelevantFile(f.rel, platform));
         if (auditFiles.length) {
           proposed.actions = proposed.actions || [];
           evidence.actions = evidence.actions || {};
