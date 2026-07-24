@@ -355,7 +355,9 @@ async function fetchStorefrontSnapshot(storeRaw, { log = () => {} } = {}) {
 function shopifyScreenContextLiquidLines() {
   return [
     "  {% if template contains 'product' and product %}",
-    '  {% capture fyodos_screen_text %}The customer is viewing the product page of: {{ product.title }} (price {{ product.price | money | strip_html }}). Add-to-cart variantId: {{ product.selected_or_first_available_variant.id }}.{% endcapture %}',
+    // Rich PDP context: opinions/details must use title, price, description —
+    // not claim "no details". Related-product viewport scrape must NOT replace this.
+    '  {% capture fyodos_screen_text %}The customer is viewing the product page of: {{ product.title }} (handle {{ product.handle }}, price {{ product.price | money | strip_html }}). Selected option: {{ product.selected_or_first_available_variant.title }}. Add-to-cart variantId: {{ product.selected_or_first_available_variant.id }}.{% if product.type != blank %} Type: {{ product.type }}.{% endif %} Description: {{ product.description | strip_html | truncate: 500 }}. This IS the on-screen product — when asked for an opinion or details, answer from this text (title, price, description, options). Never say you lack product details when this block is present. To add it, call add_to_cart with that variantId.{% endcapture %}',
     "  window.__fyodosScreen = { kind: 'product', text: {{ fyodos_screen_text | json }} };",
     "  {% elsif template contains 'collection' and collection %}",
     '  {% capture fyodos_screen_text %}The customer is browsing the collection "{{ collection.title }}". Products visible on screen (title — price — add-to-cart variantId): {% for fyodos_p in collection.products limit: 16 %}{{ fyodos_p.title }} — {{ fyodos_p.price | money | strip_html }} — variantId {{ fyodos_p.selected_or_first_available_variant.id }}; {% endfor %}To add one to the cart, call add_to_cart with its variantId from this list.{% endcapture %}',
@@ -459,10 +461,10 @@ function shopifyViewportScreenJsLines() {
     '  function fyodosPublishScreen(agent) {',
     '    if (!agent || typeof agent.setScreenContext !== \'function\') return;',
     '    var base = window.__fyodosScreen || { kind: \'page\', text: \'\' };',
-    '    // Cart page: Liquid already lists lines × qty × variantId for',
-    '    // update_cart_item. Viewport product links would REPLACE that with',
-    '    // add_to_cart guidance and strand remove/quantity changes (Salubell).',
-    "    if (base.kind === 'cart' && base.text) {",
+    '    // Cart: keep Liquid lines for update_cart_item. Product PDP: keep rich',
+    '    // Liquid details — viewport "related" cards would REPLACE the PDP and',
+    '    // the agent claims "no details" while offering add-to-cart (wrong).',
+    "    if ((base.kind === 'cart' || base.kind === 'product') && base.text) {",
     '      agent.setScreenContext(base);',
     '      return;',
     '    }',

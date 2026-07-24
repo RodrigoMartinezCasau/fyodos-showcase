@@ -243,8 +243,16 @@ function makeThemeFixture() {
     'cart context lists the cart lines',
   );
   assert.ok(
-    snippet.includes("base.kind === 'cart'"),
-    'cart page keeps Liquid cart context (viewport scrape must not replace it)',
+    snippet.includes("base.kind === 'cart' || base.kind === 'product'"),
+    'cart + product PDP keep Liquid context (viewport scrape must not replace them)',
+  );
+  assert.ok(
+    snippet.includes('This IS the on-screen product'),
+    'product page Liquid exposes opinion/detail guidance',
+  );
+  assert.ok(
+    snippet.includes('product.description'),
+    'product page Liquid includes description for opinions',
   );
   assert.ok(
     snippet.includes('Never use add_to_cart for remove/quantity changes'),
