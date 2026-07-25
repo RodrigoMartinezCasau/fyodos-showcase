@@ -80,11 +80,16 @@ export interface AgentOrbProps {
   /** Dashboard on/off for the thought bubble. Default true. */
   bubbleEnabled?: boolean;
   /**
-   * Dashboard on/off for the VOICE channel. Default true. When false the orb
-   * neither listens nor speaks: tapping it opens the text keyboard directly
-   * (text turns are silent by default). Animations are unchanged.
+   * Dashboard on/off for listening (STT). Default true. When false, tapping
+   * opens the keyboard instead of starting to listen. Independent of
+   * `voiceOutputEnabled`.
    */
   voiceInputEnabled?: boolean;
+  /**
+   * Dashboard on/off for speaking back (TTS). Default true. When false,
+   * replies are text-only and the chat opens on a voice query.
+   */
+  voiceOutputEnabled?: boolean;
   /**
    * Idle context retention from the dashboard (minutes; 0 = never clear;
    * null/undefined = the 30-minute default).
@@ -109,6 +114,7 @@ export function AgentOrb({
   bubbleTheme,
   bubbleEnabled = true,
   voiceInputEnabled = true,
+  voiceOutputEnabled = true,
   conversationRetentionMinutes = null,
 }: AgentOrbProps) {
   const { ui, config, messages } = useFiodosRuntime();
@@ -146,7 +152,7 @@ export function AgentOrb({
     cancelPendingAction,
     wakeWordListening,
     voiceAvailable,
-  } = useAgent({ enabled, conversationRetentionMinutes });
+  } = useAgent({ enabled, conversationRetentionMinutes, voiceOutputEnabled });
 
   const [textOpen, setTextOpen] = useState(false);
   const [textSeed, setTextSeed] = useState<{ text: string; autoSend: boolean } | null>(null);
@@ -340,10 +346,9 @@ export function AgentOrb({
     } catch {
       /* feedback must never break the agent */
     }
-    // Voice disabled in the dashboard: the orb never listens or speaks. Tapping
-    // opens the keyboard DIRECTLY (text turns are silent by default), and the
-    // orb's animations stay exactly as before. This branch is intentionally
-    // BEFORE the voiceAvailable check so a working mic is still bypassed.
+    // Mic off: tap opens the keyboard. Speaking back is a separate switch.
+    // This branch is intentionally BEFORE the voiceAvailable check so a
+    // working mic is still bypassed when listening is disabled.
     if (!voiceInputEnabled && textInputEnabled) {
       setMicFallbackActive(false);
       openTextPanel();
@@ -352,6 +357,10 @@ export function AgentOrb({
     if (voiceAvailable && voiceInputEnabled) {
       setMicFallbackActive(false);
       void toggleListening();
+      // TTS off: open chat so the text reply is visible.
+      if (!voiceOutputEnabled && textInputEnabled) {
+        setTextPanel(true);
+      }
       return;
     }
     // No microphone: skip the "active + chip" step and open the keyboard +

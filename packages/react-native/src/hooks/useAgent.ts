@@ -119,6 +119,11 @@ export interface UseAgentOptions {
    * null/undefined = the 30-minute default).
    */
   conversationRetentionMinutes?: number | null;
+  /**
+   * Dashboard on/off for spoken replies (TTS). When false, speakReply is a
+   * no-op so the orb never talks back — text still appears in the chat.
+   */
+  voiceOutputEnabled?: boolean;
 }
 
 /**
@@ -190,8 +195,11 @@ function devLog(invocationId: number, step: string, extra?: string): void {
 export function useAgent({
   enabled = true,
   conversationRetentionMinutes = null,
+  voiceOutputEnabled = true,
 }: UseAgentOptions = {}): UseAgentResult {
   const runtime = useFiodosRuntime();
+  const voiceOutputEnabledRef = useRef(voiceOutputEnabled !== false);
+  voiceOutputEnabledRef.current = voiceOutputEnabled !== false;
   const {
     config,
     messages,
@@ -453,6 +461,11 @@ export function useAgent({
       }
       // Silent text mode: the bubble shows the reply, nothing is spoken.
       if (silentTurnRef.current) {
+        setPhaseSafe('idle');
+        return;
+      }
+      // Dashboard "orb speaks back" switch — independent of listening.
+      if (!voiceOutputEnabledRef.current) {
         setPhaseSafe('idle');
         return;
       }
