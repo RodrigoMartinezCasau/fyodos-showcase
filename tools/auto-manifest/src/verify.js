@@ -31,6 +31,32 @@ function fileHasIdentifier(content, identifier) {
   return re.test(content);
 }
 
+/** Path-only form of a Shopify navTarget/route for Screens-vs-Actions dedupe. */
+function normalizeShopifyPath(raw) {
+  let t = String(raw || '').trim();
+  if (!t || t.toUpperCase() === 'BACK') return '';
+  if (t.includes('://')) {
+    try {
+      t = new URL(t).pathname || '/';
+    } catch {
+      return '';
+    }
+  }
+  t = t.split('?')[0].split('#')[0].trim();
+  if (!t.startsWith('/')) t = `/${t}`;
+  if (t.length > 1) t = t.replace(/\/+$/, '');
+  return t || '/';
+}
+
+function isShopifyExternalLink(target, norm) {
+  if (/^(mailto:|tel:|sms:|whatsapp:)/i.test(target)) return true;
+  // Absolute http(s) that is not a store /policies/… path counts as external
+  // (social, booking, etc.). Same-store policies may still be link actions
+  // when they are NOT already routes.
+  if (target.startsWith('http') && !String(norm || '').includes('/policies/')) return true;
+  return false;
+}
+
 const EXECUTION_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
 
 /**
@@ -296,6 +322,16 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
   }
 
   const isShopify = opts.platform === 'shopify';
+  // Shopify Screens vs Actions: a link whose navTarget is already a route
+  // path is a duplicate of navigation — drop it (dashboard was showing empty
+  // `()` copies of About/Contact/collections after over-eager discovery).
+  const shopifyRoutePaths = new Set();
+  if (isShopify) {
+    for (const r of routes) {
+      const p = normalizeShopifyPath(r.route);
+      if (p) shopifyRoutePaths.add(p);
+    }
+  }
   const actions = [];
   for (const action of manifest.actions || []) {
     const ev = evidence.actions?.[action.intent] || {};
@@ -396,6 +432,17 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
           reason: `link action navTarget '${target}' not found verbatim in '${evFile}' — DROPPED`,
         });
         continue;
+      }
+      if (isShopify && target !== '/checkout') {
+        const norm = normalizeShopifyPath(target);
+        const external = isShopifyExternalLink(target, norm);
+        if (!external && norm && shopifyRoutePaths.has(norm)) {
+          provenance.actions.push({
+            intent: action.intent, included: false,
+            reason: `link navTarget '${target}' duplicates route '${norm}' — keep as Screen, not Action — DROPPED`,
+          });
+          continue;
+        }
       }
       // Normalize: link actions carry no handler and never require wiring.
       action.handler = '';
