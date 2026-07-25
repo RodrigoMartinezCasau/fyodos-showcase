@@ -22,7 +22,7 @@ AppManifest (all fields required unless noted):
     "intent": string (snake_case, UNIQUE across routes AND actions),
     "label": string, "route": string (opaque route string for the app's navigation adapter — an expo-router href, a URL path, or "BACK"),
     "labels": object (REQUIRED, unconditional, regardless of "appLanguages": the SAME "label" translated into BOTH "es" and "en" — e.g. {"es": "Ver carrito", "en": "View cart"} — for the FIODOS DASHBOARD's own bilingual operator UI. This is INDEPENDENT of the app's end-user language: even a purely-English app gets a Spanish translation here, and vice versa, because the developer reading the Fiodos dashboard may work in either language. If "label" is already in Spanish or English, still provide BOTH keys (one is a direct translation, the other stays as-is). Never omit),
-    "description": string (one DISTINCTIVE line: what THIS screen shows and what the user does there, phrased so it can NOT be confused with sibling screens — name the concrete content/entities unique to it. e.g. "Lists the registered people/accounts; from here you open and manage each individual user" — NOT a generic "a screen of the app"),
+    "description": string (PRODUCT-HELP MANUAL for this screen — DISTINCTIVE, 1-3 sentences: what THIS screen shows, the main controls/sections the user sees (use on-screen labels when the code has them), and what they can do here. Phrased so it cannot be confused with sibling screens AND so the runtime agent can recognize the screen from a screenshot or answer "what is this page / what does this setting do?". e.g. "Settings → Appearance: orb color, bubble theme and voice mode toggles; changing a value updates the live preview." — NOT a generic "a screen of the app"),
     "bubblePrompt": string (SHORT, PROACTIVE call-to-action shown in a small "thought bubble" next to the assistant orb WHEN THE USER IS ON THIS SCREEN. It must have a SALES-DRIVEN spirit — a vendor's instinct — that pushes the user toward the single MOST VALUABLE action available on THIS screen right now, never a passive "look at this" nudge. For commerce/consumer apps, sell the concrete action: a pizza menu → "¿Qué pizza te apetece?"; a room listing → "¿Reservamos tu habitación?"; a cart → "¿Finalizar tu compra?". For internal/business software, push the key operational action: a reports screen → "¿Creamos el informe?"; a staff list → "¿Filtramos por equipo?". One question/offer in the app's PRIMARY language, max ~6 words, ending naturally (often a "?"). Distinct per screen and tied to what the user does HERE. NOT a description, NOT the label verbatim, NOT a generic greeting. Optional — omit if nothing natural fits),
     "bubblePrompts": object (REQUIRED whenever "appLanguages" lists 2+ languages, otherwise OMIT: the SAME bubble CTA translated into EVERY language in "appLanguages", keyed by base code — e.g. {"es": "¿Finalizar tu compra?", "en": "Ready to checkout?"}. Each translation obeys every bubblePrompt rule (sales-driven, ~6 words, natural). The orb picks the entry matching the language the end user is browsing the app in, so NEVER leave a supported language untranslated),
     "actionIntents": string[] (OPTIONAL: intents of the actions a user performs FROM this screen — the action handlers actually wired into THIS screen's component/page. Use exact action intent ids from the "actions" array; [] if none. Advisory only, never gates anything),
@@ -36,7 +36,7 @@ AppManifest (all fields required unless noted):
     "kind": "function" | "link" (OPTIONAL, default "function". Use "link" for navigation/link actions: open an external/download URL, jump to a page section, open an email/phone/social link. Web landing pages are mostly these.),
     "handler": string (for kind "function": name of the REAL function in the app code that implements it. For kind "link": OMIT or empty — link actions have no handler.),
     "navTarget": string (REQUIRED for kind "link": the EXACT href/URL/anchor string as written in the code — e.g. "https://apps.apple.com/...", "#contact", "mailto:hi@x.com". Must appear verbatim in the evidence file.),
-    "description": string (what the action does, in clear plain language),
+    "description": string (PRODUCT-HELP MANUAL for this action — what it does, which UI control/label triggers it when visible in the code, and the user-facing outcome. Must be enough for the runtime agent to explain the control if the user pastes a screenshot of it or asks "qué hace esto?"),
     "preconditions": string (what must be true to run it, in words — e.g. "the cart must have at least one item"; empty string if none),
     "effect": string (what happens AFTER it runs — the result/outcome the user perceives),
     "relatedIntents": string[] (intents that commonly follow or pair with this one — flows; [] if none),
@@ -54,8 +54,9 @@ AppManifest (all fields required unless noted):
 Validation rules: no duplicate intents anywhere; every route/action needs non-empty examples;
 "function" actions need non-empty handler; "link" actions need non-empty navTarget (no handler); requireConfirmation implies confirmationMessageTemplate.
 The description/preconditions/effect/relatedIntents (actions), description (routes) and appType/appFlow
-fields are the app's "manual": they go verbatim into the agent's prompt so it understands the app.
-Base them on the REAL code you read; be precise and concise, never padding.${includeExecution ? `
+fields are the app's "manual": they go verbatim into the agent's prompt so it understands the app,
+answers product FAQ, and explains UI from screenshots. Base them on the REAL code you read;
+be precise and concrete (name visible labels/sections), never padding and never invent controls.${includeExecution ? `
 
 Additional action field for CLOSED platforms (no app code to wire):
   "execution": {
@@ -255,9 +256,12 @@ CRITICAL RULES:
 - Everything on a storefront is PUBLIC: never set requiresAuth, audience or requiredCapabilities. policies.allowedWithoutAuth must list EVERY intent id.
 - go_checkout is the only action with requireConfirmation true; cart operations are reversible and must NOT ask for confirmation.
 
+PRODUCT HELP MANUAL (HIGH PRIORITY — every install):
+End users ask the orb to EXPLAIN the product (often with a SCREENSHOT of a page/settings panel). Route/action descriptions ARE that knowledge base: name visible sections/controls and what the user can do; include FAQ examples ("qué es esta pantalla", "what does this setting do?") when natural; never invent controls not in the theme/snapshot. Generic "a page of the store" descriptions are a FAILED analysis for that route.
+
 THE MANUAL (description/preconditions/effect/relatedIntents per action; description per route; appType/appFlow):
-This is the context the agent reads to understand the store. Derive every field from the snapshot and theme:
-- description: what the action/route does or shows, grounded in this store (e.g. the cart route of a supplement store: "Shows the supplements added so far with quantities and total").
+This is the context the agent reads to understand the store, answer shopper FAQ, and explain screenshots. Derive every field from the snapshot and theme:
+- description: what the action/route does or shows, grounded in this store (e.g. the cart route of a supplement store: "Shows the supplements added so far with quantities and total"). Name visible section titles when helpful.
 - preconditions: e.g. add_to_cart needs a concrete VARIANT id identified first (from the visible product page/screen context, or via get_product_details on a search result's handle); update_cart_item and go_checkout need a non-empty cart.
 - effect: the observable outcome (item in cart, updated total, checkout page).
 - relatedIntents: the natural flows (search_products → get_product_details → add_to_cart → go_cart → go_checkout). showcaseRoute: ONLY add_to_cart/update_cart_item → the cart route. NEVER set showcaseRoute on search_products or get_product_details (Ajax data — escorting to /search after "tell me about X" opens empty Buscar).
@@ -352,14 +356,17 @@ requiresAuth is the execution LOCK; "audience" is about VISIBILITY: the orb show
 - Leave audience absent (= public) for everything else, INCLUDING the login/signup actions (they exist FOR logged-out users) and anything you cannot prove from the code. A wrong "authenticated" hides a real capability from real users — worse than no classification.
 - requiredCapabilities (actions only, OPTIONAL): short snake_case flags for FINE-GRAINED session states the code checks before the action makes sense, e.g. a conditional like user.paymentMethods.length > 0 guarding one-click purchase → ["has_payment_method"]; user.role === 'admin' → ["is_admin"]. Emit a capability ONLY when (a) you can point at the exact conditional in the code AND (b) you also expose the SAME flag in the session block's "capabilities" (below) so the orb can actually read it at runtime. A capability with no session source is dead weight — omit it.
 
+PRODUCT HELP MANUAL (HIGH PRIORITY — every install):
+End users ask the orb to EXPLAIN the product (often with a SCREENSHOT of a settings panel, form or page). Route/action descriptions ARE that knowledge base: name visible UI labels/sections and outcomes; include FAQ examples ("qué hace este ajuste", "what does this page do?") when natural; never invent controls. Generic "Settings screen" descriptions are a FAILED analysis for that route.
+
 THE MANUAL (description/preconditions/effect/relatedIntents per action; description per screen; appType/appFlow):
-This is the context the agent reads to understand the app, so it can reason instead of guessing. Derive every field from the REAL code:
-- description: what the action actually does (read the handler's body).
+This is the context the agent reads to understand the app, answer product FAQ, explain UI from screenshots, and choose actions. Derive every field from the REAL code:
+- description: what the action actually does (read the handler's body) AND which user-facing control it is when the UI labels it.
 - preconditions: state the code requires before it has an effect (e.g. a non-empty cart, an active order, a signed-in user). Empty string if none.
 - effect: the observable outcome after it runs (state change, navigation, message).
 - relatedIntents: other manifest intents this naturally flows into or from (e.g. add-to-cart → checkout). Use the exact intent ids; [] if none.
 - showcaseRoute: the route intent of the ONE screen where the action's effect becomes visible (add_to_cart → cart screen; create_report → reports list). Read the handler: which screen renders the state it mutates? Omit when the effect is global/visible in place (theme color, logout) or ambiguous. This powers the "escort" UX — action first, then the app walks the user to the result — so precision matters more than coverage: a wrong screen is worse than none.
-- route description: what the screen displays and what can be done there.
+- route description: what the screen displays, its main labeled sections/controls, and what can be done there (screenshot/FAQ ready).
 - route actionIntents: for each screen, the intents of the actions whose handlers are actually wired into THAT screen's component/page (what the user can DO there). Use exact action intent ids; omit or [] when the screen is purely informational/navigational. This is "what you can do here" context — it never restricts the agent.
 - route bubblePrompt: a SHORT, PROACTIVE, sales-driven CTA (in the app's language, ~6 words max) the assistant shows beside the orb on THAT screen to push the user toward the single MOST VALUABLE action available there — never a passive description. For commerce/consumer screens, sell the concrete action: a menu → "¿Qué pizza te apetece?", a cart → "¿Finalizar tu compra?", a room listing → "¿Reservamos tu habitación?". For internal/business software, push the key operational action: a reports screen → "¿Creamos el informe?", a staff list → "¿Filtramos por equipo?". Make it distinct per screen and grounded in what the user does there; it is end-user copy with a vendor's instinct, not a description. Omit when nothing natural fits.
 - appType/appFlow: the app category and its main end-to-end flow.
