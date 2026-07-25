@@ -62,6 +62,7 @@ const {
   insertImportBlock,
   insertRegisterBlock,
   deriveBridgeAnchor,
+  hasRegisterFiodosBridgeImport,
 } = require('./wireHandlers');
 
 const SESSION_BASENAME = 'session.generated';
@@ -452,7 +453,13 @@ function planSessionComponentEdit(appRoot, plan) {
     methods.push(`  ${JSON.stringify(BRIDGE_CAPABILITIES)}: () => ({ ${entries} }),`);
   }
 
-  const importLines = [`import { registerFiodosBridge } from '${b.importPathToBridge}';`];
+  // After stripSessionBlocks (applied just before insert), keep any BRIDGE/
+  // SCREEN import of registerFiodosBridge — never redeclare it.
+  const afterOwnStrip = stripSessionBlocks(content);
+  const importLines = [];
+  if (!hasRegisterFiodosBridgeImport(afterOwnStrip)) {
+    importLines.push(`import { registerFiodosBridge } from '${b.importPathToBridge}';`);
+  }
   for (const imp of b.imports || []) importLines.push(importLine(imp, true));
 
   const registerCall =
@@ -469,7 +476,9 @@ function planSessionComponentEdit(appRoot, plan) {
     file: b.file,
     anchor: b.anchor,
     scope: b.scope,
-    importBlock: `${SESSION_EDIT_START}\n${INJECT_ESLINT_DISABLE}\n${importLines.join('\n')}\n${INJECT_ESLINT_ENABLE}\n${SESSION_EDIT_END}`,
+    importBlock: importLines.length
+      ? `${SESSION_EDIT_START}\n${INJECT_ESLINT_DISABLE}\n${importLines.join('\n')}\n${INJECT_ESLINT_ENABLE}\n${SESSION_EDIT_END}`
+      : '',
     registerBlock: registerBlock
       .split('\n')
       .map((l) => (l ? indent + l : l))
@@ -496,7 +505,7 @@ function applySessionComponentEdit(appRoot, edit) {
   const abs = path.join(appRoot, normRel(edit.file));
   const original = fs.readFileSync(abs, 'utf8');
   let next = stripSessionBlocks(original);
-  next = insertImportBlock(next, edit.importBlock);
+  if (edit.importBlock) next = insertImportBlock(next, edit.importBlock);
   next = insertRegisterBlock(next, edit.file, edit.anchor, edit.registerBlock, edit.scope);
   // Last-line defense: never leave a component that does not even PARSE. The
   // full build check (when available) still runs after this.

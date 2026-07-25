@@ -411,6 +411,22 @@ function installDom(jsdomMod, { storageKeys = [], kind } = {}) {
 // ── Public dispatch ──────────────────────────────────────────────────────────
 
 /**
+ * Promise.race against a timeout that is ALWAYS cleared when either side
+ * settles. Leaving the timer pending would keep Node's event loop alive and
+ * hang the CLI after analysis finishes (no shell prompt until the watchdog
+ * fires — up to `ms` per probe).
+ */
+function raceWithTimeout(promise, ms, onTimeout) {
+  let timer;
+  const timeout = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(onTimeout()), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
+
+/**
  * Verify component-local effect by rendering. `framework` selects the engine.
  * `sources` are the project's source files (for storage-key detection, etc.).
  */
@@ -424,10 +440,12 @@ async function probeComponentEffect(appRoot, entry, opts = {}) {
   const storageKeys = detectStorageKeys(opts.sources);
   const ctx = { fyodosDirRel: opts.fyodosDirRel || 'src/fyodos', framework, kind, params, storageKeys, sensitive: opts.sensitive || entry.requireConfirmation };
 
-  const withTimeout = (p) => Promise.race([
-    p,
-    new Promise((resolve) => setTimeout(() => resolve({ status: 'unverifiable', detail: 'the test render exceeded the time limit (possible loop/timer in the component); real effect not automatically verifiable — test by hand' }), opts.timeoutMs || 25000)),
-  ]);
+  const withTimeout = (p) =>
+    raceWithTimeout(p, opts.timeoutMs || 25000, () => ({
+      status: 'unverifiable',
+      detail:
+        'the test render exceeded the time limit (possible loop/timer in the component); real effect not automatically verifiable — test by hand',
+    }));
 
   if (framework.includes('react')) return withTimeout(probeReactEffect(appRoot, entry, ctx));
   if (framework.includes('vue')) return withTimeout(require('./renderProbeVue').probeVueEffect(appRoot, entry, ctx));
@@ -437,4 +455,4 @@ async function probeComponentEffect(appRoot, entry, opts = {}) {
   return { status: 'unverifiable', detail: `framework '${framework}' has no render-probe; real effect not automatically verifiable` };
 }
 
-module.exports = { probeComponentEffect, actionKind, decide, SENTINEL, SEED_ID, installDom, pickComponent, detectStorageKeys, probeParams, captureSnapshot, short, loadEsbuild, loadJsdom, reqFrom, emptyAssetsPlugin, captureConsole, isVerboseProbe, installProbeTeardownGuard, isProbeTeardownError };
+module.exports = { probeComponentEffect, raceWithTimeout, actionKind, decide, SENTINEL, SEED_ID, installDom, pickComponent, detectStorageKeys, probeParams, captureSnapshot, short, loadEsbuild, loadJsdom, reqFrom, emptyAssetsPlugin, captureConsole, isVerboseProbe, installProbeTeardownGuard, isProbeTeardownError };

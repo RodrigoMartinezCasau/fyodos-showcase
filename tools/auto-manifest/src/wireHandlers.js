@@ -1261,9 +1261,15 @@ function planComponentEdits(appRoot, plan, opts = {}) {
       return `  ${JSON.stringify(e.bridge.method)}: (${param}) => (${inv}),`;
     });
 
-    // Imports: registerFiodosBridge + any extra the invokes need (deduped).
+    // Imports: registerFiodosBridge (once per file across BRIDGE/SCREEN/SESSION)
+    // + any extra the invokes need (deduped). Check AFTER stripping our own
+    // BRIDGE markers — a re-run would otherwise see the import we're about to
+    // remove and skip re-adding it, leaving the file without the import.
     const importPathToBridge = entries[0].bridge.importPathToBridge;
-    const importLines = [`import { registerFiodosBridge } from '${importPathToBridge}';`];
+    const importLines = [];
+    if (!hasRegisterFiodosBridgeImport(stripFiodosBlocks(content))) {
+      importLines.push(`import { registerFiodosBridge } from '${importPathToBridge}';`);
+    }
     const seen = new Set();
     for (const e of entries) {
       for (const imp of e.bridge.imports || []) {
@@ -1294,7 +1300,11 @@ function planComponentEdits(appRoot, plan, opts = {}) {
       file,
       anchor,
       scope: classField ? 'class-field' : 'statement',
-      importBlock: `${EDIT_START}\n${INJECT_ESLINT_DISABLE}\n${importLines.join('\n')}\n${INJECT_ESLINT_ENABLE}\n${EDIT_END}`,
+      // Empty when registerFiodosBridge was already imported by SCREEN/SESSION —
+      // applyComponentEdits skips insertImportBlock in that case.
+      importBlock: importLines.length
+        ? `${EDIT_START}\n${INJECT_ESLINT_DISABLE}\n${importLines.join('\n')}\n${INJECT_ESLINT_ENABLE}\n${EDIT_END}`
+        : '',
       registerBlock: registerBlock.split('\n').map((l) => (l ? indent + l : l)).join('\n'),
       intents: entries.map((e) => e.intent),
     });
@@ -1486,19 +1496,49 @@ function sweepStaleGeneratedBlocks(appRoot, files, editedFiles) {
   return backups;
 }
 
+/**
+ * True when `idx` falls inside a `// FYODOS:<TAG>:START` … `// FYODOS:<TAG>:END`
+ * region (BRIDGE / SCREEN / SESSION / …). Imports that live inside those
+ * markers are NOT host imports — inserting after them nests a second Fiodos
+ * block inside the first and can redeclare `registerFiodosBridge` (the
+ * owner-admin install compile break).
+ */
+function isInsideFiodosMarkedBlock(content, idx) {
+  const re = /\/\/\s*FYODOS:([A-Za-z0-9_]+):START[^\n]*\n[\s\S]*?\/\/\s*FYODOS:\1:END/g;
+  let m;
+  while ((m = re.exec(content))) {
+    if (idx >= m.index && idx < m.index + m[0].length) return true;
+  }
+  return false;
+}
+
+/** True when the file already imports `registerFiodosBridge` (any Fiodos pass). */
+function hasRegisterFiodosBridgeImport(content) {
+  return /(?:^|\n)[ \t]*import\s*\{[^}]*\bregisterFiodosBridge\b[^}]*\}\s*from\s*['"][^'"]+['"]/.test(
+    String(content || ''),
+  );
+}
+
 /** Insert an import block right after the file's last top-level import statement.
  *  Matches the WHOLE statement through its module string — a per-line regex put
  *  the block INSIDE multi-line imports (`import {\n  a,\n} from 'x';`), corrupting
  *  the file (TS1003 "Identifier expected") and failing the wiring of every action
  *  in that file. `[^'"]*` cannot skip a quote, so the match always stops at the
- *  first quoted module specifier, then runs to that line's end. */
+ *  first quoted module specifier, then runs to that line's end.
+ *
+ *  Imports that sit inside FYODOS:* marker blocks are skipped so a later pass
+ *  (screen/session after handlers) never nests its import block inside BRIDGE. */
 function insertImportBlock(content, importBlock) {
+  if (!importBlock || !String(importBlock).trim()) return content;
   const importLineRe = /^[ \t]*import\b[^'"]*['"][^'"]+['"][^\n]*\n/gm;
   let lastEnd = -1;
   let m;
-  while ((m = importLineRe.exec(content))) lastEnd = m.index + m[0].length;
+  while ((m = importLineRe.exec(content))) {
+    if (isInsideFiodosMarkedBlock(content, m.index)) continue;
+    lastEnd = m.index + m[0].length;
+  }
   if (lastEnd === -1) {
-    // No imports (rare). Put it after a leading <script ...> tag if present.
+    // No host imports (rare). Put it after a leading <script ...> tag if present.
     const scriptM = content.match(/<script\b[^>]*>\s*\n/);
     if (scriptM) {
       const at = scriptM.index + scriptM[0].length;
@@ -1654,7 +1694,7 @@ function applyComponentEdits(appRoot, edits) {
     backups.push({ file: edit.file, abs, original });
 
     let next = stripFiodosBlocks(original);
-    next = insertImportBlock(next, edit.importBlock);
+    if (edit.importBlock) next = insertImportBlock(next, edit.importBlock);
     next = insertRegisterBlock(next, edit.file, edit.anchor, edit.registerBlock, edit.scope);
     fs.writeFileSync(abs, next);
     edited.push(edit.file);
@@ -2375,4 +2415,6 @@ module.exports = {
   insertImportBlock,
   insertRegisterBlock,
   braceDepthAt,
+  isInsideFiodosMarkedBlock,
+  hasRegisterFiodosBridgeImport,
 };

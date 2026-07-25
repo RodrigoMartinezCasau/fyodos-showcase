@@ -231,7 +231,10 @@ ROUTES: every storefront page a customer can navigate to:
 - UNIVERSAL pages (every Shopify store has them — always include): home "/", all products "/collections/all", search "/search", cart "/cart". Also always include a BACK route ("route": "BACK").
 - REAL collections: one route per shoppable collection in the snapshot, "route": "/collections/<handle>" with the EXACT handle from the snapshot. These are the store's aisles — describe each by the products it actually contains.
 - REAL content pages: "/pages/<handle>" (about, contact, shipping, FAQ…) and blogs "/blogs/<handle>", ONLY when the handle appears in the snapshot or the theme.
-- NEVER invent a handle: every non-universal route must be backed by an exact handle visible in the provided files. Do NOT create one route per product (stores have thousands; products are reached through search_products). Skip account/login pages and checkout (checkout is an action, not a route).
+- NEVER invent a handle: every non-universal route must be backed by an exact handle visible in the provided files. Do NOT create one route per product (stores have thousands; products are reached through search_products). Skip pure account/login/register pages and checkout (checkout is an action, not a route). EXCEPTION — ORDER TRACKING: DO include pages whose handle/title is clearly track-order / seguimiento / mis pedidos / order status / tracking, and DO include account order-history destinations when they appear as real storefront URLs (e.g. /account/orders).
+
+ORDER TRACKING / MY ORDERS (HIGH PRIORITY — shoppers ask this constantly):
+Scan menus, pages and third-party widgets for order status / track order / "seguimiento de pedido" / "mis pedidos" / AfterShip / Parcel Panel / similar. Include grounded surfaces as ROUTES (in-store pages) or LINK actions only when EXTERNAL and not already a route. MANUAL on each: description = how the shopper checks order/shipping status; preconditions = guest credentials that surface needs (order number + email/phone, etc.) or that sign-in is required; examples must include "dónde está mi pedido", "track my order", "estado de mi envío". Never invent an Admin API order lookup — navigate/guide to the real track surface. Missing a clearly grounded track-order page is a FAILED analysis.
 
 ACTIONS: what a customer can do by voice. Two kinds:
 (1) API actions (kind "function" WITH an "execution" block): the universal Shopify commerce set. ALWAYS include exactly these six, with EXACTLY these intent ids, handler names and execution templates (they are platform-guaranteed on every Shopify store); personalize ONLY their descriptions/examples to this store's catalog and language:
@@ -248,7 +251,7 @@ ACTIONS: what a customer can do by voice. Two kinds:
   - NEVER emit a link action whose navTarget is the same path as a route (/cart, /pages/…, /collections/…, /search, /). Those are Screens, not Actions.
 CRITICAL RULES:
 - The six API actions above are the MINIMUM commerce FLOOR (always present). Extra actions must be REAL Ajax/function capabilities or true external link CTAs — never a second copy of a screen.
-- Do NOT invent extra Ajax/API actions that need customer accounts, order history, discounts or admin credentials.
+- Do NOT invent Ajax/API actions that need Admin credentials, discount codes, or a private order-history API the theme cannot call. Public ORDER TRACKING surfaces grounded in the theme ARE required when present.
 - Everything on a storefront is PUBLIC: never set requiresAuth, audience or requiredCapabilities. policies.allowedWithoutAuth must list EVERY intent id.
 - go_checkout is the only action with requireConfirmation true; cart operations are reversible and must NOT ask for confirmation.
 
@@ -471,13 +474,15 @@ function coverageAuditSystemPrompt(platform) {
       'WHAT GETS MISSED (hunt these in the theme):\n' +
       '- mailto:, tel:, WhatsApp/wa.me and other contact hrefs\n' +
       '- Social profile URLs (one action per network)\n' +
-      '- /policies/…, privacy, terms, shipping, refunds\n' +
-      '- Newsletter/subscribe URLs, locale/language switchers\n' +
-      '- Contact/about/FAQ/blog CTAs, PDF downloads, booking links, public track-order pages\n\n' +
+      '- /policies/… URLs that are NOT already listed as routes\n' +
+      '- Locale / language switcher URLs (e.g. /en)\n' +
+      '- PDF downloads, external booking links\n' +
+      '- ORDER TRACKING: track-order / seguimiento / mis pedidos pages; external AfterShip/carrier track URLs; account/orders destinations when present\n\n' +
       'HARD RULES:\n' +
       '- Output ONLY capabilities NOT already in the provided list (judge by MEANING).\n' +
       '- Prefer kind "link" with navTarget = EXACT href from the theme. Do NOT invent new Ajax commerce intents.\n' +
-      '- Do NOT propose customer-account, order-history, discount-code or admin actions.\n' +
+      '- NEVER propose a link action that duplicates a route path — those belong only in Screens.\n' +
+      '- Do NOT invent Admin order-lookup, discount-code or private account APIs. Grounded public track-order surfaces ARE in scope.\n' +
       '- Ground every candidate in a file + symbol (the href). NEVER invent hrefs.\n' +
       '- Same JSON shapes for action + evidence as the main analysis. wiring may be {}.\n\n' +
       `${wiringGuide('shopify')}\n\n` +

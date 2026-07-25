@@ -60,6 +60,7 @@ const {
   insertImportBlock,
   insertRegisterBlock,
   deriveBridgeAnchor,
+  hasRegisterFiodosBridgeImport,
 } = require('./wireHandlers');
 
 const SCREEN_BASENAME = 'screen.generated';
@@ -292,7 +293,13 @@ function planScreenComponentEdit(appRoot, plan) {
   const getter = `((p) => () => ({ value: (${b.screenInvoke}), path: p }))(${pathExpr})`;
   const methods = [`  ${JSON.stringify(BRIDGE_SCREEN)}: ${getter},`];
 
-  const importLines = [`import { registerFiodosBridge } from '${b.importPathToBridge}';`];
+  // After stripScreenBlocks (applied just before insert), keep any BRIDGE/
+  // SESSION import of registerFiodosBridge — never redeclare it.
+  const afterOwnStrip = stripScreenBlocks(content);
+  const importLines = [];
+  if (!hasRegisterFiodosBridgeImport(afterOwnStrip)) {
+    importLines.push(`import { registerFiodosBridge } from '${b.importPathToBridge}';`);
+  }
   for (const imp of b.imports || []) importLines.push(importLine(imp, true));
 
   const registerCall =
@@ -309,7 +316,9 @@ function planScreenComponentEdit(appRoot, plan) {
     file: b.file,
     anchor: b.anchor,
     scope: b.scope,
-    importBlock: `${SCREEN_EDIT_START}\n${INJECT_ESLINT_DISABLE}\n${importLines.join('\n')}\n${INJECT_ESLINT_ENABLE}\n${SCREEN_EDIT_END}`,
+    importBlock: importLines.length
+      ? `${SCREEN_EDIT_START}\n${INJECT_ESLINT_DISABLE}\n${importLines.join('\n')}\n${INJECT_ESLINT_ENABLE}\n${SCREEN_EDIT_END}`
+      : '',
     registerBlock: registerBlock
       .split('\n')
       .map((l) => (l ? indent + l : l))
@@ -336,7 +345,7 @@ function applyScreenComponentEdit(appRoot, edit) {
   const abs = path.join(appRoot, normRel(edit.file));
   const original = fs.readFileSync(abs, 'utf8');
   let next = stripScreenBlocks(original);
-  next = insertImportBlock(next, edit.importBlock);
+  if (edit.importBlock) next = insertImportBlock(next, edit.importBlock);
   next = insertRegisterBlock(next, edit.file, edit.anchor, edit.registerBlock, edit.scope);
   if (!parsesOk(next, edit.file)) {
     throw new Error(`the screen registration would break '${edit.file}' (parse check failed)`);

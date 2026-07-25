@@ -2483,8 +2483,15 @@ async function verifyOrbCanFetch({ apiKey, apiUrl }) {
 module.exports = { pruneUnwiredActions, actionsDetailFromHandlerResult };
 
 if (require.main === module) {
-  main().catch((e) => {
-    console.error(e);
-    process.exit(1);
-  });
+  main()
+    .then(() => {
+      // Force-exit after a successful run. Analysis can leave keep-alive HTTP
+      // sockets (fetch) or other handles that keep the event loop open after the
+      // last user-facing message — without this the shell prompt never returns.
+      process.exit(typeof process.exitCode === 'number' ? process.exitCode : 0);
+    })
+    .catch((e) => {
+      console.error(e);
+      process.exit(1);
+    });
 }
