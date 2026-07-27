@@ -595,7 +595,7 @@ async function main() {
       );
     if (usedModel) model = usedModel;
     analysisToken = token || null;
-    const proposed = parsed.manifest || {};
+    let proposed = parsed.manifest || {};
     evidence = parsed.evidence || {};
     wiring = parsed.wiring || {};
     sessionWiring = parsed.session || null;

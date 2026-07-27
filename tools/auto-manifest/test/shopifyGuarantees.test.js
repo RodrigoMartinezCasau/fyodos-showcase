@@ -57,7 +57,14 @@ test('enforce injects canonical executions and preserves prose', () => {
     method: 'POST',
     url: '{baseUrl}/cart/add.js',
     headers: { 'Content-Type': 'application/json' },
-    body: { id: '{variantId}', quantity: '{quantity}' },
+    body: {
+      id: '{variantId}',
+      quantity: '{quantity}',
+      sections: 'cart-drawer,template--cart',
+    },
+    resolve: [
+      { param: 'variantId', url: '{baseUrl}/products/{handle}.js', path: 'variants.0.id' },
+    ],
   });
   assert.strictEqual(add.label, 'Añadir al carrito');
   assert.strictEqual(add.parameters.variantId.description, 'ID de la VARIANTE');
@@ -66,7 +73,11 @@ test('enforce injects canonical executions and preserves prose', () => {
   // context actually feeds the agent.
   const upd = manifest.actions.find((a) => a.intent === 'update_cart_item');
   assert.deepStrictEqual(Object.keys(upd.parameters).sort(), ['quantity', 'variantId']);
-  assert.deepStrictEqual(upd.execution.body, { id: '{variantId}', quantity: '{quantity}' });
+  assert.deepStrictEqual(upd.execution.body, {
+    id: '{variantId}',
+    quantity: '{quantity}',
+    sections: 'cart-drawer,template--cart',
+  });
 
   // Link actions and repeated runs: untouched / idempotent.
   const checkout = manifest.actions.find((a) => a.intent === 'go_checkout');
