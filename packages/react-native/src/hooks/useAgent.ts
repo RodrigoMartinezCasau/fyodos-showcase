@@ -46,6 +46,7 @@ import {
   stripWakePhrase,
   trimChainStepData,
   defaultWakePhrasesForLocale,
+  findSignInAction,
   type AgentAction,
   type AgentScreenContext,
   type AgentTurnResult,
@@ -216,7 +217,9 @@ export function useAgent({
     getTtsVoice,
   } = runtime;
   // Device capability flags advertised on each turn (never user data).
+  // Only when the manifest has a real email+password login action.
   const platformCapabilities = useCallback(() => {
+    if (!findSignInAction(config.manifest.actions ?? [])) return undefined;
     let autofill = false;
     try {
       autofill = config.credentialAutofill?.isSupported() === true;
@@ -224,7 +227,7 @@ export function useAgent({
       autofill = false;
     }
     return autofill ? { credentialAutofill: true } : undefined;
-  }, [config.credentialAutofill]);
+  }, [config.credentialAutofill, config.manifest.actions]);
 
   // Live session verdict for audience filtering (never user data). Fresh per
   // turn so login/logout mid-session is honest; undefined when the host wired
