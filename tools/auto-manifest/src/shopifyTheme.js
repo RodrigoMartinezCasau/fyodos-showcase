@@ -25,9 +25,19 @@ const fs = require('fs');
 const path = require('path');
 
 /** CDN URL of the self-contained embed bundle (global `Fiodos`). Keep in sync
- *  with dashboard/src/lib/shopifyInstall.ts. */
-const FIODOS_EMBED_CDN_URL =
-  'https://unpkg.com/@fiodos/web-core@latest/dist/embed/fiodos-embed.js';
+ *  with dashboard/src/lib/shopifyInstall.ts and shopify_theme_install.py. */
+const FIODOS_EMBED_CDN_DEFAULT_TAG = 'latest';
+
+function embedCdnUrl(sdkVersion) {
+  const raw = String(sdkVersion || FIODOS_EMBED_CDN_DEFAULT_TAG).trim();
+  const tag =
+    /^(?:latest|\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)$/.test(raw) && !raw.includes('..')
+      ? raw
+      : FIODOS_EMBED_CDN_DEFAULT_TAG;
+  return `https://unpkg.com/@fiodos/web-core@${tag}/dist/embed/fiodos-embed.js`;
+}
+
+const FIODOS_EMBED_CDN_URL = embedCdnUrl(FIODOS_EMBED_CDN_DEFAULT_TAG);
 
 const ORB_START = '<!-- FYODOS:ORB:START (Fiodos agent — safe to remove) -->';
 const ORB_END = '<!-- FYODOS:ORB:END -->';
@@ -548,7 +558,7 @@ function shopifyViewportPublishWiringLines() {
  * collection, search and cart pages) so the agent knows the visible items and
  * their variant ids (what add_to_cart / update_cart_item need by voice).
  */
-function buildShopifySnippet({ apiKey, apiUrl, mcpConnectorUrl = '' }) {
+function buildShopifySnippet({ apiKey, apiUrl, mcpConnectorUrl = '', sdkVersion = '' } = {}) {
   const key = apiKey || '<your-api-key>';
   const url = String(apiUrl || '').replace(/\/$/, '');
   // Agent-to-agent discovery (static): when the project's external channel is
@@ -556,12 +566,13 @@ function buildShopifySnippet({ apiKey, apiUrl, mcpConnectorUrl = '' }) {
   // non-JS crawlers/agents find it. The SDK also injects/removes the same tag
   // at runtime following the dashboard toggle, so a later enable still works.
   const discovery = String(mcpConnectorUrl || '').trim();
+  const cdn = embedCdnUrl(sdkVersion);
   return [
     ORB_START,
     ...(discovery
       ? [`<link rel="mcp-server" href="${discovery}" data-fyodos-mcp>`]
       : []),
-    `<script src="${FIODOS_EMBED_CDN_URL}" defer></script>`,
+    `<script src="${cdn}" defer></script>`,
     '<script>',
     ...shopifyScreenContextLiquidLines(),
     ...shopifyVariantMapLiquidLines(),
@@ -724,6 +735,7 @@ module.exports = {
   fetchStorefrontSnapshot,
   shopifyScreenContextLiquidLines,
   buildShopifySnippet,
+  embedCdnUrl,
   fetchMcpConnectorUrl,
   wireShopifyTheme,
   reportShopifyWire,
