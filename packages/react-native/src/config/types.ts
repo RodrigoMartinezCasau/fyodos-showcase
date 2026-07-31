@@ -48,7 +48,9 @@ export interface AgentTimings {
 }
 
 export const DEFAULT_AGENT_TIMINGS: AgentTimings = {
-  thinkingWatchdogMs: 20_000,
+  // Must outlive the backend client's per-turn HTTP budget (45s): the watchdog
+  // unsticks a wedged client, it is not a latency budget.
+  thinkingWatchdogMs: 60_000,
   maxListeningSeconds: 60,
   confirmationVoiceWindowMs: 8_000,
   confirmationTranscriptGraceMs: 3_000,

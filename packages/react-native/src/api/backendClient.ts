@@ -2,8 +2,9 @@
  * HTTP client for the Fiodos backend — implements AgentBackendClient.
  *
  * Hardening preserved from production:
- * - Turn timeout 15 s (measured real range 3.4–10.8 s; 10 s gave false
- *   timeouts). The orchestrator's 20 s watchdog stays the final safety net.
+ * - Turn timeout 45 s, matching the backend's own LLM budget plus in-band TTS
+ *   (15 s still cut off slow turns and reported them as a network fault).
+ *   The orchestrator's 60 s watchdog stays the final safety net behind it.
  * - A voice turn is NEVER auto-retried: each attempt triggers another LLM+TTS
  *   generation the user is no longer waiting for. Retries only apply to
  *   idempotent helper calls (TTS preview).
@@ -37,7 +38,12 @@ export interface FiodosBackendClientOptions {
   ttsTimeoutMs?: number;
 }
 
-const DEFAULT_TURN_TIMEOUT_MS = 15_000;
+/**
+ * Per-turn HTTP budget. MUST NOT be shorter than the backend's own LLM budget
+ * (backend/llm.py `_REQUEST_TIMEOUT_SECONDS = 45`) plus in-band TTS: a tighter
+ * cap aborts turns the server is still working on and blames the network.
+ */
+export const DEFAULT_TURN_TIMEOUT_MS = 45_000;
 const DEFAULT_TTS_TIMEOUT_MS = 12_000;
 
 interface FetchInit {

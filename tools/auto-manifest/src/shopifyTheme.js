@@ -340,14 +340,31 @@ async function fetchStorefrontSnapshot(storeRaw, { log = () => {} } = {}) {
         title: p.title,
         productType: p.product_type,
         vendor: p.vendor,
-        tags: p.tags,
+        tags: Array.isArray(p.tags)
+          ? p.tags.map((t) => String(t).trim()).filter(Boolean).slice(0, 40)
+          : String(p.tags || '').split(',').map((t) => t.trim()).filter(Boolean).slice(0, 40),
+        // How the store classifies it ("Sabor: Naranja, Limón"). Shoppers ask
+        // by these words, and dropping them left the catalog unable to tell
+        // that a flavour range even existed. Mirrors _product_options in
+        // backend/integrations/shopify_snapshot.py — change both together.
+        options: (p.options || [])
+          .map((o) => ({
+            name: String(o.name || '').trim(),
+            values: (o.values || []).map((v) => String(v).trim()).filter(Boolean).slice(0, 25),
+          }))
+          .filter(
+            (o) =>
+              o.name &&
+              o.values.length &&
+              !(o.name.toLowerCase() === 'title' && o.values.join().toLowerCase() === 'default title'),
+          ),
         description: stripHtml(p.body_html).slice(0, 200),
         priceRange: (() => {
           const prices = (p.variants || []).map((v) => Number(v.price)).filter((n) => !Number.isNaN(n));
           if (!prices.length) return undefined;
           return { min: Math.min(...prices), max: Math.max(...prices) };
         })(),
-        variantSample: (p.variants || []).slice(0, 3).map((v) => ({ id: v.id, title: v.title, price: v.price })),
+        variantSample: (p.variants || []).slice(0, 12).map((v) => ({ id: v.id, title: v.title, price: v.price })),
       }));
     } catch (e) {
       warnings.push(`products.json: ${e.message}`);
@@ -392,7 +409,7 @@ function shopifyScreenContextLiquidLines() {
     "  {% if product %}",
     // Rich PDP context: opinions/details must use title, price, description —
     // not claim "no details". Related-product viewport scrape must NOT replace this.
-    '  {% capture fyodos_screen_text %}The customer is viewing the product page of: {{ product.title }} (handle {{ product.handle }}, price {{ product.price | money | strip_html }}). Selected option: {{ product.selected_or_first_available_variant.title }}. Add-to-cart variantId: {{ product.selected_or_first_available_variant.id }}.{% if product.type != blank %} Type: {{ product.type }}.{% endif %} Description: {{ product.description | strip_html | truncate: 500 }}. This IS the on-screen product — when asked for an opinion or details, answer from this text (title, price, description, options). Never say you lack product details when this block is present. To add it, call add_to_cart with that variantId.{% endcapture %}',
+    '  {% capture fyodos_screen_text %}The customer is viewing the product page of: {{ product.title }} (handle {{ product.handle }}, price {{ product.price | money | strip_html }}). Selected option: {{ product.selected_or_first_available_variant.title }}. Add-to-cart variantId: {{ product.selected_or_first_available_variant.id }}.{% if product.type != blank %} Type: {{ product.type }}.{% endif %} Description: {{ product.description | strip_html | truncate: 2400 }}. This IS the on-screen product — when asked for an opinion, for details, or HOW TO USE it (dosage, quantities, ingredients, sizes, materials, care, compatibility), answer from this text (title, price, description, options). Never say you lack product details when this block is present. To add it, call add_to_cart with that variantId.{% endcapture %}',
     "  window.__fyodosScreen = { kind: 'product', text: {{ fyodos_screen_text | json }} };",
     "  {% elsif template contains 'collection' and collection %}",
     '  {% capture fyodos_screen_text %}The customer is browsing the collection "{{ collection.title }}". Products visible on screen (title — price — add-to-cart variantId): {% for fyodos_p in collection.products limit: 16 %}{{ fyodos_p.title }} — {{ fyodos_p.price | money | strip_html }} — variantId {{ fyodos_p.selected_or_first_available_variant.id }}; {% endfor %}To add one to the cart, call add_to_cart with its variantId from this list.{% endcapture %}',
