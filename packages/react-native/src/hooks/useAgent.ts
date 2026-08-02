@@ -40,6 +40,7 @@ import {
   formatMessage,
   persistConversationSession,
   prepareConversationForTurn,
+  recordAssistantPrompt,
   recordConversationChainReply,
   recordConversationExchange,
   restoreConversationSession,
@@ -153,6 +154,16 @@ export interface UseAgentResult {
    * also play TTS. Confirmations in silent mode are tap-only (modal).
    */
   submitTextTurn: (text: string, options?: { speak?: boolean }) => Promise<void>;
+  /**
+   * Declares the question the orb is showing the user right now without having
+   * been asked — the thought bubble's CTA once the panel puts it on screen.
+   *
+   * Someone who reads "¿Quieres ir a los más vendidos?" and taps back "sí" is
+   * holding a conversation, so the question travels with that "sí" as the orb's
+   * own last turn and the model decides whether the message answers it or opens
+   * a new subject. Pass `null` when it leaves the screen unanswered.
+   */
+  notePanelPrompt: (prompt: string | null) => void;
   /** Current exchange (user message + agent reply) for the text bubble UI. */
   lastExchange: AgentExchange | null;
   /** Paged window of recent user+reply pairs while session memory is active. */
@@ -342,6 +353,8 @@ export function useAgent({
   const consentEntryRef = useRef<ConsentEntry | null>(null);
   /** In-memory session conversation (bounded window + summary for token cost). */
   const conversationRef = useRef(createConversationSession());
+  /** Question the orb is showing on screen, awaiting the user's next message. */
+  const panelPromptRef = useRef<string | null>(null);
   // Idle retention from the dashboard, kept in a ref so async turn flows always
   // read the latest published value (undefined = 30-minute default).
   const conversationOptionsRef = useRef<ReturnType<typeof conversationRetentionOptions>>(undefined);
@@ -562,6 +575,19 @@ export function useAgent({
       // Identity gate: if the host user changed since the last turn (login,
       // logout, account switch), swap conversations BEFORE recording anything.
       syncConversationIdentity();
+
+      // The orb asked something on screen (the thought-bubble CTA the panel is
+      // showing) and this message may be the reply to it. Spent here: from now
+      // on it lives in the conversation like any other thing we said.
+      if (panelPromptRef.current) {
+        recordAssistantPrompt(
+          conversationRef.current,
+          panelPromptRef.current,
+          Date.now(),
+          conversationOptionsRef.current,
+        );
+        panelPromptRef.current = null;
+      }
 
       setPhaseSafe('thinking');
       abortRef.current?.abort();
@@ -2063,6 +2089,10 @@ export function useAgent({
     setExchangeWindowSize(BUBBLE_PAGE_EXCHANGES);
   }, []);
 
+  const notePanelPrompt = useCallback((prompt: string | null) => {
+    panelPromptRef.current = String(prompt ?? '').trim() || null;
+  }, []);
+
   return {
     phase,
     isListening,
@@ -2073,6 +2103,7 @@ export function useAgent({
     voiceAvailable: voice.isRecognitionAvailable(),
     toggleListening,
     submitTextTurn,
+    notePanelPrompt,
     lastExchange,
     recentExchanges,
     hasOlderExchanges,

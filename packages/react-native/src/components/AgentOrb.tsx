@@ -152,6 +152,7 @@ export function AgentOrb({
     cancelPendingAction,
     wakeWordListening,
     voiceAvailable,
+    notePanelPrompt,
   } = useAgent({ enabled, conversationRetentionMinutes, voiceOutputEnabled });
 
   const [textOpen, setTextOpen] = useState(false);
@@ -167,6 +168,12 @@ export function AgentOrb({
   useEffect(() => {
     if (showThinking) setPanelGreeting(null);
   }, [showThinking]);
+  // Ephemeral on screen is not meaningless: someone who reads "¿Quieres ir a
+  // los más vendidos?" and answers "sí" is replying to it, so the question
+  // travels with that reply as the orb's own last turn.
+  useEffect(() => {
+    notePanelPrompt(panelGreeting);
+  }, [notePanelPrompt, panelGreeting]);
   // Mic denied/unavailable: tapping still puts the orb in the "active" visual
   // and reveals the keyboard chip — text is always available (Change 1).
   const [micFallbackActive, setMicFallbackActive] = useState(false);
