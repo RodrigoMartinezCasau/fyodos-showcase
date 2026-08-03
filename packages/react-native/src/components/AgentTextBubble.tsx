@@ -233,19 +233,29 @@ export function AgentTextBubble({
                 key={`${index}-${ex.userText}`}
                 style={[styles.exchangeBlock, index < exchanges.length - 1 ? styles.exchangeBlockGap : null]}
               >
-                <Text
-                  style={[
-                    styles.userText,
-                    { color: t.bodyColor },
-                    // First row shares the line with the overlaid × — keep clear of it.
-                    index === 0 ? styles.userTextFirst : null,
-                  ]}
-                  selectable
-                >
-                  {ex.userText}
-                </Text>
+                {/* No user line = the orb spoke first (thought bubble). */}
+                {ex.userText ? (
+                  <Text
+                    style={[
+                      styles.userText,
+                      { color: t.bodyColor },
+                      // First row shares the line with the overlaid × — keep clear of it.
+                      index === 0 ? styles.userTextFirst : null,
+                    ]}
+                    selectable
+                  >
+                    {ex.userText}
+                  </Text>
+                ) : null}
                 {ex.replyText ? (
-                  <Text style={[styles.replyText, { color: t.titleColor }]} selectable>
+                  <Text
+                    style={[
+                      styles.replyText,
+                      { color: t.titleColor },
+                      index === 0 && !ex.userText ? styles.userTextFirst : null,
+                    ]}
+                    selectable
+                  >
                     {ex.replyText}
                   </Text>
                 ) : null}
