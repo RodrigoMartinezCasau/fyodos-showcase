@@ -153,12 +153,13 @@ function positionalArgs() {
   return out;
 }
 
-function fyodosTermColors() {
-  const on = Boolean(process.stderr.isTTY);
+function fyodosTermColors(tty = Boolean(process.stderr.isTTY)) {
+  const on = Boolean(tty);
   return {
     blue: on ? '\x1b[38;5;75m' : '',
     cyan: on ? '\x1b[38;5;117m' : '',
     dim: on ? '\x1b[2m' : '',
+    red: on ? '\x1b[38;5;203m' : '',
     reset: on ? '\x1b[0m' : '',
   };
 }
@@ -176,6 +177,34 @@ function logDev(...args) {
 function logUser(line) {
   const { blue, cyan, reset } = fyodosTermColors();
   console.log(`${cyan}◉${reset} ${blue}Fiodos${reset} · ${line}`);
+}
+
+/**
+ * What the terminal shows when the developer cancels the run.
+ *
+ * The tty echoes "^C" wherever the cursor happens to be, which glues a control
+ * character to the live spinner row ("Analyzing your project… 4s^C"). That row
+ * is ours (the spinner refreshes it in place), so we erase it and say who
+ * stopped the run, in the same branded shape as every other Fiodos line.
+ */
+function cancelNoticeLine({ tty = Boolean(process.stderr.isTTY) } = {}) {
+  const { blue, cyan, red, reset } = fyodosTermColors(tty);
+  const eraseEchoedControlChar = tty ? '\r\x1b[K' : '';
+  return (
+    `${eraseEchoedControlChar}${cyan}◉${reset} ${blue}Fiodos${reset} · ` +
+    `${red}You stopped this process from running.${reset}\n`
+  );
+}
+
+let cancelNoticeShown = false;
+
+/** Print the cancellation notice once and leave with the SIGINT exit code. */
+function cancelRun() {
+  if (cancelNoticeShown) return; // a second Ctrl-C must not stack the message
+  cancelNoticeShown = true;
+  process.stderr.write(cancelNoticeLine());
+  // 128 + SIGINT(2): scripts and CI still tell a cancellation from a failure.
+  process.exit(130);
 }
 
 /** Human-readable pointer to the per-run change registry written in the repo. */
@@ -197,6 +226,12 @@ function askProceed() {
     }
     const { blue, cyan, reset } = fyodosTermColors();
     const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+    // In terminal mode readline swallows Ctrl-C (it never reaches the process
+    // handler), so the prompt must report the cancellation itself.
+    rl.on('SIGINT', () => {
+      rl.close();
+      cancelRun();
+    });
     rl.question(
       `${cyan}◉${reset} ${blue}Fiodos${reset} · Analyze and publish this project? (yes/no) `,
       (answer) => {
@@ -2480,9 +2515,10 @@ async function verifyOrbCanFetch({ apiKey, apiUrl }) {
 
 // Exported for unit tests (the pure manifest-pruning helper). Requiring this
 // module for tests does NOT run the CLI thanks to the require.main guard.
-module.exports = { pruneUnwiredActions, actionsDetailFromHandlerResult };
+module.exports = { pruneUnwiredActions, actionsDetailFromHandlerResult, cancelNoticeLine };
 
 if (require.main === module) {
+  process.on('SIGINT', cancelRun);
   main()
     .then(() => {
       // Force-exit after a successful run. Analysis can leave keep-alive HTTP
