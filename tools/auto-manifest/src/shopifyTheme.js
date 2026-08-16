@@ -66,7 +66,11 @@ const SHOPIFY_GUARANTEED_ACTIONS = {
     execution: {
       kind: 'http',
       method: 'GET',
-      url: '{baseUrl}/search/suggest.json?q={query}&resources[type]=product&resources[limit]=8',
+      // Reach is deliberate and platform-constant (mirrored in the backend's
+      // clients/shopify_guarantees.py): predictive search ignores product
+      // descriptions unless `body` is requested, and returns no articles
+      // unless they are named.
+      url: '{baseUrl}/search/suggest.json?q={query}&resources[type]=product,page,article&resources[options][fields]=title,product_type,variants.title,vendor,tag,body&resources[limit]=10',
     },
   },
   get_product_details: {

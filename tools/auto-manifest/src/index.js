@@ -905,6 +905,23 @@ async function main() {
 
   const publishing = process.argv.includes('--publish');
 
+  // ── 5b. What each screen SAYS ─────────────────────────────────────────────
+  // The manifest is what the site can DO. Without its copy the agent can route
+  // to a section and still not know a word of what is written on it, which is
+  // how a specific ask lands on an approximate shelf. Shopify stores publish
+  // their content through an API and are read server-side, so they skip this.
+  let contentUnits = [];
+  if (platform !== 'shopify') {
+    try {
+      const { harvestContentUnits } = require('./harvestContent');
+      contentUnits = harvestContentUnits({ files: included, manifest, evidence });
+      logDev(`[content] ${contentUnits.length} screen(s) with readable copy`);
+    } catch (e) {
+      // Content is an improvement on top of a manifest; never a reason to fail.
+      logDev(`[content] skipped: ${e.message}`);
+    }
+  }
+
   // Repair tickets: cross-check the AI's claimed outcomes against the FINAL
   // verified manifest (a "resolved" claim whose intent did not survive
   // verification downgrades to blocked). The backend re-verifies on publish
@@ -1209,7 +1226,7 @@ async function main() {
         pruneAndReport();
         publishMeta.actionsIncluded = manifest.actions.length;
         publishMeta.routesIncluded = manifest.routes.length;
-        await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true });
+        await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true, contentUnits });
       });
       logUser('Published to your project');
     } else {
@@ -1278,7 +1295,7 @@ async function main() {
     let orbWireResult = null;
 
     await withSpinner('Publishing to your project', async ({ setLabel, pause, resume }) => {
-      await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true });
+      await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true, contentUnits });
       if (!noWire && !process.argv.includes('--no-orb-wire')) {
         setLabel(orbMountSpinnerLabel(platform));
         // Static agent-to-agent discovery tag (best-effort): present only when
@@ -1372,7 +1389,7 @@ async function main() {
     let sessionWireResult = null;
 
     await withSpinner('Publishing to your project', async ({ setLabel, pause, resume }) => {
-      await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true });
+      await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true, contentUnits });
       if (!noWire && !process.argv.includes('--no-orb-wire')) {
         setLabel(orbMountSpinnerLabel(platform));
         orbWireResult = wireReactNativeOrb(analysisRoot, {
@@ -1494,7 +1511,7 @@ async function main() {
     let envWriteResult = null;
 
     await withSpinner('Publishing to your project', async ({ setLabel, pause, resume }) => {
-      await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true });
+      await publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true, contentUnits });
       if (!noWire && !process.argv.includes('--no-orb-wire')) {
         setLabel(orbMountSpinnerLabel(platform));
         orbWireResult = wireFlutterOrb(analysisRoot, { colors: fyodosTermColors(), noWire });
@@ -1565,7 +1582,7 @@ async function main() {
     // JS/Dart entrypoint to wire here, so we only publish the manifest.
     loadAppEnv(analysisRoot);
     await withSpinner('Publishing to your project', () =>
-      publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true }),
+      publishManifest(manifest, publishMeta, analysisToken, { skipSuccessLog: true, contentUnits }),
     );
     logUser('Published to your project');
   }
@@ -2104,16 +2121,25 @@ async function publishManifest(manifest, meta, analysisToken = null, opts = {}) 
     );
     process.exit(1);
   }
-  logDev(`[publish] POST ${apiUrl}/v1/developer/manifest (manifest + metadata only — no source code)`);
+  const units = opts.contentUnits || [];
+  logDev(
+    `[publish] POST ${apiUrl}/v1/developer/manifest (manifest + metadata` +
+    `${units.length ? ` + the published copy of ${units.length} screen(s)` : ''} — no source code)`,
+  );
   logDev(`[publish] project API key: ${apiKey.slice(0, 12)}…`);
   // In proxy mode, forward the signed analysis token so the backend knows the
   // quota was already consumed at the analyze step (no double count). Stripped
   // server-side before the meta is persisted.
   const payloadMeta = analysisToken ? { ...meta, analysisToken } : meta;
+  const payload = { manifest, meta: payloadMeta };
+  // What each screen SAYS, so the agent can answer about the site's own words
+  // and not only route to its sections. Only sent when there is something to
+  // send: an empty list would be a claim that the site says nothing.
+  if (units.length) payload.contentUnits = units;
   const res = await fetch(`${apiUrl}/v1/developer/manifest`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-    body: JSON.stringify({ manifest, meta: payloadMeta }),
+    body: JSON.stringify(payload),
   });
   if (!res.ok) {
     if (res.status === 429) {
