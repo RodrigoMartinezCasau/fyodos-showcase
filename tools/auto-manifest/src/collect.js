@@ -83,6 +83,29 @@ function tierFor(rel, platform) {
   return tierForApp(p);
 }
 
+/** NAVIGATION / URL-MAP files: where the app declares which screens exist and
+ *  at WHICH path each one lives (route tables, routers, navigators, and the
+ *  shell/sidebar that maps a nav entry to a screen). These are guaranteed into
+ *  the analysis (see collectFiles). Rationale (dashboard audit, 16/08/2026):
+ *  `screenRoutes.ts` is 4KB and holds the literal truth of every URL, yet it
+ *  ranked as a generic lib module and lost the budget race — so the analyzer
+ *  guessed paths (invented `/dashboard/asistente`, `/dashboard/ajustes`) and
+ *  emitted no route, hence no bubblePrompt, for a section added later. Cheapest
+ *  evidence in the repo per byte: never let the budget drop it. */
+function isNavigationMapFile(rel) {
+  const p = rel.replace(/\\/g, '/');
+  const file = p.split('/').pop() || '';
+  const code = /\.(ts|tsx|js|jsx|mjs|vue|svelte|dart|kt|swift)$/i.test(file);
+  if (!code) return false;
+  // By name: screenRoutes.ts, routes.dart, app-routing.module.ts, appRouter.tsx,
+  // RootNavigator.tsx, sitemap.ts, linking.ts, DashboardShell.tsx, Sidebar.tsx…
+  if (/(routes?|router|routing|navigator|navigation|sitemap|linking|shell|sidebar|navbar|tabbar)[^/]*$/i.test(file.replace(/\.[^.]+$/, ''))) {
+    return true;
+  }
+  // By location: the entry module of a router/navigation folder (router/index.ts).
+  return /(^|\/)(router|routers|routes|navigation)\/(index|main|app)\.[^/]+$/i.test(p);
+}
+
 /** Central-state files: the providers/stores/contexts that DEFINE the setters
  *  which turn screen controls into wireable actions (patchWorkspace, saveAll,
  *  switchProject…). These are guaranteed into the analysis (see collectFiles):
@@ -118,6 +141,8 @@ function isConfigTypesFile(rel) {
 }
 
 function tierForApp(p) {
+  // The URL map ranks with the screens: without it every path is a guess.
+  if (isNavigationMapFile(p)) return 0;
   if (/^(src\/)?app\//.test(p)) return 0; // expo-router / Next screens
   // `sections/` and `panels/` are SCREEN BODIES in shell-based apps (a Shell
   // page switches between section components): they carry the visible controls
@@ -200,12 +225,36 @@ function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' }
   // central-state files in first, capped per file (a pathological monster
   // provider can't consume everything) and capped in total (never starve
   // screens completely), letting any overflow fall back to normal tiering.
+  const mustSet = new Set();
+
+  // GUARANTEED NAVIGATION / URL MAP (first of all). Ranking these with the
+  // screens is not enough: on a repo whose screens alone exceed the whole
+  // budget, a 24KB shell still loses the fill and the analyzer is left guessing
+  // paths — the audited cause of invented routes and of a section that got no
+  // route and therefore no bubble. Capped per file and in total so a monster
+  // router cannot eat the prompt (overflow falls back to normal tiering).
+  const NAV_PER_FILE_CAP = 0.12 * budgetChars;
+  const NAV_TOTAL_CAP = 0.15 * budgetChars;
+  if (platform !== 'shopify') {
+    const navMap = files
+      .filter((f) => isNavigationMapFile(f.rel) && f.chars <= NAV_PER_FILE_CAP)
+      .sort((a, b) => a.chars - b.chars); // small first: fit as many as possible
+    for (const f of navMap) {
+      if (used + f.chars > NAV_TOTAL_CAP) continue;
+      included.push(f);
+      used += f.chars;
+      mustSet.add(f.rel);
+    }
+  }
+
   const PER_FILE_CAP = 0.4 * budgetChars;
   const TOTAL_STATE_CAP = 0.55 * budgetChars;
-  const mustSet = new Set();
   const centralState = files
     .filter(
-      (f) => (isCentralStateFile(f.rel) || isConfigTypesFile(f.rel)) && f.chars <= PER_FILE_CAP,
+      (f) =>
+        !mustSet.has(f.rel) &&
+        (isCentralStateFile(f.rel) || isConfigTypesFile(f.rel)) &&
+        f.chars <= PER_FILE_CAP,
     )
     // Central state first, then config/types; small first so as many fit as possible.
     .sort((a, b) => {
@@ -275,6 +324,39 @@ function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' }
   };
 }
 
+/**
+ * MULTI-PASS SWEEP: split the files that did NOT fit the main prompt into
+ * chunks, each of which fits the same budget on its own.
+ *
+ * Why this exists: on a repo several times the context window, the first prompt
+ * carries ~20% of the code and the rest was never read by ANY call — whole
+ * screens and their actions simply did not exist for the analyzer. Chunks are
+ * emitted in tier order so the most valuable code is swept FIRST: if a cost cap
+ * stops the sweep early, what we did pay for is what mattered most.
+ *
+ * A single file larger than the whole budget is dropped: it cannot fit any
+ * prompt, and sending it alone (truncated) would teach the model a lie.
+ */
+function chunkFilesForSweep(files, maxInputTokens) {
+  const budgetChars = maxInputTokens * CHARS_PER_TOKEN;
+  const ordered = [...files].sort((a, b) => a.tier - b.tier || a.rel.localeCompare(b.rel));
+  const chunks = [];
+  let current = [];
+  let used = 0;
+  for (const f of ordered) {
+    if (f.chars > budgetChars) continue;
+    if (used + f.chars > budgetChars) {
+      if (current.length) chunks.push(current);
+      current = [];
+      used = 0;
+    }
+    current.push(f);
+    used += f.chars;
+  }
+  if (current.length) chunks.push(current);
+  return chunks;
+}
+
 /** Files the COVERAGE AUDIT (second pass) re-reads to find missed actions:
  *  central state + config/types (the setters and the field enumerations) plus
  *  the control-surface components (settings/studio/panels) where those setters
@@ -286,7 +368,7 @@ function isAuditRelevantFile(rel, platform) {
     if (p.includes('_fyodos/storefront/')) return true;
     return /\.(liquid|json)$/i.test(file);
   }
-  if (isCentralStateFile(rel) || isConfigTypesFile(rel)) return true;
+  if (isCentralStateFile(rel) || isConfigTypesFile(rel) || isNavigationMapFile(rel)) return true;
   // Primary screens with CTAs — not only settings panels.
   if (/(page|screen|view|layout|nav|header|footer|sidebar|menu|form|modal|dialog|drawer)[^/]*\.(tsx?|jsx?|vue|svelte)$/i.test(file)) {
     return true;
@@ -294,4 +376,12 @@ function isAuditRelevantFile(rel, platform) {
   return /(settings?|preferences?|profile|account|security|totp|2fa|team|members?|invit\w*|audit|switcher|advanced|section|panel|studio|config|cart|checkout|product|catalog|todo|list)[^/]*\.(tsx?|jsx?|vue|svelte|dart|kt|swift)$/i.test(file);
 }
 
-module.exports = { collectFiles, isCentralStateFile, isConfigTypesFile, isAuditRelevantFile };
+module.exports = {
+  collectFiles,
+  chunkFilesForSweep,
+  CHARS_PER_TOKEN,
+  isCentralStateFile,
+  isConfigTypesFile,
+  isNavigationMapFile,
+  isAuditRelevantFile,
+};

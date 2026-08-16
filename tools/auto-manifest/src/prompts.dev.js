@@ -530,6 +530,41 @@ function coverageAuditSystemPrompt(platform) {
   );
 }
 
+/**
+ * MULTI-PASS SWEEP — mirror of coverage_sweep_system_prompt (backend wins).
+ * A chunk of files no earlier pass has seen: unlike the audit it may contain
+ * whole SCREENS, so it proposes routes (with bubblePrompt) as well as actions.
+ */
+function coverageSweepSystemPrompt(platform) {
+  const shopify =
+    platform === 'shopify'
+      ? 'This is a Shopify theme: prefer kind "link" actions with navTarget = the EXACT href from the Liquid, and never duplicate a path that is already a route.\n\n'
+      : '';
+  return (
+    'You are COMPLETING a Fiodos analysis of an app that is too large to read in one pass. You receive (1) the screens and actions the previous passes ALREADY produced and (2) a CHUNK of source files that NO previous pass has seen. Report only what THIS chunk proves is missing.\n\n' +
+    'WHAT TO LOOK FOR IN THE CHUNK:\n' +
+    '- SCREENS the manifest does not have yet: a component that is a whole page/section/panel the user can be on. Give its real path exactly as the app\'s routing declares it — if the chunk does not prove the path, put the screen in "uncertain" instead of guessing a URL.\n' +
+    '- ACTIONS: every user-meaningful control in the chunk (create/submit, search/filter, update/toggle each field, delete, share/export, contact/legal/social links), grounded in a real function or href.\n\n' +
+    'HARD RULES:\n' +
+    '- NEVER repeat a screen or capability the previous passes already have (judge by MEANING, not by id) and NEVER rename theirs.\n' +
+    '- Every route and action MUST be grounded in the chunk you were given, with the same evidence and wiring rules as the main analysis. Inventing a path or a handler is worse than reporting nothing.\n' +
+    '- A screen you add MUST carry its bubblePrompt (the orb\'s proactive line on that screen) in the app\'s language. A screen with no bubble is an incomplete screen.\n' +
+    '- If the chunk is only plumbing (types, styles, tests, generated code), return empty lists. Silence is a valid, honest answer.\n\n' +
+    shopify +
+    `${wiringGuide(platform)}\n\n` +
+    'Answer ONLY valid JSON (no markdown, no prose). Start with { and end with }:\n' +
+    '{\n' +
+    '  "routes": [ { ...AppManifest route per the schema, WITH bubblePrompt... } ],\n' +
+    '  "actions": [ { ...AppManifest action per the schema... } ],\n' +
+    '  "evidence": { "routes": {"<intent>": {"file": "...", "symbol": "..."}}, "actions": {"<intent>": {"file": "...", "symbol": "...", "whatItDoes": "..."}} },\n' +
+    '  "wiring": { "<intent>": { ...one wiring entry per the schema... } },\n' +
+    '  "uncertain": ["<what this chunk suggested but could not ground>"]\n' +
+    '}\n' +
+    'If this chunk adds nothing, return {"routes": [], "actions": []}.\n\n' +
+    `Manifest schema:\n${manifestSchemaDoc()}`
+  );
+}
+
 /** System prompt for the agent-to-agent guardian personality step (summary-only). */
 function guardianSystemPrompt() {
   return (
@@ -551,6 +586,7 @@ module.exports = {
   userSpecSystemRule,
   correctionSystemPrompt,
   coverageAuditSystemPrompt,
+  coverageSweepSystemPrompt,
   guardianSystemPrompt,
   PLATFORM_GUIDES,
 };

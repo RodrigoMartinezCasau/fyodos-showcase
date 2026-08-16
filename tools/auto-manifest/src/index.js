@@ -90,10 +90,11 @@ const { loadEnv, loadAppEnv } = require('./loadEnv');
 loadEnv();
 
 const { scanRoutes } = require('./routes');
-const { collectFiles, isAuditRelevantFile } = require('./collect');
+const { collectFiles, chunkFilesForSweep, isAuditRelevantFile } = require('./collect');
 const { resolveAnalysisRoot } = require('./resolveAnalysisRoot');
-const { analyzeWithAI, correctActionWiring, coverageAudit, generateGuardianWithAI, DEFAULT_MODEL, resolveModel } = require('./aiAnalyze');
+const { analyzeWithAI, correctActionWiring, coverageAudit, coverageSweep, generateGuardianWithAI, DEFAULT_MODEL, resolveModel } = require('./aiAnalyze');
 const { verifyManifest } = require('./verify');
+const { mergeSweepResults } = require('./mergeSweep');
 const { ensureContactFiodosAction } = require('./fiodosGuarantees');
 const {
   wireWebOrb, reportWireResult, connectOrbRegistries, reportRegistriesResult,
@@ -162,6 +163,19 @@ function fyodosTermColors(tty = Boolean(process.stderr.isTTY)) {
     red: on ? '\x1b[38;5;203m' : '',
     reset: on ? '\x1b[0m' : '',
   };
+}
+
+/**
+ * Read back a file the collector listed as omitted (it only keeps paths and
+ * sizes, so the multi-pass sweep has to load the content itself). Returns '' on
+ * any read error: a file that vanished or is unreadable is simply not swept.
+ */
+function readOmittedFile(root, rel) {
+  try {
+    return fs.readFileSync(path.join(root, rel), 'utf8');
+  } catch {
+    return '';
+  }
 }
 
 /** Internal diagnostics (tokens, cost, paths…) — only with --verbose. */
@@ -424,7 +438,11 @@ async function main() {
   // (resolved below from the analysis-quota pre-check) > DEFAULT_MODEL fallback.
   const explicitModel = arg('--model', '');
   let model = resolveModel(explicitModel || DEFAULT_MODEL);
-  const maxInputTokens = Number(arg('--max-input-tokens', '150000'));
+  // Input budget precedence: explicit --max-input-tokens (operator override) >
+  // the budget the backend derives from the model's context window (see 1b) >
+  // this conservative offline default.
+  const explicitMaxInputTokens = arg('--max-input-tokens', '');
+  let maxInputTokens = Number(explicitMaxInputTokens || '150000');
   // Optional, untrusted developer specifications that FOCUS the analysis (which
   // sub-project to target, what to emphasize/ignore). From --spec or the
   // FYODOS_ANALYSIS_SPEC env (so the express script / CI can pass it too).
@@ -475,6 +493,32 @@ async function main() {
   const appMeta = readAppMeta(analysisRoot);
   logDev(`[static] platform=${platform} routes=${routes.length}` +
     (platform === 'web' ? ' (web: routes inferred by AI, not statically verified)' : ''));
+
+  // ── 1b. Input budget from the REAL model ──────────────────────────────────
+  // How much source code may travel is a property of the model the backend will
+  // run — its context window minus the output it has to write — not a constant.
+  // The fixed 150k left part of Claude's window unused (so the analysis read
+  // less code than it could) and would overflow a narrower model. Ask before
+  // collecting; --max-input-tokens still wins and --no-llm never goes online.
+  const ownAiKey = process.argv.includes('--own-ai-key');
+  let quota = null;
+  if (useLLM && !ownAiKey) {
+    loadAppEnv(analysisRoot);
+    const target = resolveApiTarget();
+    if (target.apiKey) {
+      quota = await fetchAnalysisQuota(target);
+      if (quota && quota.allowed === false) {
+        printQuotaBlocked(quota);
+        return;
+      }
+      if (!explicitModel && quota && quota.model) model = resolveModel(quota.model);
+      const serverBudget = Number(quota && quota.maxInputTokens);
+      if (!explicitMaxInputTokens && serverBudget > 0) {
+        maxInputTokens = serverBudget;
+        logDev(`[budget] ${maxInputTokens} input tokens (context window of ${model})`);
+      }
+    }
+  }
 
   // ── 2. Collect source files (rule-based, budget-aware) ────────────────────
   const { included, omitted, estimatedTokens } = collectFiles(analysisRoot, { maxInputTokens, platform });
@@ -531,6 +575,9 @@ async function main() {
   let provenance;
   let evidence = {};
   let wiring = {};
+  // Files read by the multi-pass sweep (see 3b-bis): they did not fit the first
+  // prompt, so verification and wiring must still be allowed to cite them.
+  const sweptFiles = [];
   // The AI's "session" block: WHERE the app's auth/session state lives, so the
   // orb's isAuthenticated/getUserId are wired automatically (no manual step).
   let sessionWiring = null;
@@ -591,7 +638,8 @@ async function main() {
     // plan's (possibly cheaper) model. The quota is only a hard gate in proxy
     // mode, where Fiodos pays for the AI.
     if (apiKey) {
-      const quota = await fetchAnalysisQuota({ apiKey, apiUrl });
+      // Reuses the pre-check from step 1b when it already ran (one call per run).
+      if (!quota) quota = await fetchAnalysisQuota({ apiKey, apiUrl });
       if (useProxy && quota && quota.allowed === false) {
         printQuotaBlocked(quota);
         return;
@@ -660,6 +708,73 @@ async function main() {
       const repairedIntents = enforceShopifyGuaranteedExecutions(proposed);
       if (repairedIntents.length) {
         logDev(`[shopify] canonical execution enforced on: ${repairedIntents.join(', ')}`);
+      }
+    }
+
+    // ── 3b-bis. MULTI-PASS SWEEP over the code the budget left out ───────────
+    // A repo can be several times the model's context window: the first prompt
+    // carries the highest-value files and, until now, everything else was read
+    // by NOBODY — whole screens (and their actions) simply did not exist for the
+    // analysis, which is how a section added after the first analysis ended up
+    // with no route and no bubble. Sweep the omitted files in budget-sized
+    // chunks, most valuable first, and merge only what each chunk PROVES.
+    // Bounded by a pass cap, and fail-open: a pass that errors (cost budget,
+    // network) stops the sweep and keeps what earlier passes already found.
+    const MAX_SWEEP_PASSES = Math.max(0, Number(process.env.FYODOS_SWEEP_PASSES ?? 6));
+    if (omitted.length && MAX_SWEEP_PASSES > 0 && !process.argv.includes('--no-sweep')) {
+      // 80% of the budget per chunk: the sweep prompt also carries the schema
+      // and the already-found lists, and the provider rejects the whole call if
+      // input + reserved output crosses the window.
+      const chunks = chunkFilesForSweep(
+        omitted.map((o) => ({
+          ...o,
+          content: readOmittedFile(analysisRoot, o.rel),
+        })).filter((f) => f.content),
+        Math.round(maxInputTokens * 0.8),
+      ).slice(0, MAX_SWEEP_PASSES);
+      proposed.routes = proposed.routes || [];
+      proposed.actions = proposed.actions || [];
+      let sweptRoutes = 0;
+      let sweptActions = 0;
+      let sweepCostUSD = 0;
+      for (let pass = 1; pass <= chunks.length; pass += 1) {
+        const chunk = chunks[pass - 1];
+        let sweep;
+        try {
+          // eslint-disable-next-line no-await-in-loop
+          sweep = await withSpinner(
+            `Reading the rest of your project (part ${pass}/${chunks.length})`,
+            () => coverageSweep({
+              detectedRoutes: proposed.routes.map((r) => ({
+                intent: r.intent, route: r.route, label: r.label,
+              })),
+              detectedActions: proposed.actions.map((a) => ({
+                intent: a.intent, handler: a.handler, description: a.description,
+              })),
+              files: chunk, model, platform, useProxy, apiKey, apiUrl,
+            }),
+          );
+        } catch (e) {
+          logDev(`[sweep] pass ${pass} stopped the sweep: ${e.message}`);
+          break;
+        }
+        sweepCostUSD += sweep.costUSD || 0;
+        // The chunk was really read, so verification and wiring may cite it.
+        sweptFiles.push(...chunk);
+        const merged = mergeSweepResults({ proposed, evidence, wiring, sweep });
+        sweptRoutes += merged.routes;
+        sweptActions += merged.actions;
+        logDev(`[sweep] pass ${pass}/${chunks.length}: files=${chunk.length} ` +
+          `+${merged.routes} route(s), +${merged.actions} action(s) kept, ` +
+          `${merged.skipped.length} already known (cost $${(sweep.costUSD || 0).toFixed(4)})`);
+      }
+      logDev(`[sweep] read ${sweptFiles.length} extra file(s) over ${chunks.length} pass(es) ` +
+        `(cost $${sweepCostUSD.toFixed(4)})`);
+      if (sweptRoutes || sweptActions) {
+        logUser(
+          `Read ${sweptFiles.length} more file(s) the first pass could not fit: ` +
+          `${sweptRoutes} new screen(s), ${sweptActions} new action(s)`,
+        );
       }
     }
 
@@ -750,7 +865,7 @@ async function main() {
     // AI-proposed and flagged unverified in provenance.
     // Platform guarantee BEFORE verify: contact_fiodos is SDK-native (internal orbs only).
     proposed = ensureContactFiodosAction(proposed, { orbProfile });
-    ({ manifest, provenance } = verifyManifest(proposed, evidence, included, routes, { verifyRoutes, platform, appRoot: analysisRoot }));
+    ({ manifest, provenance } = verifyManifest(proposed, evidence, included.concat(sweptFiles), routes, { verifyRoutes, platform, appRoot: analysisRoot }));
     manifest = ensureContactFiodosAction(manifest, { orbProfile });
     ensureBackRoute(manifest, provenance);
 
@@ -821,10 +936,23 @@ async function main() {
     fs.writeFileSync(path.join(outDir, 'evidence.json'), JSON.stringify({
       evidence, wiring, session: sessionWiring, screen: screenWiring, uncertain: parsed.uncertain || [],
     }, null, 2));
+    // Rewrite the prompt inventory now that the sweep passes have run: a file
+    // that was swept WAS read, and "what did the analysis actually see?" is the
+    // first question when a screen or action is missing.
+    fs.writeFileSync(path.join(outDir, 'files-sent.json'), JSON.stringify({
+      included: included.map((f) => f.rel),
+      swept: sweptFiles.map((f) => f.rel),
+      omitted: omitted.filter((o) => !sweptFiles.some((f) => f.rel === o.rel)),
+    }, null, 2));
     fs.writeFileSync(path.join(outDir, 'usage.json'), JSON.stringify({
       model, elapsedMs, usage,
       costUSD: Number(costUSD.toFixed(4)),
-      promptChars, filesSent: included.length, filesOmitted: omitted.length,
+      promptChars,
+      filesSent: included.length,
+      // Honest coverage: the sweep passes read part of what the first prompt had
+      // to leave out, so "omitted" means "read by nobody", not "over budget".
+      filesSwept: sweptFiles.length,
+      filesOmitted: Math.max(0, omitted.length - sweptFiles.length),
     }, null, 2));
 
     analysisMeta = {
@@ -914,7 +1042,7 @@ async function main() {
   if (platform !== 'shopify') {
     try {
       const { harvestContentUnits } = require('./harvestContent');
-      contentUnits = harvestContentUnits({ files: included, manifest, evidence });
+      contentUnits = harvestContentUnits({ files: included.concat(sweptFiles), manifest, evidence });
       logDev(`[content] ${contentUnits.length} screen(s) with readable copy`);
     } catch (e) {
       // Content is an improvement on top of a manifest; never a reason to fail.
@@ -1018,7 +1146,7 @@ async function main() {
       revertOnFailure: true,
       testRunner: runPostWireTest,
       corrector,
-      files: included,
+      files: included.concat(sweptFiles),
       maxAttempts: Number(process.env.FYODOS_WIRE_MAX_ATTEMPTS || 3),
     };
 

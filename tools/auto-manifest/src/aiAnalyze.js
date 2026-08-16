@@ -37,6 +37,7 @@ async function resolveOwnKeySystemPrompt({ task, platform, hasUserSpec, intent =
   if (LOCAL_PROMPTS) {
     if (task === 'wiring_fix') return { system: LOCAL_PROMPTS.correctionSystemPrompt(platform, intent), schemaInUser: false };
     if (task === 'coverage_audit') return { system: LOCAL_PROMPTS.coverageAuditSystemPrompt(platform), schemaInUser: false };
+    if (task === 'coverage_sweep') return { system: LOCAL_PROMPTS.coverageSweepSystemPrompt(platform), schemaInUser: false };
     if (task === 'guardian') return { system: LOCAL_PROMPTS.guardianSystemPrompt(), schemaInUser: false };
     return { system: LOCAL_PROMPTS.buildSystemPrompt(platform, hasUserSpec ? 'x' : ''), schemaInUser: true };
   }
@@ -638,6 +639,61 @@ async function coverageAudit({
   };
 }
 
+/**
+ * MULTI-PASS SWEEP: understand ONE chunk of files that never fit the first
+ * prompt. Unlike the coverage audit (same files, second look), this is code the
+ * analysis has not seen at all, so it can return whole SCREENS as well as
+ * actions. Everything it proposes goes through the normal verification.
+ *
+ * @returns {Promise<{routes: object[], actions: object[], evidence: object, wiring: object, usage: object, costUSD: number}>}
+ */
+async function coverageSweep({
+  detectedRoutes = [], detectedActions = [], files = [], model = DEFAULT_MODEL, platform = 'web',
+  useProxy = false, apiKey = '', apiUrl = '',
+}) {
+  const resolved = resolveModel(model);
+  const routeList = detectedRoutes
+    .map((r) => `- ${r.intent}  (${r.route || '-'})  ${r.label || ''}`.trim())
+    .join('\n');
+  const actionList = detectedActions
+    .map((a) => `- ${a.intent}  (handler: ${a.handler || '-'})  ${a.description || ''}`.trim())
+    .join('\n');
+  const codeBlob = files
+    .map((f) => `===== FILE: ${f.rel} =====\n${f.content}`)
+    .join('\n\n');
+  const user =
+    `SCREENS ALREADY IN THE MANIFEST (do NOT repeat or rename these):\n${routeList || '(none)'}\n\n` +
+    `ACTIONS ALREADY IN THE MANIFEST (do NOT repeat these capabilities):\n${actionList || '(none)'}\n\n` +
+    `SOURCE CHUNK NOT SEEN BY ANY PREVIOUS PASS:\n\n${codeBlob}`;
+
+  let parsed;
+  let usage;
+  if (useProxy) {
+    ({ parsed, usage } = await analyzeViaProxy({
+      apiKey, apiUrl, model: resolved, user, task: 'coverage_sweep', platform,
+    }));
+  } else {
+    const sp = await resolveOwnKeySystemPrompt({
+      task: 'coverage_sweep', platform, hasUserSpec: false, apiKey, apiUrl,
+    });
+    ({ parsed, usage } = isAnthropicModel(resolved)
+      ? await completeAnthropic({ model: resolved, system: sp.system, user })
+      : await completeOpenAI({ model: resolved, system: sp.system, user }));
+  }
+  const price = PRICES[resolved] || { input: 0, output: 0 };
+  const costUSD =
+    ((usage.prompt_tokens || 0) / 1e6) * price.input +
+    ((usage.completion_tokens || 0) / 1e6) * price.output;
+  return {
+    routes: Array.isArray(parsed && parsed.routes) ? parsed.routes : [],
+    actions: Array.isArray(parsed && parsed.actions) ? parsed.actions : [],
+    evidence: (parsed && parsed.evidence) || {},
+    wiring: (parsed && parsed.wiring) || {},
+    usage,
+    costUSD,
+  };
+}
+
 // ── Agent-to-agent GUARDIAN generation (Phase B) ─────────────────────────────
 // Enrich the auto-generated "guardian/defense personality" for the external-agent
 // channel with a CHEAP LLM pass. NON-NEGOTIABLE PRIVACY: it works ONLY on the
@@ -695,6 +751,7 @@ module.exports = {
   analyzeWithAI,
   correctActionWiring,
   coverageAudit,
+  coverageSweep,
   generateGuardianWithAI,
   DEFAULT_MODEL,
   PRICES,
