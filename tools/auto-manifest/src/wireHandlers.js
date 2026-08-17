@@ -2061,6 +2061,43 @@ async function runAutoCorrectionLoop(ctx) {
 }
 
 /**
+ * Handler names the registry ON DISK actually defines right now.
+ *
+ * The run's own status cannot answer "what can this app run". After a wholesale
+ * revert the registry is the one the PREVIOUS install left — restored byte for
+ * byte — and those handlers work. Reporting them as unwired is what deletes a
+ * live orb's actions in production, because the backend honours the report.
+ *
+ * Mirror of buildRegistryModule's handler block (`    name: async (`), which is
+ * the only place that shape is produced; change one, change this.
+ */
+function installedHandlerNames(registrySource) {
+  const out = new Set();
+  if (!registrySource) return out;
+  // Scope to the `handlers: { … }` object literal. Reading the whole file would
+  // also pick up the type declaration above it, which names the same keys.
+  const src = String(registrySource);
+  const open = src.indexOf('\n  handlers: {\n');
+  if (open < 0) return out;
+  const rest = src.slice(open + 1);
+  const close = rest.indexOf('\n  },');
+  const block = close < 0 ? rest : rest.slice(0, close);
+  for (const m of block.matchAll(/^ {4}([A-Za-z_$][\w$]*):\s*async\s*\(/gm)) {
+    out.add(m[1]);
+  }
+  return out;
+}
+
+/** installedHandlerNames for a registry path; empty when there is no registry. */
+function installedHandlersOnDisk(registryAbs) {
+  try {
+    return [...installedHandlerNames(fs.readFileSync(registryAbs, 'utf8'))];
+  } catch {
+    return [];
+  }
+}
+
+/**
  * Converge on the LARGEST subset of verified actions that builds, instead of
  * trading the whole batch for one bad apple.
  *
@@ -2288,7 +2325,11 @@ async function wireHandlers(appRoot, opts = {}) {
         `${tag} · See what is needed and how to do it by hand in: ${docRel}`,
       );
     }
-    return { status: 'manual-only', docPath: docAbs, autoCount: 0, manualCount: plan.manual.length, plan };
+    return {
+      status: 'manual-only', docPath: docAbs, autoCount: 0, manualCount: plan.manual.length, plan,
+      // Nothing was written this run, so any previous wiring is still live.
+      installedHandlers: installedHandlersOnDisk(registryAbs),
+    };
   }
 
   // 3) Second, separate confirmation (after the orb's), referencing the doc.
@@ -2376,6 +2417,8 @@ async function wireHandlers(appRoot, opts = {}) {
         status: 'manual-only', docPath: docAbs, autoCount: 0,
         manualCount: droppedReview.length, plan: finalPlan,
         verification: loop.attemptsLog, dropped: loop.dropped, baseline,
+        // Nothing was written this run, so any previous wiring is still live.
+        installedHandlers: installedHandlersOnDisk(registryAbs),
       };
     }
 
@@ -2399,7 +2442,11 @@ async function wireHandlers(appRoot, opts = {}) {
     } catch (err) {
       revertAll(backups, generatedFiles, { appRoot, files });
       confirmPendingEdits(ticket);
-      return { status: 'failed', docPath: docAbs, error: err, plan: finalPlan, verification: loop.attemptsLog };
+      return {
+        status: 'failed', docPath: docAbs, error: err, plan: finalPlan,
+        verification: loop.attemptsLog,
+        installedHandlers: installedHandlersOnDisk(registryAbs),
+      };
     }
 
     // Final combined build (each action passed in isolation; confirm the union).
@@ -2483,6 +2530,8 @@ async function wireHandlers(appRoot, opts = {}) {
           revertVerified: fullRevert.verified, revertProof: fullRevert.proof,
           verification: loop.attemptsLog, dropped: loop.dropped, baseline,
           builds: converged.builds,
+          // The revert put the previous install back: say what still runs.
+          installedHandlers: installedHandlersOnDisk(registryAbs),
         };
       }
 
@@ -2551,7 +2600,10 @@ async function wireHandlers(appRoot, opts = {}) {
   } catch (err) {
     revertAll(backups, generatedFiles, { appRoot, files });
     confirmPendingEdits(ticket);
-    return { status: 'failed', docPath: docAbs, error: err, plan };
+    return {
+      status: 'failed', docPath: docAbs, error: err, plan,
+      installedHandlers: installedHandlersOnDisk(registryAbs),
+    };
   }
 
   const baseResult = {
@@ -2592,6 +2644,8 @@ async function wireHandlers(appRoot, opts = {}) {
       return {
         status: 'reverted', ...baseResult, test,
         revertVerified: rolledBack.verified, revertProof: rolledBack.proof,
+        // The revert put the previous install back: say what still runs.
+        installedHandlers: installedHandlersOnDisk(registryAbs),
       };
     }
     confirmPendingEdits(ticket);
@@ -2682,6 +2736,7 @@ module.exports = {
   checkParamContract,
   revertAll,
   convergeOnBuildableSet,
+  installedHandlerNames,
   snapshotGeneratedFiles,
   generatedModuleIsReferenced,
   proveRevert,

@@ -2614,6 +2614,16 @@ function actionsDetailFromHandlerResult(manifest, handlerResult) {
   const reviewByIntent = new Map((plan.review || plan.manual || []).map((e) => [e.intent, e]));
   const verifByIntent = new Map((r.verification || []).map((v) => [v.intent, v]));
   const wholesaleFailed = r.status === 'reverted' || r.status === 'failed';
+  // When this run did NOT write the registry (a wholesale revert restored the
+  // previous install, or nothing was wireable), the honest verdict is what the
+  // registry ON DISK defines — not "nothing". Reporting "nothing" made the
+  // backend's "wired or nonexistent" invariant delete the actions of a LIVE orb
+  // whose handlers were still installed and working: a re-analysis that failed
+  // its build silently took production down. Only consulted in that case: when
+  // we just rewrote the registry the per-action verdict is authoritative (and a
+  // handler shared by a wired and a dropped intent would read as a false wired).
+  const registryUntouched = wholesaleFailed || r.status === 'manual-only';
+  const installed = new Set(registryUntouched ? r.installedHandlers || [] : []);
 
   const detail = [];
   for (const a of (manifest && manifest.actions) || []) {
@@ -2630,6 +2640,15 @@ function actionsDetailFromHandlerResult(manifest, handlerResult) {
         status: 'wired',
         ...(verif && verif.level ? { level: verif.level } : {}),
         ...(verif && verif.attempts ? { attempts: verif.attempts } : {}),
+      });
+      continue;
+    }
+    if (installed.has(a.handler || intent)) {
+      detail.push({
+        intent,
+        handler: a.handler || intent,
+        status: 'wired',
+        level: 'installed',
       });
       continue;
     }
