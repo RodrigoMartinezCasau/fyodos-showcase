@@ -128,6 +128,9 @@ function summarizeHandlers(result, appRoot) {
       editedFiles: bridgeEdits,
       wiredIntents: (result.plan?.auto || []).map((e) => e.intent),
       manualIntents: (result.plan?.manual || result.plan?.review || []).map((e) => e.intent),
+      note: result.partial && (result.degraded || []).length
+        ? `${result.degraded.length} action(s) worked alone but could not coexist with the rest, even after a correction attempt, so they were left out to keep the build green: ${result.degraded.map((d) => d.intent).join(', ')}.`
+        : undefined,
       revert:
         'Delete generated files under `src/fyodos/` (handlers.generated.*, bridge.*) and remove `FYODOS:BRIDGE` blocks from your components. See `FYODOS_HANDLERS.md`.',
     };
@@ -155,7 +158,9 @@ function summarizeHandlers(result, appRoot) {
               : result.status === 'skipped'
                 ? 'Handler wiring skipped (--no-wire).'
                 : result.status === 'reverted'
-                  ? 'Wiring was reverted because the post-install build failed.'
+                  ? result.revertVerified === false
+                    ? 'Wiring was reverted because the post-install build failed, and the project STILL does not build afterwards — inspect the files above before deploying.'
+                    : 'Wiring was reverted because the post-install build failed; the project was restored and verified with a build.'
                   : null,
   };
 }

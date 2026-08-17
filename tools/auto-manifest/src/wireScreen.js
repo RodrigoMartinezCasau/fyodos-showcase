@@ -38,6 +38,7 @@
 const fs = require('fs');
 const path = require('path');
 
+const { beginPendingEdits, confirmPendingEdits } = require('./rollbackGuard');
 const {
   fileHasSymbol,
   freeIdentifiers,
@@ -61,6 +62,8 @@ const {
   insertRegisterBlock,
   deriveBridgeAnchor,
   hasRegisterFiodosBridgeImport,
+  snapshotGeneratedFiles,
+  revertAll,
 } = require('./wireHandlers');
 
 const SCREEN_BASENAME = 'screen.generated';
@@ -449,9 +452,14 @@ async function wireScreen(appRoot, opts = {}) {
   fs.mkdirSync(fyodosDirAbs, { recursive: true });
   const screenAbs = path.join(fyodosDirAbs, `${SCREEN_BASENAME}${ext}`);
   const bridgeAbs = path.join(fyodosDirAbs, `${BRIDGE_BASENAME}${ext}`);
-  const generated = [screenAbs];
-  let backups = [];
+  // A screen module left by an EARLIER run is snapshotted, not deleted: the
+  // component restored below still imports it, so removing it would leave the
+  // project with an import pointing at nothing — invisible here, fatal on the
+  // developer's next build.
+  const { priorBackups, created: generated } = snapshotGeneratedFiles([screenAbs]);
+  let backups = [...priorBackups];
   let bridgeCreatedByUs = false;
+  let ticket = null;
 
   try {
     if (!fs.existsSync(bridgeAbs)) {
@@ -461,16 +469,11 @@ async function wireScreen(appRoot, opts = {}) {
     }
     fs.writeFileSync(screenAbs, buildScreenModule({ ts, esm }));
     const edit = planScreenComponentEdit(appRoot, plan);
-    backups = [applyScreenComponentEdit(appRoot, edit)];
+    backups.push(applyScreenComponentEdit(appRoot, edit));
+    ticket = beginPendingEdits(() => revertAll(backups, generated), 'screen wiring');
   } catch (err) {
-    for (const b of backups) fs.writeFileSync(b.abs, b.original);
-    for (const f of generated) {
-      try {
-        if (fs.existsSync(f)) fs.rmSync(f);
-      } catch {
-        /* best effort */
-      }
-    }
+    revertAll(backups, generated);
+    confirmPendingEdits(ticket);
     return { status: 'reverted', reason: err && err.message };
   }
 
@@ -486,14 +489,8 @@ async function wireScreen(appRoot, opts = {}) {
     if (after && after.ok) {
       verified = true;
     } else if (baseline && baseline.ok) {
-      for (const b of backups) fs.writeFileSync(b.abs, b.original);
-      for (const f of generated) {
-        try {
-          if (fs.existsSync(f)) fs.rmSync(f);
-        } catch {
-          /* best effort */
-        }
-      }
+      revertAll(backups, generated);
+      confirmPendingEdits(ticket);
       if (!quiet) {
         console.error(
           `${tag} · ${dim || ''}Screen wiring reverted: the app stopped compiling with it applied.${reset || ''}`,
@@ -504,6 +501,9 @@ async function wireScreen(appRoot, opts = {}) {
       verifyNote = 'the app did not compile BEFORE wiring either — applied; symbols were verified mechanically';
     }
   }
+
+  // Kept for good: an interrupt from here on must not undo verified wiring.
+  confirmPendingEdits(ticket);
 
   const docAbs = path.join(fyodosDirAbs, DOC_BASENAME);
   const screenRel = path.relative(appRoot, screenAbs).split(path.sep).join('/');

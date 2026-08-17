@@ -40,6 +40,7 @@
 const fs = require('fs');
 const path = require('path');
 
+const { beginPendingEdits, confirmPendingEdits } = require('./rollbackGuard');
 const {
   fileHasSymbol,
   freeIdentifiers,
@@ -59,6 +60,8 @@ const {
   INJECT_ESLINT_ENABLE,
   BRIDGE_BASENAME,
   buildBridgeModule,
+  snapshotGeneratedFiles,
+  revertAll,
   insertImportBlock,
   insertRegisterBlock,
   deriveBridgeAnchor,
@@ -636,9 +639,15 @@ async function wireSession(appRoot, opts = {}) {
   fs.mkdirSync(fyodosDirAbs, { recursive: true });
   const sessionAbs = path.join(fyodosDirAbs, `${SESSION_BASENAME}${ext}`);
   const bridgeAbs = path.join(fyodosDirAbs, `${BRIDGE_BASENAME}${ext}`);
-  const generated = [sessionAbs];
-  let backups = [];
+  // A session module left by an EARLIER run is snapshotted, not deleted: the
+  // layout still imports its symbols and the orb mount reads `capabilities` from
+  // it. Deleting it while restoring the files that import it would leave the
+  // project with imports pointing at nothing — it costs nothing here and breaks
+  // the developer's NEXT build, on their host.
+  const { priorBackups, created: generated } = snapshotGeneratedFiles([sessionAbs]);
+  let backups = [...priorBackups];
   let bridgeCreatedByUs = false;
+  let ticket = null;
 
   try {
     if (plan.strategy === 'bridge' && !fs.existsSync(bridgeAbs)) {
@@ -648,16 +657,11 @@ async function wireSession(appRoot, opts = {}) {
     }
     fs.writeFileSync(sessionAbs, buildSessionModule(plan, { ts, esm }));
     const edit = planSessionComponentEdit(appRoot, plan);
-    if (edit) backups = [applySessionComponentEdit(appRoot, edit)];
+    if (edit) backups.push(applySessionComponentEdit(appRoot, edit));
+    ticket = beginPendingEdits(() => revertAll(backups, generated), 'session wiring');
   } catch (err) {
-    for (const b of backups) fs.writeFileSync(b.abs, b.original);
-    for (const f of generated) {
-      try {
-        if (fs.existsSync(f)) fs.rmSync(f);
-      } catch {
-        /* best effort */
-      }
-    }
+    revertAll(backups, generated);
+    confirmPendingEdits(ticket);
     return { status: 'reverted', reason: err && err.message };
   }
 
@@ -675,14 +679,8 @@ async function wireSession(appRoot, opts = {}) {
     if (after && after.ok) {
       verified = true;
     } else if (baseline && baseline.ok) {
-      for (const b of backups) fs.writeFileSync(b.abs, b.original);
-      for (const f of generated) {
-        try {
-          if (fs.existsSync(f)) fs.rmSync(f);
-        } catch {
-          /* best effort */
-        }
-      }
+      revertAll(backups, generated);
+      confirmPendingEdits(ticket);
       if (!quiet) {
         console.error(
           `${tag} · ${dim || ''}Session wiring reverted: the app stopped compiling with it applied.${reset || ''}`,
@@ -693,6 +691,9 @@ async function wireSession(appRoot, opts = {}) {
       verifyNote = 'the app did not compile BEFORE wiring either — applied; symbols were verified mechanically';
     }
   }
+
+  // Kept for good: an interrupt from here on must not undo verified wiring.
+  confirmPendingEdits(ticket);
 
   const docAbs = path.join(fyodosDirAbs, DOC_BASENAME);
   const sessionRel = path.relative(appRoot, sessionAbs).split(path.sep).join('/');

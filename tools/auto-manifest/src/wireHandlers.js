@@ -41,6 +41,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline');
 const { probeEffect, compileRegressed, classifyErrorLines } = require('./verifyWire');
+const { beginPendingEdits, confirmPendingEdits } = require('./rollbackGuard');
 const { extractBridgeRegistrations } = require('./continuityFloor');
 const { checkBridgeMountGate } = require('./mountGate');
 
@@ -1731,8 +1732,50 @@ function attributeCulprits(entries, errorLines) {
   return culprits;
 }
 
-/** Restore files to their pre-edit content and delete generated files. */
-function revertAll(backups, generatedFiles) {
+/**
+ * Split generated-module paths into the ones that ALREADY existed (snapshotted,
+ * so a revert RESTORES them) and the ones this run creates (deleted on revert).
+ *
+ * On any re-install the developer's components still import `fyodos/bridge` and
+ * the entry file still imports the registry from the PREVIOUS run. Deleting
+ * those modules while restoring the files that import them leaves a repo state
+ * that never existed: it costs nothing locally (the CLI is already done) and
+ * fails on the developer's next build — their CI or host — long after we
+ * reported a clean skip.
+ */
+function snapshotGeneratedFiles(absPaths) {
+  const priorBackups = [];
+  const created = [];
+  for (const abs of absPaths || []) {
+    if (!abs) continue;
+    if (fs.existsSync(abs)) {
+      priorBackups.push({ file: abs, abs, original: fs.readFileSync(abs, 'utf8') });
+    } else {
+      created.push(abs);
+    }
+  }
+  return { priorBackups, created };
+}
+
+/**
+ * True when any surviving source imports `abs` by module specifier (extension
+ * optional, as bundlers write it). Modules that are themselves being deleted are
+ * not surviving sources: one that only other doomed modules import goes with them.
+ */
+function generatedModuleIsReferenced(abs, sources) {
+  const base = path.basename(abs).replace(/\.(?:[cm]?[jt]sx?)$/i, '');
+  const re = new RegExp(`['"][^'"]*[./]${esc(base)}(?:\\.[cm]?[jt]sx?)?['"]`);
+  return (sources || []).some((src) => src && re.test(src));
+}
+
+/**
+ * Restore files to their pre-edit content and delete ONLY generated modules that
+ * nothing references any more. Keeping one extra generated file is harmless;
+ * deleting one that a surviving file imports breaks the build. `opts.files` (the
+ * collected project files) are re-read from disk after the restore so imports
+ * written by an EARLIER pass — the entry file's `registries={…}` — count too.
+ */
+function revertAll(backups, generatedFiles, opts = {}) {
   for (const b of backups || []) {
     try {
       fs.writeFileSync(b.abs, b.original);
@@ -1740,13 +1783,54 @@ function revertAll(backups, generatedFiles) {
       /* best effort */
     }
   }
+
+  const doomed = new Set((generatedFiles || []).filter(Boolean).map((f) => path.resolve(f)));
+  const surviving = [];
+  for (const b of backups || []) {
+    if (!doomed.has(path.resolve(b.abs))) surviving.push(b.original);
+  }
+  const { appRoot, files } = opts;
+  if (appRoot && Array.isArray(files)) {
+    for (const f of files) {
+      const rel = f && (f.rel || f.file);
+      if (!rel) continue;
+      if (doomed.has(path.resolve(path.join(appRoot, normRel(rel))))) continue;
+      const content = readFileSafe(appRoot, rel);
+      if (content) surviving.push(content);
+    }
+  }
+
   for (const f of generatedFiles || []) {
     try {
-      if (fs.existsSync(f)) fs.rmSync(f);
+      if (!fs.existsSync(f)) continue;
+      if (generatedModuleIsReferenced(f, surviving)) continue;
+      fs.rmSync(f);
     } catch {
       /* best effort */
     }
   }
+}
+
+/**
+ * A revert is a CLAIM until a build proves it. After restoring, run the project's
+ * build once more: green means the project is genuinely back to where it started
+ * and we can report the calm "nothing changed"; red means the developer has to
+ * hear it from us, now, instead of from their deploy.
+ */
+async function proveRevert({ testRunner, appRoot, framework, quiet, tag, dim, reset }) {
+  if (typeof testRunner !== 'function') return { verified: null, proof: null };
+  if (!quiet) {
+    console.error(
+      `${tag} · ${dim || ''}Checking your project builds again after rolling the wiring back…${reset || ''}`,
+    );
+  }
+  let proof;
+  try {
+    proof = await testRunner(appRoot, { framework });
+  } catch (err) {
+    proof = { ok: false, stage: 'runner', output: err && err.message };
+  }
+  return { verified: !!(proof && (proof.ok || proof.stage === 'skipped-no-deps')), proof };
 }
 
 // ── Consent ────────────────────────────────────────────────────────────────────
@@ -1857,15 +1941,10 @@ function writeIsolated({ appRoot, fyodosDirAbs, entry, ts, esm, ext }) {
   const onePlan = { auto: [entry], review: [], manual: [], entries: [entry] };
   const registryAbs = path.join(fyodosDirAbs, `${REGISTRY_BASENAME}${ext}`);
   const bridgeAbs = path.join(fyodosDirAbs, `${BRIDGE_BASENAME}${ext}`);
-  const priorBackups = [];
-  const generated = [];
-  const snapshotOrCreate = (abs) => {
-    if (fs.existsSync(abs)) priorBackups.push({ file: abs, abs, original: fs.readFileSync(abs, 'utf8') });
-    else generated.push(abs);
-  };
-  snapshotOrCreate(registryAbs);
+  const { priorBackups, created: generated } = snapshotGeneratedFiles(
+    entry.kind === 'bridge' ? [registryAbs, bridgeAbs] : [registryAbs],
+  );
   if (entry.kind === 'bridge') {
-    snapshotOrCreate(bridgeAbs);
     fs.writeFileSync(bridgeAbs, buildBridgeModule({ ts, esm }));
   }
   fs.writeFileSync(registryAbs, buildRegistryModule(onePlan, { ts, esm }));
@@ -1916,6 +1995,12 @@ async function runAutoCorrectionLoop(ctx) {
         history.push({ attempt, stage: 'mechanical', ok: false, error: lastError });
       } else {
         const iso = writeIsolated({ appRoot, fyodosDirAbs, entry, ts, esm, ext });
+        // These edits exist only for the probe below: if the run is interrupted
+        // now, they must not survive in the developer's repo.
+        const isoTicket = beginPendingEdits(
+          () => revertAll(iso.backups, iso.generated, { appRoot, files }),
+          `wiring probe for '${intent}'`,
+        );
         let ok = true;
         let stage = 'compile';
         try {
@@ -1941,7 +2026,8 @@ async function runAutoCorrectionLoop(ctx) {
         } catch (err) {
           ok = false; lastError = `verification threw: ${err && err.message}`;
         } finally {
-          revertAll(iso.backups, iso.generated);
+          revertAll(iso.backups, iso.generated, { appRoot, files });
+          confirmPendingEdits(isoTicket);
         }
         history.push({ attempt, stage, ok, error: ok ? undefined : lastError, level: resolved && resolved.level, detail: resolved && resolved.detail });
         if (resolved) break;
@@ -1974,6 +2060,145 @@ async function runAutoCorrectionLoop(ctx) {
   return { baseline, ready, dropped, attemptsLog };
 }
 
+/**
+ * Converge on the LARGEST subset of verified actions that builds, instead of
+ * trading the whole batch for one bad apple.
+ *
+ * Every candidate here already passed on its own, so what is left is
+ * INTERFERENCE between them. Reading the error text works when it names someone
+ * (attributeCulprits), but when all the bridges live in the same component every
+ * error points at the same file and nobody can be singled out — that is the case
+ * that used to revert 60+ verified actions after the developer had already paid
+ * for the analysis that produced them. So when nobody is named we bisect: halve,
+ * build, keep what is green. Then every excluded action gets a second chance:
+ * re-admission on its own merits, and if that still breaks, an AI correction fed
+ * with the COMBINED error.
+ *
+ * Each probe is a real build, so the search is bounded by `maxBuilds`; running
+ * out never returns something red, only the best green set found so far.
+ */
+async function convergeOnBuildableSet(ctx) {
+  const {
+    appRoot, files = [], ts, esm, registryAbs, bridgeAbs,
+    candidates = [], review = [], runBuild, baselineOutput = '',
+    reviseEntry = null, maxBuilds = 24, log = () => {},
+  } = ctx;
+
+  let builds = 0;
+  let bestGreen = [];
+  const failures = new Map();
+  const spent = () => builds >= maxBuilds;
+
+  const applySet = (list) => {
+    const plan = { auto: list, review, manual: review, entries: [...list, ...review] };
+    const edits = planComponentEdits(appRoot, plan, { ts });
+    const hasBridge = list.some((e) => e.kind === 'bridge');
+    const snap = snapshotGeneratedFiles(hasBridge ? [registryAbs, bridgeAbs] : [registryAbs]);
+    const backups = [...snap.priorBackups];
+    if (hasBridge) fs.writeFileSync(bridgeAbs, buildBridgeModule({ ts, esm }));
+    fs.writeFileSync(registryAbs, buildRegistryModule(plan, { ts, esm }));
+    backups.push(...applyComponentEdits(appRoot, edits).backups);
+    backups.push(...sweepStaleGeneratedBlocks(appRoot, files, edits.map((e) => e.file)));
+    return { plan, edits, hasBridge, backups, generated: snap.created };
+  };
+
+  const verdictFor = async (applied) => {
+    const test = await runBuild();
+    builds += 1;
+    const reg = compileRegressed(
+      baselineOutput,
+      (test && test.output) || '',
+      [...applied.edits.map((e) => e.file), 'handlers.generated', 'bridge'],
+    );
+    return { ok: reg.ok, newErrors: reg.newErrors || [], test, reg };
+  };
+
+  // Apply, build, restore: a probe must leave the project exactly as it was.
+  const probe = async (list) => {
+    const applied = applySet(list);
+    const ticket = beginPendingEdits(
+      () => revertAll(applied.backups, applied.generated, { appRoot, files }),
+      'action wiring under verification',
+    );
+    const verdict = await verdictFor(applied);
+    revertAll(applied.backups, applied.generated, { appRoot, files });
+    confirmPendingEdits(ticket);
+    if (verdict.ok && list.length > bestGreen.length) bestGreen = list;
+    return verdict;
+  };
+
+  const blame = (verdict) => {
+    // Say WHY it fell: broken code the AI could not fix, or a project style rule
+    // our fence could not silence. They call for different manual follow-ups.
+    const { real, lint } = classifyErrorLines(verdict.newErrors || []);
+    const shown = (real.length ? real : verdict.newErrors || []).slice(0, 2).join(' | ').slice(0, 400);
+    const cause = !real.length && lint.length ? ' (a project style rule our fence could not silence)' : '';
+    return `wired clean on its own but broke the combined build${cause}${shown ? `: ${shown}` : ''}`;
+  };
+
+  const search = async (list) => {
+    if (!list.length || spent()) return [];
+    const verdict = await probe(list);
+    if (verdict.ok) return list;
+    if (list.length === 1) {
+      failures.set(list[0].intent, blame(verdict));
+      return [];
+    }
+    const culprits = attributeCulprits(list, verdict.newErrors);
+    if (culprits.size && culprits.size < list.length) {
+      const kept = await search(list.filter((e) => !culprits.has(e.intent)));
+      for (const e of list) if (culprits.has(e.intent)) failures.set(e.intent, blame(verdict));
+      return kept;
+    }
+    const mid = Math.ceil(list.length / 2);
+    const left = await search(list.slice(0, mid));
+    const right = await search(list.slice(mid));
+    if (!left.length) return right;
+    if (!right.length) return left;
+    // Both halves are green on their own, which says nothing about the union —
+    // this whole branch exists BECAUSE the union of everything was red.
+    const union = [...left, ...right];
+    const together = await probe(union);
+    if (together.ok) return union;
+    return left.length >= right.length ? left : right;
+  };
+
+  let set = await search(candidates);
+  if (bestGreen.length > set.length) set = bestGreen;
+
+  for (const entry of candidates.filter((c) => !set.includes(c))) {
+    if (spent()) break;
+    const asIs = await probe([...set, entry]);
+    if (asIs.ok) {
+      set = [...set, entry];
+      failures.delete(entry.intent);
+      log(`✓ '${entry.intent}' fits after all — kept.`);
+      continue;
+    }
+    failures.set(entry.intent, blame(asIs));
+    if (typeof reviseEntry !== 'function' || spent()) continue;
+    const revised = await reviseEntry({ entry, errorText: failures.get(entry.intent) });
+    if (!revised) continue;
+    const withFix = await probe([...set, revised]);
+    if (withFix.ok) {
+      set = [...set, revised];
+      failures.delete(revised.intent);
+      log(`✓ '${entry.intent}' corrected against the combined build — kept.`);
+    }
+  }
+
+  const excluded = candidates.filter((c) => !set.some((s) => s.intent === c.intent));
+  const applied = applySet(set);
+  // The winner stays on disk, so it stays PENDING until the caller decides to
+  // keep it: an interrupt during the confirming build must still undo it.
+  const ticket = beginPendingEdits(
+    () => revertAll(applied.backups, applied.generated, { appRoot, files }),
+    'action wiring',
+  );
+  const verdict = await verdictFor(applied);
+  return { set, excluded, failures, applied, ticket, test: verdict.test, reg: verdict.reg, builds };
+}
+
 // ── Public API ───────────────────────────────────────────────────────────────
 
 /**
@@ -2002,9 +2227,11 @@ async function wireHandlers(appRoot, opts = {}) {
     corrector = null,
     files = [],
     maxAttempts = 3,
+    maxBuilds = 24,
   } = opts;
   const { blue, cyan, dim, reset } = colors;
   const tag = `${cyan || ''}◉${reset || ''} ${blue || ''}Fiodos${reset || ''}`;
+  const log = quiet ? () => {} : (m) => console.error(`${tag} · ${dim || ''}${m}${reset || ''}`);
 
   if (noWire) return { status: 'skipped' };
   const actions = (manifest && manifest.actions) || [];
@@ -2152,18 +2379,26 @@ async function wireHandlers(appRoot, opts = {}) {
       };
     }
 
-    const generatedFiles = [registryAbs];
-    let backups = [];
+    // eslint-disable-next-line prefer-const -- both are reassigned by the convergence below
+    let { priorBackups: priorGenerated, created: generatedFiles } = snapshotGeneratedFiles(
+      finalHasBridge ? [registryAbs, bridgeAbs] : [registryAbs],
+    );
+    let backups = [...priorGenerated];
+    let ticket = null;
     try {
       if (finalHasBridge) {
         fs.writeFileSync(bridgeAbs, buildBridgeModule({ ts, esm }));
-        generatedFiles.push(bridgeAbs);
       }
       fs.writeFileSync(registryAbs, buildRegistryModule(finalPlan, { ts, esm }));
-      ({ backups } = applyComponentEdits(appRoot, finalEdits));
+      backups.push(...applyComponentEdits(appRoot, finalEdits).backups);
       backups.push(...sweepStaleGeneratedBlocks(appRoot, files, finalEdits.map((e) => e.file)));
+      ticket = beginPendingEdits(
+        () => revertAll(backups, generatedFiles, { appRoot, files }),
+        'action wiring',
+      );
     } catch (err) {
-      revertAll(backups, generatedFiles);
+      revertAll(backups, generatedFiles, { appRoot, files });
+      confirmPendingEdits(ticket);
       return { status: 'failed', docPath: docAbs, error: err, plan: finalPlan, verification: loop.attemptsLog };
     }
 
@@ -2180,80 +2415,106 @@ async function wireHandlers(appRoot, opts = {}) {
     let reg = compileRegressed((baseline && baseline.output) || '', (test && test.output) || '', touchedForReg());
     let combinedRegression = !reg.ok && baseline && baseline.ok;
 
-    // PARTIAL DEGRADATION: if the union regressed, don't nuke the whole batch.
-    // Attribute the NEW errors to the specific entries that caused them, revert
-    // only those, and rebuild once with the survivors. The dev loses the
-    // problematic action(s), never the rest. We attribute on the full error set
-    // (real + lint): a non-zero build is unacceptable to ship regardless of the
-    // cause, but we record WHY each culprit fell (broken code vs. a style rule
-    // our fence could not silence) for an honest report.
+    // CONVERGENCE: the union does not build. Every one of these actions passed on
+    // its own, so we do NOT trade the batch for the interference of a few: we
+    // narrow down to the largest subset that builds and give each excluded action
+    // a second chance (re-admission, then an AI correction fed with the combined
+    // error). Giving the whole batch back is only acceptable when nothing at all
+    // can coexist — and even then the project is restored and the revert proven.
     let degraded = null;
     if (combinedRegression && revertOnFailure) {
-      const culprits = attributeCulprits(finalAuto, reg.newErrors);
-      const survivors = finalAuto.filter((e) => !culprits.has(e.intent));
-      if (culprits.size && survivors.length && survivors.length < finalAuto.length) {
-        const { real, lint } = classifyErrorLines(reg.newErrors);
-        const culpritEntries = finalAuto.filter((e) => culprits.has(e.intent));
-        // Revert everything, then re-apply ONLY the survivors and rebuild once.
-        revertAll(backups, generatedFiles);
-        const survivorPlan = { auto: survivors, review: droppedReview, manual: droppedReview, entries: [...survivors, ...droppedReview] };
-        const survivorEdits = planComponentEdits(appRoot, survivorPlan, { ts });
-        const survivorHasBridge = survivors.some((e) => e.kind === 'bridge');
-        const survivorGenerated = [registryAbs];
-        let survivorBackups = [];
-        try {
-          if (survivorHasBridge) {
-            fs.writeFileSync(bridgeAbs, buildBridgeModule({ ts, esm }));
-            survivorGenerated.push(bridgeAbs);
+      log('The actions build alone but not together — narrowing down which ones interfere…');
+      // Back to the pre-wiring state so every probe starts from the same place.
+      revertAll(backups, generatedFiles, { appRoot, files });
+      confirmPendingEdits(ticket);
+
+      const reviseEntry = typeof corrector === 'function'
+        ? async ({ entry, errorText }) => {
+            const action = (manifest.actions || []).find((a) => a.intent === entry.intent);
+            if (!action) return null;
+            try {
+              const relevantFiles = pickRelevantFiles(files, evidence, wiringMap[entry.intent], entry.intent);
+              const corrected = await corrector({
+                action, intent: entry.intent, evidence: (evidence && evidence.actions) || {},
+                relevantFiles, prevWiring: wiringMap[entry.intent], errorText, attempt: maxAttempts + 1,
+              });
+              const candidate = corrected && corrected[entry.intent];
+              if (!candidate) return null;
+              wiringMap[entry.intent] = candidate;
+              const replanned = planOneAction({
+                appRoot, manifest, evidence, candidate, intent: entry.intent, fyodosDirRel,
+              });
+              return (replanned && replanned.entry) || null;
+            } catch {
+              return null;
+            }
           }
-          fs.writeFileSync(registryAbs, buildRegistryModule(survivorPlan, { ts, esm }));
-          ({ backups: survivorBackups } = applyComponentEdits(appRoot, survivorEdits));
-          survivorBackups.push(
-            ...sweepStaleGeneratedBlocks(appRoot, files, survivorEdits.map((e) => e.file)),
-          );
-        } catch (err) {
-          revertAll(survivorBackups, survivorGenerated);
-          return { status: 'failed', docPath: docAbs, error: err, plan: finalPlan, verification: loop.attemptsLog };
-        }
-        const survivorTest = await runBuild();
-        const survivorReg = compileRegressed((baseline && baseline.output) || '', (survivorTest && survivorTest.output) || '', [...survivorEdits.map((e) => e.file), 'handlers.generated', 'bridge']);
-        if (survivorReg.ok || !(baseline && baseline.ok)) {
-          // Survivors build clean → keep them; report the dropped culprits.
-          degraded = culpritEntries.map((e) => ({
-            ...e, confidence: 'review',
-            reason: `wired clean in isolation but broke the combined build${lint.length && !real.length ? ' (project style rule our fence could not silence)' : ''}; reverted to keep the rest building`,
-          }));
-          const mergedReview = [...droppedReview, ...degraded];
-          const keptPlan = { auto: survivors, review: mergedReview, manual: mergedReview, entries: [...survivors, ...mergedReview] };
-          fs.writeFileSync(docAbs, buildHandlerDoc(keptPlan, {
-            appName: appName || path.basename(appRoot),
-            framework, registryRel, bridgeRel, edits: survivorEdits, mountSnippet,
-            verification: loop.attemptsLog,
-          }));
-          return {
-            status: 'applied', partial: true, docPath: docAbs, registryFile: registryAbs, registryRel,
-            bridgeFile: survivorHasBridge ? bridgeAbs : null, mountSnippet,
-            autoCount: survivors.length, manualCount: mergedReview.length,
-            editedFiles: survivorEdits.map((e) => e.file), plan: keptPlan,
-            verification: loop.attemptsLog, dropped: [...loop.dropped, ...degraded],
-            degraded, baseline, test: survivorTest,
-            preexistingFailure: baseline && baseline.ok === false && baseline.stage !== 'skipped-no-deps',
-          };
-        }
-        // Even the survivors regressed → fall through to a full revert (already reverted).
-        revertAll(survivorBackups, survivorGenerated);
+        : null;
+
+      const converged = await convergeOnBuildableSet({
+        appRoot, files, ts, esm, registryAbs, bridgeAbs,
+        candidates: finalAuto, review: droppedReview,
+        runBuild, baselineOutput: (baseline && baseline.output) || '',
+        reviseEntry, maxBuilds, log,
+      });
+
+      backups = converged.applied.backups;
+      generatedFiles = converged.applied.generated;
+      ticket = converged.ticket;
+      test = converged.test;
+      reg = converged.reg;
+
+      const keptIntents = new Set(converged.set.map((e) => e.intent));
+      degraded = converged.excluded.map((e) => ({
+        ...e, confidence: 'review',
+        reason: converged.failures.get(e.intent)
+          || 'wired clean on its own but could not coexist with the rest; left out so the others build',
+      }));
+
+      // Nothing can coexist, or we ran out of build budget with a red project:
+      // restore, prove it, and report honestly. Never ship a red build.
+      if (!converged.set.length || (!reg.ok && baseline && baseline.ok)) {
+        revertAll(backups, generatedFiles, { appRoot, files });
+        confirmPendingEdits(ticket);
+        const fullRevert = await proveRevert({ testRunner, appRoot, framework, quiet, tag, dim, reset });
         return {
-          status: 'reverted', docPath: docAbs, plan: finalPlan, test: survivorTest,
+          status: 'reverted', docPath: docAbs, plan: finalPlan, test,
+          editedFiles: finalEdits.map((e) => e.file),
+          revertVerified: fullRevert.verified, revertProof: fullRevert.proof,
           verification: loop.attemptsLog, dropped: loop.dropped, baseline,
+          builds: converged.builds,
         };
       }
-      // Could not isolate a culprit → conservative full revert.
-      revertAll(backups, generatedFiles);
+
+      const mergedReview = [...droppedReview, ...degraded];
+      const keptEdits = converged.applied.edits;
+      const keptPlan = converged.applied.plan;
+      fs.writeFileSync(docAbs, buildHandlerDoc(keptPlan, {
+        appName: appName || path.basename(appRoot),
+        framework, registryRel, bridgeRel, edits: keptEdits, mountSnippet,
+        verification: loop.attemptsLog,
+      }));
+      log(
+        `Kept ${converged.set.length} of ${finalAuto.length} action(s) wired` +
+          `${degraded.length ? `; ${degraded.length} left out to keep the build green` : ''} ` +
+          `(${converged.builds} verification build(s)).`,
+      );
+      // Verified and kept: from here on an interrupt must not undo it.
+      confirmPendingEdits(ticket);
       return {
-        status: 'reverted', docPath: docAbs, plan: finalPlan, test,
-        verification: loop.attemptsLog, dropped: loop.dropped, baseline,
+        status: reg.ok ? 'applied' : 'applied-untested',
+        partial: degraded.length > 0,
+        docPath: docAbs, registryFile: registryAbs, registryRel,
+        bridgeFile: converged.applied.hasBridge ? bridgeAbs : null, mountSnippet,
+        autoCount: converged.set.length, manualCount: mergedReview.length,
+        editedFiles: keptEdits.map((e) => e.file), plan: keptPlan,
+        verification: loop.attemptsLog, dropped: [...loop.dropped, ...degraded],
+        degraded, baseline, test, builds: converged.builds,
+        keptIntents: [...keptIntents],
+        preexistingFailure: baseline && baseline.ok === false && baseline.stage !== 'skipped-no-deps',
       };
     }
+    confirmPendingEdits(ticket);
     return {
       status: reg.ok ? 'applied' : 'applied-untested',
       docPath: docAbs, registryFile: registryAbs, registryRel,
@@ -2268,21 +2529,28 @@ async function wireHandlers(appRoot, opts = {}) {
   // 5) Apply (single-shot path, no corrector): bridge module (if any) + registry +
   //    the edits inside the user's own components. Everything idempotent; component
   //    files are snapshotted so we can revert cleanly if the post-wiring test fails.
-  const generatedFiles = [registryAbs];
-  let backups = [];
+  const { priorBackups: priorGenerated, created: generatedFiles } = snapshotGeneratedFiles(
+    hasBridge ? [registryAbs, bridgeAbs] : [registryAbs],
+  );
+  let backups = [...priorGenerated];
+  let ticket = null;
   try {
     if (hasBridge) {
       fs.writeFileSync(bridgeAbs, buildBridgeModule({ ts, esm }));
-      generatedFiles.push(bridgeAbs);
     }
     fs.writeFileSync(registryAbs, buildRegistryModule(plan, { ts, esm }));
     if (!fs.readFileSync(registryAbs, 'utf8').includes(GENERATED_MARKER)) {
       throw new Error('post-write verification failed');
     }
-    ({ backups } = applyComponentEdits(appRoot, componentEdits));
+    backups.push(...applyComponentEdits(appRoot, componentEdits).backups);
     backups.push(...sweepStaleGeneratedBlocks(appRoot, files, componentEdits.map((e) => e.file)));
+    ticket = beginPendingEdits(
+      () => revertAll(backups, generatedFiles, { appRoot, files }),
+      'action wiring',
+    );
   } catch (err) {
-    revertAll(backups, generatedFiles);
+    revertAll(backups, generatedFiles, { appRoot, files });
+    confirmPendingEdits(ticket);
     return { status: 'failed', docPath: docAbs, error: err, plan };
   }
 
@@ -2304,6 +2572,7 @@ async function wireHandlers(appRoot, opts = {}) {
   //    already broken, we keep the wiring and flag it (can't verify via build).
   if (runTest && testRunner) {
     if (baseline && baseline.ok === false && baseline.stage !== 'skipped-no-deps') {
+      confirmPendingEdits(ticket);
       return { status: 'applied-untested', ...baseResult, test: baseline, preexistingFailure: true };
     }
     if (!quiet) {
@@ -2317,12 +2586,19 @@ async function wireHandlers(appRoot, opts = {}) {
     }
     // Regression we caused: built before, fails now → revert.
     if (!test.ok && baseline && baseline.ok && revertOnFailure) {
-      revertAll(backups, generatedFiles);
-      return { status: 'reverted', ...baseResult, test };
+      revertAll(backups, generatedFiles, { appRoot, files });
+      confirmPendingEdits(ticket);
+      const rolledBack = await proveRevert({ testRunner, appRoot, framework, quiet, tag, dim, reset });
+      return {
+        status: 'reverted', ...baseResult, test,
+        revertVerified: rolledBack.verified, revertProof: rolledBack.proof,
+      };
     }
+    confirmPendingEdits(ticket);
     return { status: test.ok ? 'applied' : 'applied-untested', ...baseResult, test };
   }
 
+  confirmPendingEdits(ticket);
   return { status: 'applied', ...baseResult };
 }
 
@@ -2335,21 +2611,45 @@ function reportHandlerResult(result, colors = {}, opts = {}) {
     case 'applied':
     case 'applied-untested':
       if (result.partial && Array.isArray(result.degraded) && result.degraded.length) {
-        // Partial degradation: most actions are wired; only the few that broke the
-        // combined build were rolled back so the rest (and the build) stay green.
+        // Partial: the batch was NOT traded for the few actions that could not
+        // coexist. They were retried, corrected against the combined error and
+        // only then left out, so the rest (and the build) stay green.
         const names = result.degraded.map((d) => `'${d.intent}'`).join(', ');
-        console.error(`${tag} · ${dim || ''}Wired ${result.autoCount} action(s). ${result.degraded.length} (${names}) wired clean alone but broke the combined build, so only those were reverted — the rest are live. See the document to apply them by hand.${reset || ''}`);
+        console.error(`${tag} · ${dim || ''}Wired ${result.autoCount} action(s). ${result.degraded.length} (${names}) worked alone but could not coexist with the rest, even after a correction attempt, so only those were left out — everything else is live. See the document to apply them by hand.${reset || ''}`);
         return;
       }
       if (quiet) return;
       break;
-    case 'reverted':
+    case 'reverted': {
       // Not a fatal error: the manifest is published and the orb + link actions
       // work. Only the OPTIONAL in-code wiring for function actions was rolled
       // back because the project's build did not pass with it — so we leave the
-      // code untouched and document how to wire it by hand. Keep the tone calm.
-      console.error(`${tag} · ${dim || ''}Voice actions are published and the orb is live. The optional in-code wiring for function actions was skipped (your build didn't pass with it), so your code was left untouched — see the document to apply it by hand.${reset || ''}`);
+      // code as we found it and document how to wire it by hand. Keep the tone calm.
+      //
+      // But "we left your code as it was" is a claim, and a rollback that did NOT
+      // restore a building project is the worst possible outcome: the developer
+      // commits, deploys, and their host is the one that tells them. When the
+      // post-revert build is red we say it here, name what we touched, and never
+      // reuse the calm wording.
+      if (result.revertVerified === false) {
+        const touched = (Array.isArray(result.editedFiles) ? result.editedFiles : []).join(', ');
+        console.error(
+          `${tag} · ✗ The wiring was rolled back, but your project still does not build. ` +
+            `Check ${touched || 'the files listed in the document'}${result.docPath ? ` and ${result.docPath}` : ''}, ` +
+            `and restore them with git before you deploy.`,
+        );
+        const detail = ((result.revertProof && result.revertProof.output) || '')
+          .split('\n')
+          .map((l) => l.trim())
+          .filter(Boolean)
+          .slice(0, 3)
+          .join('\n');
+        if (detail) console.error(`${dim || ''}${detail}${reset || ''}`);
+        break;
+      }
+      console.error(`${tag} · ${dim || ''}Voice actions are published and the orb is live. The optional in-code wiring for function actions was rolled back (your build didn't pass with it) and your project is back exactly as it was${result.revertVerified ? ', verified with a build' : ''} — see the document to apply it by hand.${reset || ''}`);
       break;
+    }
     case 'manual-only':
       if (quiet) return;
       console.error(`${tag} · ${dim || ''}Wiring documented; apply it by hand following ${result.docPath}.${reset || ''}`);
@@ -2381,6 +2681,10 @@ module.exports = {
   sweepStaleGeneratedBlocks,
   checkParamContract,
   revertAll,
+  convergeOnBuildableSet,
+  snapshotGeneratedFiles,
+  generatedModuleIsReferenced,
+  proveRevert,
   runAutoCorrectionLoop,
   writeIsolated,
   planOneAction,

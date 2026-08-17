@@ -114,6 +114,7 @@ const { wireScreen, reportScreenResult } = require('./wireScreen');
 const { offerWriteEnv, printEnvManualReminder } = require('./writeEnv');
 const { scoreSurface, computeSurface } = require('./scoreSurface');
 const { buildRunRecord, writeChangeRegistry } = require('./changeRegistry');
+const { rollbackPendingEdits } = require('./rollbackGuard');
 
 function arg(flag, fallback) {
   const i = process.argv.indexOf(flag);
@@ -210,13 +211,37 @@ function cancelNoticeLine({ tty = Boolean(process.stderr.isTTY) } = {}) {
   );
 }
 
+/**
+ * What the terminal shows after an interrupted run undid its half-applied work.
+ *
+ * Stopping mid-wiring would otherwise leave edits and generated modules behind:
+ * nothing fails here (the CLI is gone), it fails on the developer's next build.
+ * So we roll back what was not yet verified and say so — an interrupted run must
+ * leave the repo exactly as it was found.
+ */
+function rollbackNoticeLine(labels, { tty = Boolean(process.stderr.isTTY) } = {}) {
+  const { blue, cyan, dim, reset } = fyodosTermColors(tty);
+  const what = [...new Set(labels)].join(', ');
+  return (
+    `${cyan}◉${reset} ${blue}Fiodos${reset} · ` +
+    `${dim}Undid the unfinished ${what} — your project is exactly as you left it.${reset}\n`
+  );
+}
+
 let cancelNoticeShown = false;
 
-/** Print the cancellation notice once and leave with the SIGINT exit code. */
+/**
+ * Undo the in-flight wiring, print the notice once, and leave with the SIGINT
+ * exit code. The rollback runs BEFORE the exit and is synchronous on purpose: a
+ * signal handler cannot wait for async work, and a half-written repo is the one
+ * outcome we can never ship.
+ */
 function cancelRun() {
   if (cancelNoticeShown) return; // a second Ctrl-C must not stack the message
   cancelNoticeShown = true;
   process.stderr.write(cancelNoticeLine());
+  const rolledBack = rollbackPendingEdits();
+  if (rolledBack.length) process.stderr.write(rollbackNoticeLine(rolledBack));
   // 128 + SIGINT(2): scripts and CI still tell a cancellation from a failure.
   process.exit(130);
 }
@@ -1147,7 +1172,12 @@ async function main() {
       testRunner: runPostWireTest,
       corrector,
       files: included.concat(sweptFiles),
-      maxAttempts: Number(process.env.FYODOS_WIRE_MAX_ATTEMPTS || 3),
+      // Persistence beats speed here: the developer already paid for the analysis
+      // that produced these actions, so we keep correcting and re-verifying rather
+      // than dropping them. Both ceilings exist only to bound cost, not to give up
+      // early, and both can be raised per run.
+      maxAttempts: Number(process.env.FYODOS_WIRE_MAX_ATTEMPTS || 5),
+      maxBuilds: Number(process.env.FYODOS_WIRE_MAX_BUILDS || 24),
     };
 
     const runWebWire = async ({ setLabel, pause, resume }) => {
@@ -2427,7 +2457,8 @@ async function runRewireOnly(target) {
       testRunner: runPostWireTest,
       corrector,
       files: included,
-      maxAttempts: Number(process.env.FYODOS_WIRE_MAX_ATTEMPTS || 3),
+      maxAttempts: Number(process.env.FYODOS_WIRE_MAX_ATTEMPTS || 5),
+      maxBuilds: Number(process.env.FYODOS_WIRE_MAX_BUILDS || 24),
     });
     if (!assumeYes) resume();
     pause();
@@ -2669,10 +2700,21 @@ async function verifyOrbCanFetch({ apiKey, apiUrl }) {
 
 // Exported for unit tests (the pure manifest-pruning helper). Requiring this
 // module for tests does NOT run the CLI thanks to the require.main guard.
-module.exports = { pruneUnwiredActions, actionsDetailFromHandlerResult, cancelNoticeLine };
+module.exports = {
+  pruneUnwiredActions, actionsDetailFromHandlerResult, cancelNoticeLine, rollbackNoticeLine,
+};
 
 if (require.main === module) {
   process.on('SIGINT', cancelRun);
+  // A CI runner's SIGTERM and an unexpected crash leave the repo just as broken
+  // as a Ctrl-C, so they undo the unfinished wiring through the same path.
+  process.on('SIGTERM', cancelRun);
+  process.on('uncaughtException', (err) => {
+    const rolledBack = rollbackPendingEdits();
+    console.error(err);
+    if (rolledBack.length) process.stderr.write(rollbackNoticeLine(rolledBack));
+    process.exit(1);
+  });
   main()
     .then(() => {
       // Force-exit after a successful run. Analysis can leave keep-alive HTTP
@@ -2681,7 +2723,9 @@ if (require.main === module) {
       process.exit(typeof process.exitCode === 'number' ? process.exitCode : 0);
     })
     .catch((e) => {
+      const rolledBack = rollbackPendingEdits();
       console.error(e);
+      if (rolledBack.length) process.stderr.write(rollbackNoticeLine(rolledBack));
       process.exit(1);
     });
 }
