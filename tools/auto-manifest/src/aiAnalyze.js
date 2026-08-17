@@ -139,7 +139,9 @@ function buildUserPrompt(appMeta, files, omitted, staticRoutes, surface = null, 
     .map((r) => `${r.routePath}${r.isDynamic ? ' (dynamic)' : ''} ← ${r.relFile}`)
     .join('\n');
   const omittedNote = omitted.length
-    ? `\nFILES OMITTED FOR SIZE (declare blind spots in "uncertain"):\n${omitted.map((o) => o.rel).join('\n')}\n`
+    ? `\nFILES OMITTED FOR SIZE (declare blind spots in "uncertain"; later passes will read them):\n${
+      omitted.slice(0, 80).map((o) => o.rel).join('\n')
+    }${omitted.length > 80 ? `\n…and ${omitted.length - 80} more` : ''}\n`
     : '';
   const routeBlock = staticRoutes.length
     ? `Statically-scanned routes (existence is verified — use these hrefs):\n${routeHint}\n`
@@ -438,7 +440,11 @@ async function analyzeViaProxy({ apiKey, apiUrl, model, user, task = 'analysis',
       throw new Error(`Hosted analysis unavailable (plan quota or rate limit). ${detail}`);
     }
     if (res.status === 413) {
-      throw new Error('Project too large for hosted analysis — lower --max-input-tokens or use --own-ai-key.');
+      throw new Error(
+        'Hosted analysis refused this request as oversized. Re-run the analyze: ' +
+        'the next pass sends a smaller first chunk and reads the rest afterwards. ' +
+        'If it happens again, the backend safety cap needs a deploy.',
+      );
     }
     if (res.status === 503) {
       throw new Error('Hosted analysis is not available right now — try again or use --own-ai-key.');
