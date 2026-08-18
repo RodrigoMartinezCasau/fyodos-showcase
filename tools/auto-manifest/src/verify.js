@@ -322,6 +322,10 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
   }
 
   const isShopify = opts.platform === 'shopify';
+  // An app nobody wires is in Shopify's position for the same reason: no handler
+  // registry will exist, so a function name proves nothing about whether the
+  // action can run. What CAN be verified is the call template itself.
+  const declarativeOnly = Boolean(opts.declarativeOnly);
   // Shopify Screens vs Actions: a link whose navTarget is already a route
   // path is a duplicate of navigation — drop it (dashboard was showing empty
   // `()` copies of About/Contact/collections after over-eager discovery).
@@ -366,7 +370,7 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
     // an identifier in a .liquid file, and requiring it would drop the whole
     // universal commerce set. The universal "/checkout" link is likewise
     // platform-guaranteed (themes rarely hardcode that href).
-    if (isShopify && action.kind !== 'link' && action.execution) {
+    if ((isShopify || declarativeOnly) && action.kind !== 'link' && action.execution) {
       const problem = validateExecutionShape(action);
       if (problem) {
         provenance.actions.push({
@@ -378,8 +382,20 @@ function verifyManifest(manifest, evidence, sentFiles, staticRoutes, opts = {}) 
       actions.push(action);
       provenance.actions.push({
         intent: action.intent, included: true,
-        verification: 'declarative execution (Shopify storefront API — platform-guaranteed)',
+        verification: isShopify
+          ? 'declarative execution (Shopify storefront API — platform-guaranteed)'
+          : 'declarative execution (call template runs in the user\'s own session)',
         evidence: ev,
+      });
+      continue;
+    }
+    // No wiring and no call template: nothing could ever run this. Dropping it
+    // is the honest outcome — the orb keeps the screens it can really open
+    // instead of promising a click that dies.
+    if (declarativeOnly && action.kind !== 'link') {
+      provenance.actions.push({
+        intent: action.intent, included: false,
+        reason: 'no wiring on this install and no declarative execution block — nothing could ever run it — DROPPED',
       });
       continue;
     }

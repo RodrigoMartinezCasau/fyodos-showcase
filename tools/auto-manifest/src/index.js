@@ -34,6 +34,13 @@
  *     --yes          accept orb/handler wiring without prompts (CI / express)
  *     --write-env-yes write the API key to .env without asking (CI only)
  *     --no-wire      skip wiring entirely (analysis/publish unaffected)
+ *     --manifest-only  read the app and publish what it can do, NEVER edit it.
+ *                    For an app Fiodos does not wire (a panel behind a VPN, a
+ *                    repo whose owner declines): the analysis then returns
+ *                    actions carrying their own HTTP call template, which the
+ *                    embedded orb runs in the user's own session, instead of
+ *                    function names no generated registry would ever provide.
+ *                    Implies --no-wire.
  *     --no-write-env skip the offer to align the app's .env with the published
  *                    key/URL (see below)
  *
@@ -449,6 +456,14 @@ async function main() {
     return;
   }
 
+  // MANIFEST ONLY: read this app, publish what it can do, never touch a line of
+  // it. For an app Fiodos will never edit — a panel behind a VPN, a repo whose
+  // owner declines the wiring — the analysis must ask for actions that carry
+  // their own call template, because no handler registry will exist to run a
+  // function name. Distinct from --no-wire, which only skips wiring THIS run
+  // and leaves an already-wired repo's actions perfectly runnable.
+  const manifestOnly = process.argv.includes('--manifest-only');
+
   // Accept an optional leading `analyze` subcommand: `fiodos analyze <dir>`.
   let positionals = positionalArgs();
   if (positionals[0] === 'analyze') positionals = positionals.slice(1);
@@ -699,6 +714,7 @@ async function main() {
         () => analyzeWithAI({
           appMeta, files: included, omitted, staticRoutes: routes, model, platform,
           useProxy, apiKey, apiUrl, surface, userSpec,
+          wiringAvailable: !manifestOnly,
         }),
       );
     if (usedModel) model = usedModel;
@@ -890,7 +906,7 @@ async function main() {
     // AI-proposed and flagged unverified in provenance.
     // Platform guarantee BEFORE verify: contact_fiodos is SDK-native (internal orbs only).
     proposed = ensureContactFiodosAction(proposed, { orbProfile });
-    ({ manifest, provenance } = verifyManifest(proposed, evidence, included.concat(sweptFiles), routes, { verifyRoutes, platform, appRoot: analysisRoot }));
+    ({ manifest, provenance } = verifyManifest(proposed, evidence, included.concat(sweptFiles), routes, { verifyRoutes, platform, appRoot: analysisRoot, declarativeOnly: manifestOnly }));
     manifest = ensureContactFiodosAction(manifest, { orbProfile });
     ensureBackRoute(manifest, provenance);
 
@@ -1138,7 +1154,7 @@ async function main() {
   if (platform === 'web') {
     const { apiKey, apiUrl } = resolveApiTarget();
     const assumeYes = process.argv.includes('--yes') || process.argv.includes('--wire-yes');
-    const noWire = process.argv.includes('--no-wire');
+    const noWire = process.argv.includes('--no-wire') || manifestOnly;
     let envWriteResult = null;
     let orbWireResult = null;
     let handlerWireResult = null;
@@ -1449,7 +1465,7 @@ async function main() {
     // sync deploys it when the developer pushes.
     loadAppEnv(analysisRoot);
     const { apiKey, apiUrl } = resolveApiTarget();
-    const noWire = process.argv.includes('--no-wire');
+    const noWire = process.argv.includes('--no-wire') || manifestOnly;
     let orbWireResult = null;
 
     await withSpinner('Publishing to your project', async ({ setLabel, pause, resume }) => {
@@ -1541,7 +1557,7 @@ async function main() {
     // EAS production step — exactly like web, just for an app.
     loadAppEnv(analysisRoot);
     const { apiKey, apiUrl } = resolveApiTarget();
-    const noWire = process.argv.includes('--no-wire');
+    const noWire = process.argv.includes('--no-wire') || manifestOnly;
     let orbWireResult = null;
     let envWriteResult = null;
     let sessionWireResult = null;
@@ -1664,7 +1680,7 @@ async function main() {
     // file, and print the run + production commands.
     loadAppEnv(analysisRoot);
     const { apiKey, apiUrl } = resolveApiTarget();
-    const noWire = process.argv.includes('--no-wire');
+    const noWire = process.argv.includes('--no-wire') || manifestOnly;
     let orbWireResult = null;
     let envWriteResult = null;
 

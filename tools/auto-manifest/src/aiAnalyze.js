@@ -33,7 +33,7 @@ try {
  * fetch carries NO source code — only the task/platform selection.
  * @returns {{ system: string, schemaInUser: boolean }}
  */
-async function resolveOwnKeySystemPrompt({ task, platform, hasUserSpec, intent = '', apiKey = '', apiUrl = '' }) {
+async function resolveOwnKeySystemPrompt({ task, platform, hasUserSpec, intent = '', apiKey = '', apiUrl = '', wiringAvailable = true }) {
   if (LOCAL_PROMPTS) {
     if (task === 'wiring_fix') return { system: LOCAL_PROMPTS.correctionSystemPrompt(platform, intent), schemaInUser: false };
     if (task === 'coverage_audit') return { system: LOCAL_PROMPTS.coverageAuditSystemPrompt(platform), schemaInUser: false };
@@ -52,6 +52,7 @@ async function resolveOwnKeySystemPrompt({ task, platform, hasUserSpec, intent =
     platform,
     hasUserSpec: hasUserSpec ? 'true' : 'false',
     ...(intent ? { intent } : {}),
+    ...(wiringAvailable ? {} : { wiringAvailable: 'false' }),
   });
   const res = await fetch(`${apiUrl}/v1/developer/analysis/system-prompt?${qs}`, {
     headers: { 'x-api-key': apiKey },
@@ -388,7 +389,7 @@ async function completeOpenAI({ model, system, user }) {
  * backend in this mode; see the CLI README.
  * @returns {{ parsed, usage, serverModel, analysisToken }}
  */
-async function analyzeViaProxy({ apiKey, apiUrl, model, user, task = 'analysis', platform = 'web', hasUserSpec = false, intent = '' }) {
+async function analyzeViaProxy({ apiKey, apiUrl, model, user, task = 'analysis', platform = 'web', hasUserSpec = false, intent = '', wiringAvailable = true }) {
   if (!apiKey) {
     throw new Error(
       'Hosted analysis needs your Fiodos project API key (--api-key or FYODOS_API_KEY). ' +
@@ -426,7 +427,14 @@ async function analyzeViaProxy({ apiKey, apiUrl, model, user, task = 'analysis',
   const res = await fetch(`${apiUrl}/v1/developer/analyze`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'x-api-key': apiKey },
-    body: JSON.stringify({ model, user, task, platform, hasUserSpec, ...(intent ? { intent } : {}) }),
+    // wiringAvailable is only sent when FALSE: an older backend rejects nothing
+    // it does not know, but keeping the default payload byte-identical means a
+    // normal install cannot be affected by this flag at all.
+    body: JSON.stringify({
+      model, user, task, platform, hasUserSpec,
+      ...(intent ? { intent } : {}),
+      ...(wiringAvailable ? {} : { wiringAvailable: false }),
+    }),
   });
   if (!res.ok) {
     let detail = '';
@@ -502,6 +510,7 @@ async function analyzeViaProxy({ apiKey, apiUrl, model, user, task = 'analysis',
 async function analyzeWithAI({
   appMeta, files, omitted, staticRoutes, model = DEFAULT_MODEL, platform = 'mobile',
   useProxy = false, apiKey = '', apiUrl = '', surface = null, userSpec = '',
+  wiringAvailable = true,
 }) {
   const resolved = resolveModel(model);
   const spec = sanitizeUserSpec(userSpec);
@@ -518,10 +527,11 @@ async function analyzeWithAI({
     user = buildUserPrompt(appMeta, files, omitted, staticRoutes, surface, spec, { includeSchema: false, platform });
     ({ parsed, usage, serverModel, analysisToken } = await analyzeViaProxy({
       apiKey, apiUrl, model: resolved, user, task: 'analysis', platform, hasUserSpec: Boolean(spec),
+      wiringAvailable,
     }));
   } else {
     const sp = await resolveOwnKeySystemPrompt({
-      task: 'analysis', platform, hasUserSpec: Boolean(spec), apiKey, apiUrl,
+      task: 'analysis', platform, hasUserSpec: Boolean(spec), apiKey, apiUrl, wiringAvailable,
     });
     user = buildUserPrompt(appMeta, files, omitted, staticRoutes, surface, spec, { includeSchema: sp.schemaInUser, platform });
     ({ parsed, usage } = isAnthropicModel(resolved)
