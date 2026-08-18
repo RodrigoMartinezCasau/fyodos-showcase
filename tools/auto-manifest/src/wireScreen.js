@@ -40,6 +40,8 @@ const path = require('path');
 
 const { beginPendingEdits, confirmPendingEdits } = require('./rollbackGuard');
 const {
+  importSourcePath,
+  resolveProposedImport,
   fileHasSymbol,
   freeIdentifiers,
   declaredLocals,
@@ -99,11 +101,15 @@ function verifyImports({ appRoot, rawImports, importBaseDirRel }) {
   const importedNames = new Set();
   for (const imp of Array.isArray(rawImports) ? rawImports : []) {
     const name = String((imp && imp.name) || '').trim();
-    const from = normRel(imp && imp.from);
+    const raw = importSourcePath(imp);
     const kind = (imp && imp.kind) || 'named';
-    if (!name || !from) return { reason: 'a screen import is incomplete (missing name/from)' };
-    if (!fs.existsSync(path.join(appRoot, from))) {
-      return { reason: `the screen import points to a non-existent file: '${from}'` };
+    if (!name || !raw) return { reason: 'a screen import is incomplete (missing name/from)' };
+    // Same reading as the action verifier: the key the AI used, an alias, a
+    // missing extension or a path written from the component are all ways of
+    // naming the same real file, and none of them is a reason to refuse it.
+    const from = resolveProposedImport(appRoot, raw, [importBaseDirRel]);
+    if (!from) {
+      return { reason: `the screen import points to a non-existent file: '${raw}'` };
     }
     if (kind === 'named' && !fileHasSymbol(appRoot, from, name)) {
       return { reason: `named import '${name}' does not exist in '${from}'` };

@@ -44,6 +44,7 @@ const { probeEffect, compileRegressed, classifyErrorLines } = require('./verifyW
 const { beginPendingEdits, confirmPendingEdits } = require('./rollbackGuard');
 const { extractBridgeRegistrations } = require('./continuityFloor');
 const { checkBridgeMountGate } = require('./mountGate');
+const { enclosingJsxReturnIndex, sameFunctionScope } = require('./scopeAst');
 
 const DOC_BASENAME = 'FYODOS_HANDLERS.md';
 const REGISTRY_BASENAME = 'handlers.generated';
@@ -159,6 +160,59 @@ function resolveSourceFile(appRoot, fromRel) {
     }
   }
   return null;
+}
+
+/**
+ * The source path of a proposed import, under whichever key the AI reached for.
+ *
+ * The wiring contract asks for `from`, but the evidence the same prompt shows
+ * uses `file`, and the model mixes them up. Reading only `from` turned that
+ * slip into "an import is incomplete" and lost actions whose functions were
+ * right there (create_employee / update_employee, owner panel, 17/08/2026).
+ * Nothing is assumed from the key: whatever it names still has to resolve to a
+ * real file that really contains the symbol.
+ */
+function importSourcePath(imp) {
+  if (!imp || typeof imp !== 'object') return '';
+  for (const key of ['from', 'file', 'path', 'module', 'source', 'specifier']) {
+    const value = imp[key];
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
+}
+
+/**
+ * Resolve a proposed import path, also accepting one written the way a file in
+ * the project sees it ('../api' as read from a component) rather than from the
+ * repo root. The AI writes these while looking at the component, so resolving
+ * them only from the root sent them outside the project and dropped the action
+ * (clock_employee, owner panel, same day — five attempts, all discarded).
+ *
+ * Bases are tried in order of intent and anything landing outside the project
+ * is refused, so this widens WHERE we look, never WHAT we accept.
+ */
+function resolveProposedImport(appRoot, rawFrom, baseDirs = []) {
+  const direct = resolveSourceFile(appRoot, rawFrom);
+  if (direct) return direct;
+  const raw = String(rawFrom || '').replace(/\\/g, '/').trim();
+  if (!raw) return null;
+  for (const dir of baseDirs) {
+    const base = normRel(dir);
+    if (base === '' && raw.startsWith('..')) continue;
+    const joined = normRel(path.posix.normalize(path.posix.join(base, raw)));
+    if (!joined || joined.startsWith('..')) continue;
+    const hit = resolveSourceFile(appRoot, joined);
+    if (hit) return hit;
+  }
+  return null;
+}
+
+/** Directory of an app-relative file, as an app-relative path ('' at the root). */
+function dirOf(fileRel) {
+  const rel = normRel(fileRel);
+  if (!rel) return '';
+  const dir = path.posix.dirname(rel);
+  return dir === '.' ? '' : dir;
 }
 
 /** Count non-overlapping occurrences of a literal substring. */
@@ -514,14 +568,18 @@ function buildAiEntry({ appRoot, fyodosDirRel, base, aiW, manifestParams }) {
   }
 
   // 2) Build verified imports. Each imported file+name must exist on disk.
+  //    A path may be written from the repo root, from the file the evidence
+  //    points at, or from where the registry will live — all three are how a
+  //    person would say it, and all three must land on the same real file.
+  const importBases = [dirOf(base && base.file), fyodosDirRel, ...required.map((r) => dirOf(r && r.file))];
   const imports = [];
   const importedNames = new Set();
   for (const imp of rawImports) {
     const name = String((imp && imp.name) || '').trim();
-    const rawFrom = normRel(imp && imp.from);
+    const rawFrom = importSourcePath(imp);
     const kind = (imp && imp.kind) || 'named';
     if (!name || !rawFrom) return { reason: 'an import proposed by the AI is incomplete (missing name/from)' };
-    const from = resolveSourceFile(appRoot, rawFrom);
+    const from = resolveProposedImport(appRoot, rawFrom, importBases);
     if (!from) {
       return { reason: `the proposed import points to a non-existent file: '${rawFrom}'` };
     }
@@ -654,14 +712,16 @@ function reuseExistingBlockAnchor(rawContent, strippedContent, intent) {
 
 /**
  * True when an anchor that appears several times is HARMLESS: every occurrence
- * resolves to the same actual insertion point (the nearest JSX `return`), so
- * the ambiguity cannot change where the registration lands.
+ * resolves to the same actual insertion point (the JSX `return` of the body it
+ * sits in), so the ambiguity cannot change where the registration lands. It
+ * asks the same question the placement does — an anchor repeated across two
+ * components resolves to two different bodies and is correctly rejected.
  */
-function ambiguousAnchorSameInsertion(content, anchor) {
+function ambiguousAnchorSameInsertion(content, anchor, file) {
   const points = new Set();
   let idx = content.indexOf(anchor);
   while (idx !== -1) {
-    points.add(nearestJsxReturn(content, idx));
+    points.add(enclosingJsxReturnIndex(content, file, idx));
     if (points.size > 1) return false;
     idx = content.indexOf(anchor, idx + anchor.length);
   }
@@ -735,7 +795,7 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
       // proven position beats re-rolling an ambiguous AI anchor.
       anchor = reused;
       anchorDerived = true;
-    } else if (occ > 1 && scope === 'statement' && ambiguousAnchorSameInsertion(content, anchor)) {
+    } else if (occ > 1 && scope === 'statement' && ambiguousAnchorSameInsertion(content, anchor, file)) {
       // Keep the AI anchor: every occurrence lands on the same insertion point.
     } else {
       const derived = deriveBridgeAnchor(content, invoke);
@@ -776,9 +836,12 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
   // Verify extra imports the invoke needs.
   const imports = [];
   const importedNames = new Set();
+  // Same tolerance as the module strategy: the key the AI used and the vantage
+  // point it wrote the path from never decide whether a real function is wired.
+  const importBases = [dirOf(file), dirOf(base && base.file)];
   for (const imp of Array.isArray(b.imports) ? b.imports : []) {
     const name = String((imp && imp.name) || '').trim();
-    const rawFrom = normRel(imp && imp.from);
+    const rawFrom = importSourcePath(imp);
     const kind = (imp && imp.kind) || 'named';
     if (!name || !rawFrom) return { reason: 'a bridge import is incomplete (missing name/from)' };
     // The component often ALREADY imports the symbol (useApp, a store hook…).
@@ -788,7 +851,7 @@ function buildAiBridgeEntry({ appRoot, fyodosDirRel, base, aiW }) {
       importedNames.add(name);
       continue;
     }
-    const from = resolveSourceFile(appRoot, rawFrom);
+    const from = resolveProposedImport(appRoot, rawFrom, importBases);
     if (!from) return { reason: `the bridge import points to a non-existent file: '${rawFrom}'` };
     if (kind === 'named' && !fileHasSymbol(appRoot, from, name)) return { reason: `named import '${name}' does not exist in '${from}'` };
     imports.push({ kind, name, importPath: relImport(path.dirname(file), from) });
@@ -1459,6 +1522,133 @@ function stripFiodosBlocks(content) {
   );
 }
 
+/** Every FYODOS block in the file, with its span and whether WE wrote it. */
+function fiodosBlocks(content) {
+  const re = new RegExp(
+    `\\n?(${esc(EDIT_START_PREFIX)}[^\\n]*)[\\s\\S]*?${esc(EDIT_END)}\\n?`,
+    'g',
+  );
+  const out = [];
+  let m;
+  while ((m = re.exec(content))) {
+    out.push({
+      start: m.index,
+      end: m.index + m[0].length,
+      text: m[0],
+      generated: GENERATED_HEADER_RE.test(m[1]),
+    });
+  }
+  return out;
+}
+
+const SWEEP_KEYWORDS = new Set([
+  'import', 'from', 'export', 'default', 'const', 'let', 'var', 'function',
+  'return', 'if', 'else', 'new', 'typeof', 'void', 'delete', 'in', 'of',
+  'this', 'null', 'true', 'false', 'undefined', 'async', 'await', 'try',
+  'catch', 'finally', 'throw', 'class', 'extends', 'as', 'eslint', 'disable',
+  'enable',
+]);
+
+/** Identifiers a block mentions, ignoring strings, comments and `.property`. */
+function mentionedIdentifiers(code) {
+  const bare = stripLiterals(String(code || ''))
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/\/\/[^\n]*/g, ' ')
+    .replace(/`(?:\\.|[^`\\])*`/g, ' ')
+    .replace(/\.\s*[A-Za-z_$][\w$]*/g, ' ');
+  const out = new Set();
+  for (const m of bare.matchAll(/[A-Za-z_$][\w$]*/g)) {
+    if (!SWEEP_KEYWORDS.has(m[0])) out.add(m[0]);
+  }
+  return out;
+}
+
+/** Names a block IMPORTS — what it provides to the rest of the file. */
+function importedBindings(code) {
+  const out = new Set();
+  const re = /\bimport\s+([^;]*?)\s+from\s*['"]/g;
+  let m;
+  while ((m = re.exec(String(code || '')))) {
+    for (const raw of m[1].replace(/[{}]/g, ',').split(',')) {
+      const name = raw.trim().replace(/^\*\s+as\s+/, '').split(/\s+as\s+/i).pop().trim();
+      if (name && /^[A-Za-z_$][\w$]*$/.test(name)) out.add(name);
+    }
+  }
+  return out;
+}
+
+/**
+ * Is the occurrence at `idx` the DECLARATION of the name rather than a use?
+ * Walks back to the nearest declaration keyword and requires the statement to
+ * be unterminated, so a name buried in a long multi-line destructuring
+ * (`const { a, b, publishChanges, … } = useApp();`) still reads as declared.
+ */
+function isDeclarationSite(text, idx) {
+  const head = text.slice(Math.max(0, idx - 800), idx);
+  return /(?:^|[\s;{(,])(?:const|let|var|import|function)\s[^;]*$/.test(head);
+}
+
+/** True when the file declares `name` and nothing left in it uses the value. */
+function onlyDeclared(text, name) {
+  const re = new RegExp(`\\b${esc(name)}\\b`, 'g');
+  let m;
+  let seen = false;
+  while ((m = re.exec(text))) {
+    seen = true;
+    if (!isDeclarationSite(text, m.index)) return false;
+  }
+  return seen;
+}
+
+/**
+ * Strip the generated blocks that can be removed WITHOUT breaking the file.
+ *
+ * A block stays when removing it would leave the file worse than it is now:
+ *   - something that survives still calls what the block imported (the
+ *     developer's own hand-written block, per FYODOS_HANDLERS.md), or
+ *   - the block was the last consumer of a binding the host file declares,
+ *     which `noUnusedLocals` turns into a hard error.
+ * Keeping a block is always safe: the project compiles with it today. The
+ * decision is a fixpoint because keeping one block resurrects references that
+ * may in turn save another (the registration block saves its own import).
+ */
+function stripSweepableBlocks(content) {
+  const blocks = fiodosBlocks(content);
+  if (!blocks.some((b) => b.generated)) return content;
+
+  const remove = blocks.map((b) => b.generated);
+  const survivors = () => {
+    let out = '';
+    let cursor = 0;
+    blocks.forEach((b, i) => {
+      out += content.slice(cursor, b.start) + (remove[i] ? '\n' : b.text);
+      cursor = b.end;
+    });
+    return out + content.slice(cursor);
+  };
+
+  for (let pass = 0; pass <= blocks.length; pass++) {
+    const text = survivors();
+    let changed = false;
+    blocks.forEach((b, i) => {
+      if (!remove[i]) return;
+      const provides = importedBindings(b.text);
+      const stillCalled = [...provides].some((n) =>
+        new RegExp(`\\b${esc(n)}\\b`).test(text),
+      );
+      const orphans = [...mentionedIdentifiers(b.text)].some(
+        (n) => !provides.has(n) && onlyDeclared(text, n),
+      );
+      if (stillCalled || orphans) {
+        remove[i] = false;
+        changed = true;
+      }
+    });
+    if (!changed) break;
+  }
+  return survivors();
+}
+
 /**
  * Sweep GENERATED bridge blocks left behind in files this run does NOT wire.
  *
@@ -1470,10 +1660,11 @@ function stripFiodosBlocks(content) {
  * production bug: two components registered the key, one reading args.mode
  * and the other args.voiceMode, and the action "ran" without doing anything).
  *
- * Only blocks carrying the generated header are removed; developer-authored
- * FYODOS:BRIDGE blocks are preserved verbatim (same rule as
- * stripFiodosBlocks). Returns backups compatible with revertAll so a combined
- * build regression restores the swept files too.
+ * Only blocks carrying the generated header are removed, developer-authored
+ * FYODOS:BRIDGE blocks are preserved verbatim, and a generated block whose
+ * removal would break the file stays too (see stripSweepableBlocks): tidiness
+ * never costs the developer a compiling project. Returns backups compatible
+ * with revertAll so a combined build regression restores the swept files too.
  */
 function sweepStaleGeneratedBlocks(appRoot, files, editedFiles) {
   const edited = new Set((editedFiles || []).map((f) => normRel(f)));
@@ -1489,7 +1680,7 @@ function sweepStaleGeneratedBlocks(appRoot, files, editedFiles) {
       continue;
     }
     if (!original.includes(EDIT_START_PREFIX)) continue;
-    const swept = stripFiodosBlocks(original);
+    const swept = stripSweepableBlocks(original);
     if (swept === original) continue;
     backups.push({ file: rel, abs, original });
     fs.writeFileSync(abs, swept);
@@ -1591,28 +1782,16 @@ function braceDepthAt(content, idx) {
   return depth;
 }
 
-/** Index of the JSX/paren `return (` or `return <` line nearest to `anchorIdx`. */
-function nearestJsxReturn(content, anchorIdx) {
-  const re = /^[ \t]*return\s*[(<]/gm;
-  let best = -1;
-  let bestDist = Infinity;
-  let m;
-  while ((m = re.exec(content))) {
-    const dist = Math.abs(m.index - anchorIdx);
-    if (dist < bestDist) { bestDist = dist; best = m.index; }
-  }
-  return best;
-}
-
 /**
  * Insert the registration block at a SYNTACTICALLY VALID spot:
  *   · .vue files → just before the last </script>,
  *   · class-field scope (Angular @Component) → right AFTER the anchor line, inside
  *     the class body (the anchor is a sibling class field),
  *   · statement scope (React/JS function component) → just BEFORE the JSX `return`
- *     nearest the anchor, so the call is always a statement and NEVER lands inside
- *     JSX (which produced `Expected "}" but found ":"`). The AI's anchor only needs
- *     to locate the right component, not the exact insertion line.
+ *     of the body the anchor SITS IN (resolved with the TypeScript parser), so the
+ *     call is always a statement, never inside JSX (`Expected "}" but found ":"`)
+ *     and never in a neighbouring component that happens to be closer in the file.
+ *     The AI's anchor only needs to locate the right component, not the exact line.
  *   · fallback (no JSX return: object-returning factories, etc.) → before a
  *     `return` anchor, else after the anchor line.
  */
@@ -1650,23 +1829,21 @@ function insertRegisterBlock(content, file, anchor, block, scope) {
     const semi = content.indexOf(';', at);
     const stmtEnd = semi === -1 ? (anchorLineEnd === -1 ? content.length : anchorLineEnd) : content.indexOf('\n', semi);
     const endIdx = stmtEnd === -1 ? content.length : stmtEnd;
-    // SCOPE GUARD: only insert after the statement when it lives at the SAME
-    // (or shallower) brace depth as the component's JSX `return`. A statement
+    // SCOPE GUARD: only insert after the statement when it lives in the SAME
+    // function body as the component's JSX `return`. A statement
     // inside a NESTED function body (an event handler, a helper closure) would
     // compile fine but the registration would only run if that inner function
     // is ever called — actions then die at runtime with HANDLER_UNREADY (this
     // exact bug shipped a registerFiodosBridge inside a color-picker callback
-    // on the Fiodos dashboard). Deeper than the return → fall through to the
-    // return placement, which is the component's top level.
-    const retForDepth = nearestJsxReturn(content, at);
-    const stmtDepth = braceDepthAt(content, endIdx === -1 ? content.length : endIdx);
-    const retDepth = retForDepth === -1 ? Infinity : braceDepthAt(content, retForDepth);
-    if (stmtDepth <= retDepth) {
+    // on the Fiodos dashboard). Another body → fall through to the return
+    // placement, which is the component's top level.
+    const retForScope = enclosingJsxReturnIndex(content, file, at);
+    if (retForScope === -1 || sameFunctionScope(content, file, at, retForScope)) {
       return content.slice(0, endIdx) + '\n' + block + content.slice(endIdx);
     }
   }
 
-  const ret = nearestJsxReturn(content, at);
+  const ret = enclosingJsxReturnIndex(content, file, at);
   if (ret !== -1) {
     const lineStart = content.lastIndexOf('\n', ret) + 1;
     return content.slice(0, lineStart) + block + '\n' + content.slice(lineStart);
@@ -1894,8 +2071,17 @@ function pickRelevantFiles(files, evidence, candidate, intent) {
   if (ev && ev.file) wanted.add(normRel(ev.file));
   if (candidate) {
     if (candidate.bridge && candidate.bridge.file) wanted.add(normRel(candidate.bridge.file));
-    for (const imp of candidate.imports || []) if (imp && imp.from) wanted.add(normRel(imp.from));
-    for (const imp of (candidate.bridge && candidate.bridge.imports) || []) if (imp && imp.from) wanted.add(normRel(imp.from));
+    // Read through the same accessor as the verifier: when the corrector is not
+    // shown the file its own last attempt named, it retries blind (five wasted
+    // passes on clock_employee) and the action ends up unwired for nothing.
+    for (const imp of candidate.imports || []) {
+      const src = importSourcePath(imp);
+      if (src) wanted.add(normRel(src));
+    }
+    for (const imp of (candidate.bridge && candidate.bridge.imports) || []) {
+      const src = importSourcePath(imp);
+      if (src) wanted.add(normRel(src));
+    }
     for (const r of candidate.requiredSymbols || []) if (r && r.file) wanted.add(normRel(r.file));
   }
   // The most common unfixable failure is "symbol X is not available in the
@@ -2287,6 +2473,12 @@ async function wireHandlers(appRoot, opts = {}) {
   const registryRel = path.join(fyodosDirRel, `${REGISTRY_BASENAME}${ext}`).split(path.sep).join('/');
   const bridgeRel = path.join(fyodosDirRel, `${BRIDGE_BASENAME}${ext}`).split(path.sep).join('/');
   const registryImport = `./${REGISTRY_BASENAME}`;
+  // Declared HERE, not next to the loop: the early "nothing wireable" return
+  // below reports the wiring already on disk, and reading it from a const
+  // declared further down threw before it could say anything (temporal dead
+  // zone) — a crash on the one path whose whole job is to report honestly.
+  const registryAbs = path.join(fyodosDirAbs, `${REGISTRY_BASENAME}${ext}`);
+  const bridgeAbs = path.join(fyodosDirAbs, `${BRIDGE_BASENAME}${ext}`);
 
   const mountSnippet =
     `import { ${REGISTRY_EXPORT} } from '${registryImport}';\n` +
@@ -2377,9 +2569,6 @@ async function wireHandlers(appRoot, opts = {}) {
       baseline = { ok: false, stage: 'runner', output: err && err.message };
     }
   }
-
-  const registryAbs = path.join(fyodosDirAbs, `${REGISTRY_BASENAME}${ext}`);
-  const bridgeAbs = path.join(fyodosDirAbs, `${BRIDGE_BASENAME}${ext}`);
 
   // 4b) AUTO-CORRECTION LOOP. When a corrector (AI re-prompt) is available we run
   //     the verify→diagnose→correct→retry loop per action. Only actions that PASS
@@ -2752,6 +2941,8 @@ module.exports = {
   buildAiBridgeEntry,
   ambiguousAnchorSameInsertion,
   // shared with wireSession (same verification + injection machinery)
+  importSourcePath,
+  resolveProposedImport,
   fileHasSymbol,
   freeIdentifiers,
   declaredLocals,
