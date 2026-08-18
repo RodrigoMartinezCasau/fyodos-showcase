@@ -138,6 +138,9 @@ const VALUE_FLAGS = new Set([
   '--store',
   // from-odata (closed-software mode)
   '--app-id', '--app-name', '--app-description', '--auth-ref', '--entities',
+  // which app OF THE COMPANY this analysis describes (internal orbs may have
+  // several of their own; each is a surface of the manifest on its own)
+  '--own-app',
 ]);
 
 /**
@@ -2306,6 +2309,13 @@ async function publishManifest(manifest, meta, analysisToken = null, opts = {}) 
   // server-side before the meta is persisted.
   const payloadMeta = analysisToken ? { ...meta, analysisToken } : meta;
   const payload = { manifest, meta: payloadMeta };
+  // WHICH app of the company this is. A company's internal agent covers every
+  // app the company built, and each is a surface of its own: without this, the
+  // second panel analyzed would land on the first one's surface and take its
+  // place. Absent means the first app, which is what a single-app project has
+  // always meant.
+  const ownApp = arg('--own-app', '');
+  if (ownApp) payload.appId = String(ownApp).trim().toLowerCase();
   // What each screen SAYS, so the agent can answer about the site's own words
   // and not only route to its sections. Only sent when there is something to
   // send: an empty list would be a claim that the site says nothing.
