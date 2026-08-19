@@ -806,6 +806,8 @@ module.exports = {
   ORB_HTML_END,
   ORB_JSX_START,
   ORB_JSX_END,
+  ORB_SCRIPT_START,
+  ORB_SCRIPT_END,
   agentJsx,
   envExpr,
   assessMount,

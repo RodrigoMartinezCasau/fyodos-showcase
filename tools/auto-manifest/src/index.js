@@ -16,6 +16,11 @@
  *   5. gate    — @fiodos/core validateManifest
  *
  * Usage:
+ *   fiodos install [app-root] --api-key <fyodos-project-api-key>
+ *       Put the orb in the app and stop. No code is read, no AI is called, no
+ *       quota is spent — it only writes the block the backend hands over, so
+ *       nobody has to paste JavaScript into their own app. See runInstallOrb.
+ *
  *   node src/index.js <target-app-root> --out <output-dir> \
  *       [--model claude-opus-4-8] [--max-input-tokens 150000] [--no-llm] \
  *       [--publish [--api-key <fyodos-project-api-key>] [--api-url <backend-url>]] \
@@ -433,6 +438,19 @@ async function main() {
           publish: (manifest, meta) => publishManifest(manifest, meta),
         },
       });
+      return;
+    }
+  }
+
+  // ── Install mode: `fiodos install --api-key fyd_…` ─────────────────────────
+  // Puts the orb in the app and stops. No analysis, no AI, no quota, no code
+  // read: the dashboard already knows what the orb can do, and this command
+  // only exists so the block reaches the app without a human carrying it there
+  // through a clipboard.
+  {
+    const pos = positionalArgs();
+    if (pos[0] === 'install') {
+      await runInstallOrb(pos[1] || '.');
       return;
     }
   }
@@ -2415,6 +2433,85 @@ async function postOrbWired({
     logDev(`[orb-wired] skipped: ${e.message || e}`);
     return { ok: false, reason: e.message || String(e) };
   }
+}
+
+/**
+ * Install mode (`fiodos install [dir] --api-key fyd_…`): put the orb in the app.
+ *
+ * The whole reason this exists: on Shopify the orb arrives on its own because
+ * Shopify lends us an API to write into the theme, and every other app used to
+ * make the developer copy a block of JavaScript out of a web page and drop it
+ * in the right place. That step is where installs go wrong and nobody finds
+ * out until the orb never appears. One command, and the block is in.
+ *
+ * It reads NOTHING of the app's code, calls no AI, and spends no quota — the
+ * dashboard already knows what the orb can do. The only thing it needs from
+ * the backend is the block itself, so what lands is always the current one.
+ */
+async function runInstallOrb(target) {
+  const { planInstall, applyInstall, isAlreadyInstalled } = require('./installOrb');
+
+  const appRoot = path.resolve(target);
+  if (!fs.existsSync(appRoot)) {
+    logUser(`No such folder: ${appRoot}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const { apiKey, apiUrl } = resolveApiTarget();
+  if (!apiKey) {
+    logUser('Missing project key — copy the command from your Fiodos dashboard.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const plan = planInstall(appRoot);
+  if (!plan.ok) {
+    logUser(`Cannot install here: ${plan.reason}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  if (isAlreadyInstalled(appRoot, plan)) {
+    logUser(`The orb is already in ${plan.rel} — updating it to the current version.`);
+  }
+
+  let payload;
+  try {
+    const res = await fetch(`${apiUrl}/v1/client/orb-install`, {
+      headers: { 'x-api-key': apiKey },
+    });
+    if (res.status === 401 || res.status === 403) {
+      logUser('That project key was not accepted — copy the command again from your dashboard.');
+      process.exitCode = 1;
+      return;
+    }
+    if (!res.ok) {
+      logUser(`Fiodos answered ${res.status} — nothing was changed. Try again in a moment.`);
+      process.exitCode = 1;
+      return;
+    }
+    payload = await res.json();
+  } catch (e) {
+    logUser(`Could not reach Fiodos (${apiUrl}) — nothing was changed.`);
+    logDev(String((e && e.message) || e));
+    process.exitCode = 1;
+    return;
+  }
+
+  let touched;
+  try {
+    touched = applyInstall(appRoot, plan, payload);
+  } catch (e) {
+    logUser(`Could not install: ${(e && e.message) || e}. Your files were left as they were.`);
+    process.exitCode = 1;
+    return;
+  }
+
+  logUser('The orb is in your app.');
+  for (const rel of touched) logUser(`  ${rel}`);
+  logUser('Deploy as you normally would, and it will appear.');
+  logUser('To remove it, delete the block between the FYODOS:ORB markers.');
 }
 
 /**

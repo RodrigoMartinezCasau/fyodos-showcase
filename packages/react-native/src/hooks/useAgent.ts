@@ -718,7 +718,15 @@ export function useAgent({
           let pendingKey: string | undefined;
           let stepFailed = false;
 
-          if (action && action.type === 'navigate') {
+          // Stricter-wins, read BEFORE the verb: some sensitive acts are a
+          // destination (checkout is a link, and paying is what happens on
+          // arrival), so a navigate to a flagged intent has to pause exactly
+          // like the execute of that same intent would.
+          const flaggedAction = manifest.actions.find((a) => a.intent === action?.intent);
+          const actionNeedsConfirmation =
+            flaggedAction?.requireConfirmation === true || action?.requireConfirmation === true;
+
+          if (action && action.type === 'navigate' && !actionNeedsConfirmation) {
             const actionStartedAt = Date.now();
             const navResult = await executor.execute(action);
             telemetry.logEvent({
@@ -746,22 +754,24 @@ export function useAgent({
               actionKey = `navigate:${action.intent ?? ''}`;
               canContinue = res.taskStatus === 'in_progress';
             }
-          } else if (action && action.type === 'execute') {
+          } else if (action && (action.type === 'execute' || action.type === 'navigate')) {
             const executeContext: AgentScreenContext = actx.screenContext;
-            // Confirmation: STRICTER-WINS between the manifest flag and the
-            // model's own requireConfirmation. The LLM can never SKIP a
-            // manifest confirmation (double validation), but when it marks an
-            // unflagged action sensitive the client honours that caution
-            // instead of executing while the reply asks for confirmation.
-            const manifestAction = manifest.actions.find((a) => a.intent === action.intent);
-            const needsConfirmation =
-              manifestAction?.requireConfirmation === true || action.requireConfirmation === true;
+            // The LLM can never SKIP a manifest confirmation (double
+            // validation), but when it marks an unflagged action sensitive the
+            // client honours that caution instead of executing while the reply
+            // asks for confirmation.
+            const manifestAction = flaggedAction;
+            const needsConfirmation = actionNeedsConfirmation;
 
             if (needsConfirmation) {
               // Precheck (context + idempotency) BEFORE bothering with the
               // modal: asking to apply an already-applied state answers
-              // directly.
-              const pre = await executor.precheck(action, executeContext);
+              // directly. A navigate has no state to have been applied
+              // already, so it goes straight to the question.
+              const pre =
+                action.type === 'navigate'
+                  ? ({ kind: 'ready' } as const)
+                  : await executor.precheck(action, executeContext);
               if (pre.kind === 'done') {
                 const preResult = pre.result;
                 telemetry.logEvent({
