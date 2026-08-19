@@ -17,6 +17,7 @@ const path = require('path');
 const {
   addModuleImport,
   applyInstall,
+  deployNotice,
   injectIntoHtml,
   isAlreadyInstalled,
   planInstall,
@@ -152,7 +153,80 @@ test('a Next install reaches the browser through a client component', () => {
   assert.ok(client.startsWith("'use client';"));
   assert.ok(client.includes('useEffect'));
   assert.ok(fs.existsSync(path.join(root, 'app/fyodos-orb.js')));
-  assert.strictEqual(touched.length, 3);
+  assert.deepStrictEqual(touched, [
+    'app/fyodos-orb.js',
+    'app/fyodos-orb-client.tsx',
+    'app/layout.tsx',
+    'FYODOS_ORB_INSTALL.md',
+  ]);
+});
+
+// ── What it leaves behind for whoever reviews it ────────────────────────────
+
+test('it writes down what it changed, for the person who did not run it', () => {
+  // The terminal that printed "done" will be closed in a minute, and whoever
+  // opens the pull request tomorrow was not there. Without this, a reviewer
+  // finds unexplained edits from a tool they did not run.
+  const root = writeApp(scratch('report'), {
+    'package.json': JSON.stringify({ devDependencies: { vite: '^5' } }),
+    'index.html': HTML,
+  });
+
+  applyInstall(root, planInstall(root), PAYLOAD);
+
+  const report = fs.readFileSync(path.join(root, 'FYODOS_ORB_INSTALL.md'), 'utf8');
+  assert.match(report, /index\.html/);
+  assert.match(report, /FYODOS:ORB/);
+  // The two questions a reviewer actually has.
+  assert.match(report, /## To remove it/);
+  assert.match(report, /## To make it appear in production/);
+});
+
+test('a failed install leaves no report of an install that did not happen', () => {
+  const root = writeApp(scratch('report-revert'), {
+    'package.json': JSON.stringify({ dependencies: { next: '^14' } }),
+    'app/layout.tsx': 'export default function L({children}){return children;}\n',
+  });
+
+  assert.throws(() => applyInstall(root, planInstall(root), PAYLOAD));
+
+  assert.strictEqual(fs.existsSync(path.join(root, 'FYODOS_ORB_INSTALL.md')), false);
+});
+
+const noticeText = () => deployNotice().join('\n');
+
+test('the notice is one reminder, not a tutorial', () => {
+  // The old CLI printed three numbered steps here because the key it wrote
+  // came from a build-time variable that never reached the host. The block we
+  // write carries the key, so there is nothing to configure — and a step that
+  // does nothing would send people looking in the wrong place.
+  assert.strictEqual(deployNotice().length, 1);
+  assert.doesNotMatch(noticeText(), /Step \d|Environment Variables|FYODOS_API_KEY/);
+});
+
+test('the notice names no host and no command', () => {
+  // We do not know their pipeline. Naming a service or a command we merely
+  // guessed at sends anybody whose workflow differs looking for a button that
+  // is not there. "Publish" is true for a push, a build or an upload alike.
+  const notice = noticeText();
+
+  assert.doesNotMatch(notice, /Vercel|Netlify|Cloudflare|GitHub/i);
+  assert.doesNotMatch(notice, /\bgit\b|npm run/);
+  assert.match(notice, /Publish these changes/);
+});
+
+test('the report keeps the cache tip the terminal no longer prints', () => {
+  // Not showing up after a deploy is nearly always a cached page. It does not
+  // belong in a one-line reminder, but it does belong somewhere.
+  const root = writeApp(scratch('cache'), {
+    'package.json': JSON.stringify({ devDependencies: { vite: '^5' } }),
+    'index.html': HTML,
+  });
+
+  applyInstall(root, planInstall(root), PAYLOAD);
+
+  const report = fs.readFileSync(path.join(root, 'FYODOS_ORB_INSTALL.md'), 'utf8');
+  assert.match(report, /Shift \+ R/);
 });
 
 test('a failed install leaves the app exactly as it was', () => {

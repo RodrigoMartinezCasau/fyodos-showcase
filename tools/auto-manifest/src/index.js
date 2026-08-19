@@ -17,9 +17,16 @@
  *
  * Usage:
  *   fiodos install [app-root] --api-key <fyodos-project-api-key>
- *       Put the orb in the app and stop. No code is read, no AI is called, no
- *       quota is spent — it only writes the block the backend hands over, so
- *       nobody has to paste JavaScript into their own app. See runInstallOrb.
+ *       Put the orb in the app and stop. It reads the code only to decide WHERE
+ *       the orb goes (HTML shell, framework entry, Next client component) — it
+ *       never looks for actions, never calls the AI and never spends quota. The
+ *       block itself comes from the backend, so nobody pastes JavaScript into
+ *       their own app. Leaves FYODOS_ORB_INSTALL.md with what changed and the
+ *       deploy step-by-step, and records the install proof so the dashboard's
+ *       connection screen completes. See runInstallOrb.
+ *
+ *       This is how a web app gets the orb. What the orb can DO comes from the
+ *       dashboard (analysis of a connected service), not from this command.
  *
  *   node src/index.js <target-app-root> --out <output-dir> \
  *       [--model claude-opus-4-8] [--max-input-tokens 150000] [--no-llm] \
@@ -493,6 +500,16 @@ async function main() {
   // package (when run via npx, __dirname is under node_modules and writing
   // there pollutes the package). Operators can still override with --out.
   const inputRoot = path.resolve(appRoot);
+  // Say which folder is missing, here, instead of letting the file walk throw a
+  // raw ENOENT stack trace several steps later. This is also what an OLD CLI
+  // does when handed a subcommand it does not know (`install` becomes a folder
+  // name): the person should read what happened, not a stack.
+  if (!fs.existsSync(inputRoot)) {
+    logUser(`No such folder: ${inputRoot}`);
+    logUser('Pass the folder your app lives in, or run this from inside it.');
+    process.exitCode = 1;
+    return;
+  }
   const safeName = path.basename(inputRoot).replace(/[^a-z0-9_-]/gi, '_') || 'app';
   const outDir = arg('--out', path.join(os.tmpdir(), 'fiodos', 'analysis', safeName));
   // Model precedence: explicit --model (operator override) > backend plan model
@@ -2449,7 +2466,13 @@ async function postOrbWired({
  * the backend is the block itself, so what lands is always the current one.
  */
 async function runInstallOrb(target) {
-  const { planInstall, applyInstall, isAlreadyInstalled } = require('./installOrb');
+  const {
+    planInstall,
+    applyInstall,
+    isAlreadyInstalled,
+    deployNotice,
+    REPORT_BASENAME,
+  } = require('./installOrb');
 
   const appRoot = path.resolve(target);
   if (!fs.existsSync(appRoot)) {
@@ -2508,10 +2531,25 @@ async function runInstallOrb(target) {
     return;
   }
 
-  logUser('The orb is in your app.');
-  for (const rel of touched) logUser(`  ${rel}`);
-  logUser('Deploy as you normally would, and it will appear.');
-  logUser('To remove it, delete the block between the FYODOS:ORB markers.');
+  // The dashboard's connection screen waits on this proof to stop saying
+  // "installing". The analysis flow has always posted it; now that `install` is
+  // the way a web app gets the orb, it has to post it too — otherwise a
+  // perfectly installed orb leaves the onboarding stuck forever. Actions here
+  // come from the connected service, not from wiring, so nothing is pending.
+  await postOrbWired({
+    apiKey,
+    apiUrl,
+    file: plan.rel,
+    platform: 'web',
+    actionsStatus: 'done',
+  });
+
+  logUser('The orb is in your app. These files changed:');
+  for (const rel of touched) console.log(`    ${rel}`);
+  console.log('');
+  logUser(`What changed and how to undo it is written down in ${REPORT_BASENAME}.`);
+  // Last, so it is the line still on screen when they look away.
+  for (const line of deployNotice()) logUser(line);
 }
 
 /**
