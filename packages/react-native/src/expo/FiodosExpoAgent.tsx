@@ -41,7 +41,7 @@ import { FiodosProvider } from '../provider/FiodosProvider';
 import { AgentLayer } from '../components/AgentLayer';
 import { AgentOrb } from '../components/AgentOrb';
 import { DEFAULT_ORB_THEME, type AgentModalTheme, type AgentOrbTheme } from '../components/theme';
-import { DEFAULT_API_URL, ensureContactFiodosAction, withContactFiodosHandler } from '@fiodos/core';
+import { ensureContactFiodosAction, resolveApiUrl, withContactFiodosHandler } from '@fiodos/core';
 import { createFiodosBackendClient } from '../api/backendClient';
 import { createFiodosTelemetry } from '../api/backendTelemetry';
 import { resolveImageDataUrlForDisplay } from '../utils/imageUri';
@@ -143,7 +143,7 @@ export function FiodosExpoAgent({
   children,
 }: FiodosExpoAgentProps) {
   const resolvedKey = apiKey ?? process.env.EXPO_PUBLIC_FYODOS_API_KEY;
-  const resolvedUrl = baseUrl ?? process.env.EXPO_PUBLIC_FYODOS_API_URL ?? DEFAULT_API_URL;
+  const resolvedUrl = resolveApiUrl(baseUrl ?? process.env.EXPO_PUBLIC_FYODOS_API_URL);
 
   // Live identity resolver behind a stable ref: hosts often pass an inline
   // arrow function, which must not re-create the adapters on every render.
