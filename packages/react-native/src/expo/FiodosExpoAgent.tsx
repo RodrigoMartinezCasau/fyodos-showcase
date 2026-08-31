@@ -41,7 +41,7 @@ import { FiodosProvider } from '../provider/FiodosProvider';
 import { AgentLayer } from '../components/AgentLayer';
 import { AgentOrb } from '../components/AgentOrb';
 import { DEFAULT_ORB_THEME, type AgentModalTheme, type AgentOrbTheme } from '../components/theme';
-import { ensureContactFiodosAction, withContactFiodosHandler } from '@fiodos/core';
+import { DEFAULT_API_URL, ensureContactFiodosAction, withContactFiodosHandler } from '@fiodos/core';
 import { createFiodosBackendClient } from '../api/backendClient';
 import { createFiodosTelemetry } from '../api/backendTelemetry';
 import { resolveImageDataUrlForDisplay } from '../utils/imageUri';
@@ -58,8 +58,6 @@ declare const __DEV__: boolean;
 // Expo injects EXPO_PUBLIC_* into process.env at build time; the SDK builds
 // without @types/node, so declare the minimal shape we read.
 declare const process: { env: Record<string, string | undefined> };
-
-const DEFAULT_API_URL = 'https://api.fyodos.com';
 
 /** Best-effort STT/TTS locale from a bare UI locale (e.g. 'es' → 'es-ES'). */
 function sttLocaleFor(locale: string): string {

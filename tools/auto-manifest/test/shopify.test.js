@@ -168,7 +168,7 @@ function makeThemeFixture() {
 // ── 5. wireShopifyTheme is idempotent and refreshes in place ─────────────────
 {
   const root = makeThemeFixture();
-  const opts = { apiKey: 'fyo_test_key', apiUrl: 'https://api.fyodos.com' };
+  const opts = { apiKey: 'fyo_test_key', apiUrl: 'https://api.fiodos.com' };
 
   const first = wireShopifyTheme(root, opts);
   assert.strictEqual(first.status, 'added', 'first run injects');
@@ -269,7 +269,7 @@ function makeThemeFixture() {
 //      never shows up" report) ─────────────────────────────────────────────
 {
   const root = makeThemeFixture();
-  const opts = { apiKey: 'fyo_test_key', apiUrl: 'https://api.fyodos.com' };
+  const opts = { apiKey: 'fyo_test_key', apiUrl: 'https://api.fiodos.com' };
   const passwordAbs = path.join(root, 'layout', 'password.liquid');
   fs.writeFileSync(passwordAbs, '<!doctype html>\n<html>\n<body>\n{{ content_for_layout }}\n</body>\n</html>\n');
 
@@ -297,7 +297,7 @@ function makeThemeFixture() {
 //      (closed by default) ─────────────────────────────────────────────────
 {
   const root = makeThemeFixture();
-  const base = { apiKey: 'fyo_test_key', apiUrl: 'https://api.fyodos.com' };
+  const base = { apiKey: 'fyo_test_key', apiUrl: 'https://api.fiodos.com' };
 
   // Without a connector URL (channel disabled / lookup failed): no tag.
   wireShopifyTheme(root, base);
@@ -306,12 +306,12 @@ function makeThemeFixture() {
 
   // With a connector URL: the tag is advertised inside the orb block, and a
   // re-run refreshes the block in place (idempotent markers).
-  const withMcp = { ...base, mcpConnectorUrl: 'https://api.fyodos.com/mcp/app-123' };
+  const withMcp = { ...base, mcpConnectorUrl: 'https://api.fiodos.com/mcp/app-123' };
   const result = wireShopifyTheme(root, withMcp);
   assert.strictEqual(result.status, 'added', 'snippet refreshed with the discovery tag');
   source = fs.readFileSync(path.join(root, 'layout/theme.liquid'), 'utf8');
   assert.ok(
-    source.includes('<link rel="mcp-server" href="https://api.fyodos.com/mcp/app-123" data-fyodos-mcp>'),
+    source.includes('<link rel="mcp-server" href="https://api.fiodos.com/mcp/app-123" data-fyodos-mcp>'),
     'discovery link advertised in the theme layout',
   );
   assert.strictEqual((source.match(/rel="mcp-server"/g) || []).length, 1, 'exactly one discovery tag');
@@ -323,7 +323,7 @@ function makeThemeFixture() {
 // ── 7. Themes without a password.liquid (older/simpler themes) are unaffected
 {
   const root = makeThemeFixture(); // no password.liquid in this fixture
-  const result = wireShopifyTheme(root, { apiKey: 'k', apiUrl: 'https://api.fyodos.com' });
+  const result = wireShopifyTheme(root, { apiKey: 'k', apiUrl: 'https://api.fiodos.com' });
   assert.strictEqual(result.status, 'added', 'theme.liquid still wired');
   assert.strictEqual(result.password, null, 'no password result when the theme has no password.liquid');
   fs.rmSync(root, { recursive: true, force: true });

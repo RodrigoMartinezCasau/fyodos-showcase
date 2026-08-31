@@ -227,7 +227,7 @@ function detectDeployProvider(appRoot) {
  * Compute where the key/URL would go and what would change — no writes, no prompts.
  * @returns {object|null} null when there is nothing to do (already aligned / no key).
  */
-function computeEnvWritePlan(appRoot, apiKey, apiUrl, defaultApiUrl) {
+function computeEnvWritePlan(appRoot, apiKey, apiUrl) {
   if (!apiKey) return null;
 
   const plan = resolveEnvPlan(appRoot);
@@ -256,7 +256,10 @@ function computeEnvWritePlan(appRoot, apiKey, apiUrl, defaultApiUrl) {
   const currentKey = effectiveKey ? effectiveKey.value : undefined;
   const currentUrl = effectiveUrl ? effectiveUrl.value : undefined;
   const targetRel = (effectiveKey && effectiveKey.file) || (effectiveUrl && effectiveUrl.file) || plan.file;
-  const wantUrl = apiUrl && apiUrl !== defaultApiUrl ? apiUrl : null;
+  // Always pin the URL, even when it equals the CLI's default. Omitting it left
+  // the app on whichever default was compiled into the SDK version it happens to
+  // have installed, so a stale pin silently pointed the orb at the wrong host.
+  const wantUrl = apiUrl || null;
   const urlNeedsFix = currentUrl !== undefined && currentUrl !== apiUrl;
   const keyMatches = currentKey === apiKey;
   const urlOk = !urlNeedsFix && (wantUrl ? currentUrl === wantUrl : true);
@@ -360,9 +363,7 @@ function printEnvManualReminder(result, { logUser, logDev }) {
     } else if (writePlan.kind === 'manual-unknown') {
       console.log('  Add to your project .env (use NEXT_PUBLIC_ for Next, VITE_ for Vite):');
       console.log(`    ${writePlan.keyVar}=${writePlan.apiKey}`);
-      if (writePlan.apiUrl && writePlan.apiUrl !== 'https://api.fyodos.com') {
-        console.log(`    ${writePlan.urlVar}=${writePlan.apiUrl}`);
-      }
+      if (writePlan.apiUrl) console.log(`    ${writePlan.urlVar}=${writePlan.apiUrl}`);
     } else {
       console.log(`  File: ${writePlan.absPath}`);
       console.log('  Add these lines:');
@@ -382,8 +383,8 @@ function printEnvManualReminder(result, { logUser, logDev }) {
  * Ask consent and optionally write. Returns { status, writePlan, deploy }.
  * `assumeYes` comes from --write-env-yes only (NOT global --yes).
  */
-async function offerWriteEnv({ appRoot, apiKey, apiUrl, defaultApiUrl, assumeYes, log, logDev: devLog }) {
-  const writePlan = computeEnvWritePlan(appRoot, apiKey, apiUrl, defaultApiUrl);
+async function offerWriteEnv({ appRoot, apiKey, apiUrl, assumeYes, log, logDev: devLog }) {
+  const writePlan = computeEnvWritePlan(appRoot, apiKey, apiUrl);
   if (!writePlan) return { status: 'skipped (no API key)', writePlan: null, deploy: null };
   if (writePlan.kind === 'aligned') {
     log(`Your environment already uses the same API key as this project. Nothing to change.`);

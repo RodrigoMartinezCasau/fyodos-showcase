@@ -132,7 +132,7 @@ class App extends StatelessWidget {
 // ── 5. writeFlutterEnv writes a git-ignored dart-define file ──────────────────
 {
   const { root } = mkApp("void main() {}\n");
-  const r = writeFlutterEnv(root, { apiKey: KEY, apiUrl: 'http://127.0.0.1:8000', defaultApiUrl: 'https://api.fyodos.com' });
+  const r = writeFlutterEnv(root, { apiKey: KEY, apiUrl: 'http://127.0.0.1:8000' });
   assert.strictEqual(r.written, true);
   const json = JSON.parse(fs.readFileSync(path.join(root, 'fyodos.env.json'), 'utf8'));
   assert.strictEqual(json.FYODOS_API_KEY, KEY);

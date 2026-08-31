@@ -138,12 +138,14 @@ function wireFlutterOrb(appRoot, { colors = {}, noWire = false } = {}) {
  * works locally, and the secret never lands in committed source.
  * @returns {{file:string, written:boolean, gitignore:object}}
  */
-function writeFlutterEnv(appRoot, { apiKey, apiUrl, defaultApiUrl }) {
+function writeFlutterEnv(appRoot, { apiKey, apiUrl }) {
   if (!apiKey) return { file: null, written: false, gitignore: null };
   const rel = 'fyodos.env.json';
   const abs = path.join(appRoot, rel);
   const payload = { FYODOS_API_KEY: apiKey };
-  if (apiUrl && apiUrl !== defaultApiUrl) payload.FYODOS_API_URL = apiUrl;
+  // Pinned even when it matches the CLI default, so the app never inherits
+  // whichever default the installed SDK version was built with.
+  if (apiUrl) payload.FYODOS_API_URL = apiUrl;
   fs.writeFileSync(abs, `${JSON.stringify(payload, null, 2)}\n`);
   const gitignore = ensureEnvGitIgnored(appRoot, rel);
   return { file: rel, written: true, gitignore };

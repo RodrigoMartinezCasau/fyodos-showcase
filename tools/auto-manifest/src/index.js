@@ -1455,7 +1455,6 @@ async function main() {
           appRoot: analysisRoot,
           apiKey,
           apiUrl,
-          defaultApiUrl: DEFAULT_API_URL,
           assumeYes: process.argv.includes('--write-env-yes'),
           log: logUser,
           logDev,
@@ -1678,7 +1677,6 @@ async function main() {
           appRoot: analysisRoot,
           apiKey,
           apiUrl,
-          defaultApiUrl: DEFAULT_API_URL,
           assumeYes: process.argv.includes('--write-env-yes'),
           log: logUser,
           logDev,
@@ -1756,11 +1754,7 @@ async function main() {
     // hardcoding the secret in committed source.
     if (apiKey && !process.argv.includes('--no-write-env')) {
       try {
-        envWriteResult = writeFlutterEnv(analysisRoot, {
-          apiKey,
-          apiUrl,
-          defaultApiUrl: DEFAULT_API_URL,
-        });
+        envWriteResult = writeFlutterEnv(analysisRoot, { apiKey, apiUrl });
         if (envWriteResult && envWriteResult.written) {
           logUser(`API key saved to ${envWriteResult.file} (git-ignored).`);
           if (envWriteResult.gitignore && envWriteResult.gitignore.changed) {
@@ -2196,7 +2190,10 @@ async function generateExternalGuardian(manifest, opts = {}) {
 // `npx @fiodos/cli analyze . --publish --api-key …` (no --api-url) reaches prod.
 // Local dev overrides with --api-url http://localhost:8000 or FYODOS_API_URL
 // (or the analyzed app's VITE/NEXT/EXPO_PUBLIC_FYODOS_API_URL via loadAppEnv).
-const DEFAULT_API_URL = 'https://api.fyodos.com';
+// The CLI only requires @fiodos/core defensively (it may be absent in a bundled
+// install), so this mirrors DEFAULT_API_URL in packages/core/src/api/index.ts;
+// backend/tests/test_default_api_url_mirrors.py fails on drift.
+const DEFAULT_API_URL = 'https://api.fiodos.com';
 
 /** Resolve the Fiodos backend target (project API key + URL) from flags/env. */
 function resolveApiTarget() {

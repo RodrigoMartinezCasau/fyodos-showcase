@@ -109,7 +109,7 @@ function testBuildTimePublic() {
 // ── computeEnvWritePlan carries framework + keyVar ────────────────────────────
 function testWritePlan() {
   const dir = mkapp({ 'package.json': JSON.stringify({ dependencies: { vite: '^5', vue: '^3' } }) });
-  const plan = computeEnvWritePlan(dir, KEY, 'https://api.fyodos.com', 'https://api.fyodos.com');
+  const plan = computeEnvWritePlan(dir, KEY, 'https://api.fiodos.com');
   assert.strictEqual(plan.kind, 'writable');
   assert.strictEqual(plan.framework, 'vite');
   assert.strictEqual(plan.keyVar, 'VITE_FYODOS_API_KEY');
@@ -147,8 +147,7 @@ async function testOfferWriteEnvWritesAndIgnores() {
   const res = await offerWriteEnv({
     appRoot: dir,
     apiKey: KEY,
-    apiUrl: 'https://api.fyodos.com',
-    defaultApiUrl: 'https://api.fyodos.com',
+    apiUrl: 'https://api.fiodos.com',
     assumeYes: true,
     log: noop,
     logDev: noop,
@@ -175,8 +174,7 @@ async function testOfferWriteEnvAddsToExistingGitignore() {
   const res = await offerWriteEnv({
     appRoot: dir,
     apiKey: KEY,
-    apiUrl: 'https://api.fyodos.com',
-    defaultApiUrl: 'https://api.fyodos.com',
+    apiUrl: 'https://api.fiodos.com',
     assumeYes: true,
     log: noop,
     logDev: noop,
@@ -192,15 +190,14 @@ async function testOfferWriteEnvExpo() {
   const dir = mkapp({
     'package.json': JSON.stringify({ dependencies: { expo: '~54.0.0', 'expo-router': '~6.0.0', 'react-native': '0.81.5' } }),
   });
-  const plan = computeEnvWritePlan(dir, KEY, 'https://api.fyodos.com', 'https://api.fyodos.com');
+  const plan = computeEnvWritePlan(dir, KEY, 'https://api.fiodos.com');
   assert.strictEqual(plan.framework, 'expo');
   assert.strictEqual(plan.keyVar, 'EXPO_PUBLIC_FYODOS_API_KEY');
 
   const res = await offerWriteEnv({
     appRoot: dir,
     apiKey: KEY,
-    apiUrl: 'https://api.fyodos.com',
-    defaultApiUrl: 'https://api.fyodos.com',
+    apiUrl: 'https://api.fiodos.com',
     assumeYes: true,
     log: noop,
     logDev: noop,
@@ -247,8 +244,7 @@ async function testNoDeployPromptOnlyReminder() {
     offerWriteEnv({
       appRoot: dir,
       apiKey: KEY,
-      apiUrl: 'https://api.fyodos.com',
-      defaultApiUrl: 'https://api.fyodos.com',
+      apiUrl: 'https://api.fiodos.com',
       assumeYes: false,
       log: noop,
       logDev: noop,
