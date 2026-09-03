@@ -115,6 +115,16 @@ export interface FiodosExpoAgentProps {
    * as x-user-id for rate limiting / telemetry correlation.
    */
   getUserId?: () => string | null;
+  /**
+   * The signed-in person's session token, sent as `Authorization: Bearer …`.
+   *
+   * Only for a COMPANY app: the connected services are reached for a proven
+   * member and nobody else, and the project API key that ships in this bundle
+   * proves nothing about who is holding the phone. A customer-facing app leaves
+   * it unset — there is no one to prove, and attaching a stray token to a
+   * shopper's turn would be a new way to leak one.
+   */
+  getAuthToken?: () => string | null | undefined;
   /** Consent paragraphs shown before first use. */
   consentParagraphs?: string[];
   /** App-level orb visibility (auth, hidden routes…). Default true. */
@@ -137,6 +147,7 @@ export function FiodosExpoAgent({
   getSessionCapabilities,
   getUserContextText,
   getUserId,
+  getAuthToken,
   consentParagraphs,
   visible = true,
   backFallbackRoute,
@@ -151,6 +162,12 @@ export function FiodosExpoAgent({
   getUserIdRef.current = getUserId;
   const stableGetUserId = useCallback(() => getUserIdRef.current?.() ?? null, []);
 
+  // The token is re-minted on every login refresh, so it is read per request
+  // through the same stable-ref trick rather than captured at mount.
+  const getAuthTokenRef = useRef(getAuthToken);
+  getAuthTokenRef.current = getAuthToken;
+  const stableGetAuthToken = useCallback(() => getAuthTokenRef.current?.() ?? null, []);
+
   // Adapters + backend are stable for the lifetime of the mount.
   const stable = useMemo(() => {
     const navigation = createExpoRouterNavigationAdapter(
@@ -162,6 +179,7 @@ export function FiodosExpoAgent({
       baseUrl: resolvedUrl,
       apiKey: resolvedKey,
       getUserId: stableGetUserId,
+      getAuthToken: stableGetAuthToken,
     });
     const telemetry = createFiodosTelemetry({
       baseUrl: resolvedUrl,
@@ -169,7 +187,7 @@ export function FiodosExpoAgent({
       getUserId: stableGetUserId,
     });
     return { navigation, storage, voice, backend, telemetry };
-  }, [resolvedUrl, resolvedKey, backFallbackRoute, stableGetUserId]);
+  }, [resolvedUrl, resolvedKey, backFallbackRoute, stableGetUserId, stableGetAuthToken]);
 
   const { remoteOrb, publishedVoiceActivation, orbProfile, ready: orbReady } = usePublishedConfig(
     resolvedUrl,

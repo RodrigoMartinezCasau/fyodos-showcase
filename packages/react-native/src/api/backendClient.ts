@@ -32,6 +32,19 @@ export interface FiodosBackendClientOptions {
   apiKey?: string;
   /** End-user id sent as x-user-id (rate limiting / telemetry correlation). */
   getUserId?: () => string | null;
+  /**
+   * Signed-in session token, sent as `Authorization: Bearer …`.
+   *
+   * Optional and off by default, so a public orb or a key-embedded install is
+   * byte-for-byte unchanged. An app whose users are EMPLOYEES must provide it:
+   * a company orb reaches the company's connected services only for a proven
+   * member, because the project API key ships inside the app and proves nothing
+   * about who is holding it.
+   *
+   * A function, not a string, because the token is re-minted on every
+   * `/v1/auth/me` and a value captured at mount time would go stale.
+   */
+  getAuthToken?: () => string | null | undefined;
   /** Extra headers merged into every request. */
   headers?: Record<string, string>;
   turnTimeoutMs?: number;
@@ -122,10 +135,12 @@ export function createFiodosBackendClient(options: FiodosBackendClientOptions): 
 
   function buildHeaders(): Record<string, string> {
     const userId = options.getUserId?.();
+    const authToken = options.getAuthToken?.();
     return {
       'Content-Type': 'application/json',
       ...(options.apiKey ? { 'x-api-key': options.apiKey } : {}),
       ...(userId ? { 'x-user-id': userId } : {}),
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
       ...(options.headers ?? {}),
     };
   }
