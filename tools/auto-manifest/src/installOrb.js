@@ -153,6 +153,247 @@ function addNextClientMount(source, componentBasename) {
   return `${importBlock}\n${mounted}`;
 }
 
+// ── What the orb can do here, read from the published manifest ──────────────
+
+/** True for either spelling of the same field: the client endpoint serves the
+ *  manifest as the CLI published it (camelCase), the prompt serializer renames
+ *  the same fields on the way to the agent (snake_case). */
+function flagged(entry, camel, snake) {
+  return entry[camel] === true || entry[snake] === true;
+}
+
+function needsConfirmation(action) {
+  return flagged(action, 'requireConfirmation', 'requires_confirmation');
+}
+
+function needsSignIn(action) {
+  const ctx = action.contextRequirements;
+  if (ctx && typeof ctx === 'object' && ctx.requiresAuth === true) return true;
+  return action.requires_auth === true;
+}
+
+/** What to call an entry in the report: its human label, else its intent id. */
+function entryName(entry) {
+  const label = String(entry.label || '').trim();
+  return label || String(entry.intent || '').trim() || '(unnamed)';
+}
+
+/**
+ * Group actions the way somebody reading this file would: by what they touch.
+ *
+ * `category` is the app's own free-form family, filled by the analysis, so it
+ * is the grouping the app itself declared. Actions the agent performs without
+ * app code (a link it opens, a tool of a connected service) are grouped by that
+ * instead — for a reader, "opens a link" is the more useful fact than a family.
+ */
+function actionGroupTitle(action) {
+  const category = String(action.category || '').trim();
+  if (category) return category;
+  if (action.kind === 'link') return 'links';
+  if (action.kind === 'connector_tool') return 'connected service';
+  return 'other';
+}
+
+/**
+ * Read the published manifest into the facts the report states. Pure, and
+ * tolerant of a manifest that is missing anything: this describes somebody's
+ * project, and a field that is not there is a thing to SAY, not to crash on.
+ */
+function summarizeManifest(manifest) {
+  if (!manifest || typeof manifest !== 'object') return null;
+  const routes = Array.isArray(manifest.routes) ? manifest.routes.filter(Boolean) : [];
+  const actions = Array.isArray(manifest.actions) ? manifest.actions.filter(Boolean) : [];
+
+  const screens = routes.map((r) => ({
+    name: entryName(r),
+    address: String(r.route || r.path || '').trim(),
+    description: String(r.description || '').trim(),
+  }));
+
+  const byGroup = new Map();
+  for (const a of actions) {
+    const title = actionGroupTitle(a);
+    if (!byGroup.has(title)) byGroup.set(title, []);
+    byGroup.get(title).push({
+      name: entryName(a),
+      confirms: needsConfirmation(a),
+      signedIn: needsSignIn(a),
+      description: String(a.description || '').trim(),
+    });
+  }
+  const groups = [...byGroup.entries()]
+    .map(([title, items]) => ({ title, actions: items }))
+    .sort((a, b) => b.actions.length - a.actions.length || a.title.localeCompare(b.title));
+
+  const flat = groups.flatMap((g) => g.actions);
+  return {
+    appName: String(manifest.appName || '').trim(),
+    screens,
+    groups,
+    confirming: flat.filter((a) => a.confirms).map((a) => a.name),
+    signedIn: flat.filter((a) => a.signedIn).map((a) => a.name),
+    actionCount: flat.length,
+  };
+}
+
+/**
+ * The gaps, in the words of whoever has to close them.
+ *
+ * An install report that lists three actions and says nothing about the rest
+ * reads like a full account of the orb. Naming what is not there is the only
+ * way the person can tell "it does this" from "this is all it does".
+ */
+function manifestGaps(summary) {
+  const gaps = [];
+  if (!summary.screens.length) {
+    gaps.push(
+      'No screens were published, so the orb cannot take a visitor anywhere — ' +
+      'run the analysis from your Fiodos dashboard.',
+    );
+  }
+  if (!summary.actionCount) {
+    gaps.push(
+      'No actions were published, so the orb can answer but not DO anything yet — ' +
+      'run the analysis from your Fiodos dashboard.',
+    );
+  }
+  const unnamedAddress = summary.screens.filter((s) => !s.address).length;
+  if (unnamedAddress) {
+    gaps.push(
+      `${unnamedAddress} screen(s) carry no address, so the orb cannot open them — ` +
+      'they need one in the dashboard before they work.',
+    );
+  }
+  if (summary.actionCount && !summary.confirming.length) {
+    gaps.push('No action asks before it runs. Add a confirmation in the dashboard to any that should.');
+  }
+  return gaps;
+}
+
+/** `- **Name** — address` lines, or an honest single line when there are none. */
+function screenLines(summary) {
+  if (!summary.screens.length) return ['None published yet.'];
+  return summary.screens.map((s) => {
+    const where = s.address ? ` — \`${s.address}\`` : ' — no address published';
+    return `- **${s.name}**${where}${s.description ? `. ${s.description}` : ''}`;
+  });
+}
+
+function actionLines(summary) {
+  if (!summary.actionCount) return ['None published yet.'];
+  const lines = [];
+  for (const group of summary.groups) {
+    lines.push('', `**${group.title}** (${group.actions.length})`, '');
+    for (const a of group.actions) {
+      const notes = [];
+      if (a.confirms) notes.push('asks first');
+      if (a.signedIn) notes.push('signed-in visitors only');
+      const head = notes.length ? `**${a.name}** — ${notes.join(', ')}` : `**${a.name}**`;
+      lines.push(`- ${head}${a.description ? `. ${a.description}` : ''}`);
+    }
+  }
+  return lines.slice(1); // the leading blank belongs between groups, not above
+}
+
+/**
+ * The section of the report that describes THIS project's orb.
+ *
+ * `capability` is `{ summary }`, `{ manifest: null }` when nothing is published
+ * yet, or `{ unavailable: reason }` when we could not ask. The last case is not
+ * a failure of the install: the block is in the app either way, and the report
+ * says which of the three happened rather than describing an orb it never saw.
+ */
+function capabilitySection(capability) {
+  const lines = ['## What your orb can do on this site', ''];
+  if (!capability || capability.unavailable) {
+    lines.push(
+      'Could not be read: we asked Fiodos for the manifest published for this',
+      `project and ${capability && capability.unavailable ? capability.unavailable : 'got no answer'}.`,
+      'The install itself is complete — this section is a report, not a step.',
+      'The full list lives in your Fiodos dashboard, under the agent’s',
+      'configuration; re-run this command whenever you want it written here.',
+      '',
+    );
+    return lines;
+  }
+  const summary = capability.summary;
+  if (!summary) {
+    lines.push(
+      'Nothing yet: this project has no published manifest, so the orb will',
+      'appear and talk, but it knows no screens and can run no actions. Run the',
+      'analysis from your Fiodos dashboard and the orb picks it up on its next',
+      'page load — this code does not change.',
+      '',
+    );
+    return lines;
+  }
+  lines.push(
+    `Read from the manifest published for ${summary.appName ? `**${summary.appName}**` : 'this project'}: ` +
+    `${summary.screens.length} screen(s), ${summary.actionCount} action(s).`,
+    '',
+    '### Screens it can take a visitor to',
+    '',
+    ...screenLines(summary),
+    '',
+    '### Actions it can run',
+    '',
+    ...actionLines(summary),
+    '',
+    // Counted, not listed again. Every action above already carries "asks
+    // first" and "signed-in visitors only" on its own line, and on an API
+    // built for the person signed in that is nearly all of them — repeating
+    // the same forty names twice more turned the report into something
+    // nobody reads to the end.
+    '### Which of them stop, and which need somebody signed in',
+    '',
+    summary.confirming.length
+      ? `${summary.confirming.length} of ${summary.actionCount} ask before they run (marked *asks first* above).`
+      : 'None of them stop to confirm.',
+    summary.signedIn.length
+      ? `${summary.signedIn.length} need a signed-in visitor (marked *signed-in visitors only* above); ` +
+        `the rest work for anyone who lands on the site.`
+      : 'All of them work for a visitor who is not signed in.',
+    '',
+  );
+  const gaps = manifestGaps(summary);
+  if (gaps.length) {
+    lines.push('### Not there yet', '', ...gaps.map((g) => `- ${g}`), '');
+  }
+  lines.push(
+    'This list comes from Fiodos, not from the block that was installed: a new',
+    'analysis changes what the orb can do without anybody editing this app again.',
+    '',
+  );
+  return lines;
+}
+
+/**
+ * The same account, short enough for the terminal the person is looking at.
+ * Nobody opens a file to find out whether the thing they just ran worked.
+ */
+function capabilitySummaryLines(capability) {
+  if (!capability || capability.unavailable) {
+    return [
+      `Could not read what your orb can do (${(capability && capability.unavailable) || 'no answer'}) — ` +
+      'the install is complete; see the list in your dashboard.',
+    ];
+  }
+  const summary = capability.summary;
+  if (!summary) {
+    return [
+      'Nothing is published for this project yet: the orb will appear and talk, ' +
+      'but knows no screens and no actions. Run the analysis in your dashboard.',
+    ];
+  }
+  const lines = [
+    `Your orb knows ${summary.screens.length} screen(s) and ${summary.actionCount} action(s) ` +
+    `on this site — ${summary.confirming.length} ask(s) before running, ` +
+    `${summary.signedIn.length} need(s) a signed-in visitor.`,
+  ];
+  for (const gap of manifestGaps(summary)) lines.push(gap);
+  return lines;
+}
+
 // ── Deciding what this particular app needs ─────────────────────────────────
 
 /**
@@ -210,7 +451,7 @@ function planInstall(appRoot, io = fs) {
  * touched (relative to appRoot). Restores every file it opened if anything
  * fails, so a refused install leaves the app exactly as it was.
  */
-function applyInstall(appRoot, plan, payload, io = fs) {
+function applyInstall(appRoot, plan, payload, { io = fs, capability = null } = {}) {
   const moduleBasename = payload.moduleBasename || 'fyodos-orb';
   const dir = path.dirname(plan.file);
   const backups = new Map();
@@ -231,7 +472,7 @@ function applyInstall(appRoot, plan, payload, io = fs) {
     // Written last, and inside the same try, so a failed install leaves no
     // report of an install that did not happen.
     const reportFile = path.join(appRoot, REPORT_BASENAME);
-    write(reportFile, buildReport(plan, touched, deployNotice()));
+    write(reportFile, buildReport(plan, touched, deployNotice(), capability));
     return [...touched, REPORT_BASENAME];
   };
 
@@ -292,7 +533,7 @@ function describeChange(strategy, rel) {
  * printed in will be closed, and whoever reviews the pull request tomorrow was
  * not the person who ran the command.
  */
-function buildReport(plan, touched, notice) {
+function buildReport(plan, touched, notice, capability = null) {
   const lines = [
     '# Fiodos — the orb was installed in this app',
     '',
@@ -325,6 +566,7 @@ function buildReport(plan, touched, notice) {
     'anybody touching this code again. No key of yours is read, no source file is',
     'sent anywhere, and nothing here runs at build time.',
     '',
+    ...capabilitySection(capability),
     '## To remove it',
     '',
     'Delete the blocks between the `FYODOS:ORB` markers (and the generated files',
@@ -375,7 +617,10 @@ module.exports = {
   NEXT_CLIENT_BASENAME,
   REPORT_BASENAME,
   buildReport,
+  capabilitySection,
+  capabilitySummaryLines,
   deployNotice,
+  summarizeManifest,
   addModuleImport,
   addNextClientMount,
   applyInstall,

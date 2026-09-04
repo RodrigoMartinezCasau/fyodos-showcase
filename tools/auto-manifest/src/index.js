@@ -2450,6 +2450,58 @@ async function postOrbWired({
 }
 
 /**
+ * The orb block itself, built by the backend from the one mount program. Returns
+ * `{ ok: true, payload }` or `{ ok: false, message }` with what to tell the
+ * developer — this one is NOT fail-open: without the block there is nothing to
+ * install, and a made-up block is worse than no orb.
+ */
+async function fetchOrbBlock({ apiKey, apiUrl }) {
+  try {
+    const res = await fetch(`${apiUrl}/v1/client/orb-install`, {
+      headers: { 'x-api-key': apiKey },
+    });
+    if (res.status === 401 || res.status === 403) {
+      return { ok: false, message: 'That project key was not accepted — copy the command again from your dashboard.' };
+    }
+    if (!res.ok) {
+      return { ok: false, message: `Fiodos answered ${res.status} — nothing was changed. Try again in a moment.` };
+    }
+    return { ok: true, payload: await res.json() };
+  } catch (e) {
+    logDev(String((e && e.message) || e));
+    return { ok: false, message: `Could not reach Fiodos (${apiUrl}) — nothing was changed.` };
+  }
+}
+
+/**
+ * What this project's orb can do, from the manifest the orb itself will fetch.
+ *
+ * FAIL-OPEN, and that is the whole design of it: this is material for a report,
+ * not a step of the install. The block is what makes the orb work; a backend
+ * that did not answer must cost the developer a paragraph, never the install.
+ * Returns `{ summary }`, `{ summary: null }` (nothing published yet), or
+ * `{ unavailable: <reason, in words that finish "and …"> }`.
+ */
+async function fetchOrbCapability({ apiKey, apiUrl }) {
+  const { summarizeManifest } = require('./installOrb');
+  try {
+    const res = await fetch(`${apiUrl}/v1/client/manifest`, {
+      headers: { 'x-api-key': apiKey },
+    });
+    if (res.status === 401 || res.status === 403) {
+      return { unavailable: 'the key was not accepted for reading it' };
+    }
+    if (!res.ok) return { unavailable: `Fiodos answered ${res.status}` };
+    const body = await res.json().catch(() => null);
+    if (!body) return { unavailable: 'the answer could not be read' };
+    return { summary: summarizeManifest(body.manifest) };
+  } catch (e) {
+    logDev(`[install] manifest not read: ${(e && e.message) || e}`);
+    return { unavailable: `we could not reach ${apiUrl}` };
+  }
+}
+
+/**
  * Install mode (`fiodos install [dir] --api-key fyd_…`): put the orb in the app.
  *
  * The whole reason this exists: on Shopify the orb arrives on its own because
@@ -2467,6 +2519,7 @@ async function runInstallOrb(target) {
     planInstall,
     applyInstall,
     isAlreadyInstalled,
+    capabilitySummaryLines,
     deployNotice,
     REPORT_BASENAME,
   } = require('./installOrb');
@@ -2496,55 +2549,51 @@ async function runInstallOrb(target) {
     logUser(`The orb is already in ${plan.rel} — updating it to the current version.`);
   }
 
-  let payload;
-  try {
-    const res = await fetch(`${apiUrl}/v1/client/orb-install`, {
-      headers: { 'x-api-key': apiKey },
-    });
-    if (res.status === 401 || res.status === 403) {
-      logUser('That project key was not accepted — copy the command again from your dashboard.');
-      process.exitCode = 1;
-      return;
-    }
-    if (!res.ok) {
-      logUser(`Fiodos answered ${res.status} — nothing was changed. Try again in a moment.`);
-      process.exitCode = 1;
-      return;
-    }
-    payload = await res.json();
-  } catch (e) {
-    logUser(`Could not reach Fiodos (${apiUrl}) — nothing was changed.`);
-    logDev(String((e && e.message) || e));
+  const asked = await withSpinner('Asking Fiodos for your orb', async ({ setLabel }) => {
+    const block = await fetchOrbBlock({ apiKey, apiUrl });
+    if (!block.ok) return { block };
+    setLabel('Reading what your orb can do');
+    return { block, capability: await fetchOrbCapability({ apiKey, apiUrl }) };
+  });
+  if (!asked.block.ok) {
+    logUser(asked.block.message);
     process.exitCode = 1;
     return;
   }
 
   let touched;
   try {
-    touched = applyInstall(appRoot, plan, payload);
+    touched = await withSpinner(`Writing the orb into ${plan.rel}`, async () => {
+      const files = applyInstall(appRoot, plan, asked.block.payload, {
+        capability: asked.capability,
+      });
+      // The dashboard's connection screen waits on this proof to stop saying
+      // "installing". The analysis flow has always posted it; now that `install`
+      // is the way a web app gets the orb, it has to post it too — otherwise a
+      // perfectly installed orb leaves the onboarding stuck forever. Actions
+      // here come from the connected service, not from wiring, so nothing is
+      // pending.
+      await postOrbWired({
+        apiKey,
+        apiUrl,
+        file: plan.rel,
+        platform: 'web',
+        actionsStatus: 'done',
+      });
+      return files;
+    });
   } catch (e) {
     logUser(`Could not install: ${(e && e.message) || e}. Your files were left as they were.`);
     process.exitCode = 1;
     return;
   }
 
-  // The dashboard's connection screen waits on this proof to stop saying
-  // "installing". The analysis flow has always posted it; now that `install` is
-  // the way a web app gets the orb, it has to post it too — otherwise a
-  // perfectly installed orb leaves the onboarding stuck forever. Actions here
-  // come from the connected service, not from wiring, so nothing is pending.
-  await postOrbWired({
-    apiKey,
-    apiUrl,
-    file: plan.rel,
-    platform: 'web',
-    actionsStatus: 'done',
-  });
-
   logUser('The orb is in your app. These files changed:');
   for (const rel of touched) console.log(`    ${rel}`);
   console.log('');
-  logUser(`What changed and how to undo it is written down in ${REPORT_BASENAME}.`);
+  for (const line of capabilitySummaryLines(asked.capability)) logUser(line);
+  console.log('');
+  logUser(`What your orb can do, what changed and how to undo it: ${REPORT_BASENAME}.`);
   // Last, so it is the line still on screen when they look away.
   for (const line of deployNotice()) logUser(line);
 }
@@ -2879,6 +2928,7 @@ async function verifyOrbCanFetch({ apiKey, apiUrl }) {
 // module for tests does NOT run the CLI thanks to the require.main guard.
 module.exports = {
   pruneUnwiredActions, actionsDetailFromHandlerResult, cancelNoticeLine, rollbackNoticeLine,
+  fetchOrbCapability,
 };
 
 if (require.main === module) {

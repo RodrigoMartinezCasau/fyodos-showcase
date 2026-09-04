@@ -21,6 +21,7 @@ const {
   injectIntoHtml,
   isAlreadyInstalled,
   planInstall,
+  summarizeManifest,
 } = require('../src/installOrb');
 
 const PAYLOAD = {
@@ -243,6 +244,227 @@ test('a failed install leaves the app exactly as it was', () => {
   assert.strictEqual(fs.readFileSync(path.join(root, 'app/layout.tsx'), 'utf8'), before);
   assert.strictEqual(fs.existsSync(path.join(root, 'app/fyodos-orb.js')), false);
   assert.strictEqual(fs.existsSync(path.join(root, 'app/fyodos-orb-client.tsx')), false);
+});
+
+// ── The report says what the orb can DO here, not what installers do ────────
+
+const MANIFEST = {
+  appName: 'Test app',
+  routes: [
+    { intent: 'go_home', label: 'Home', route: '/' },
+    { intent: 'go_account', label: 'Your account', route: '/account' },
+  ],
+  actions: [
+    { intent: 'search_items', label: 'Search items', category: 'items', requireConfirmation: false },
+    { intent: 'delete_item', label: 'Delete an item', category: 'items', requireConfirmation: true },
+    {
+      intent: 'change_email',
+      label: 'Change your email',
+      category: 'account',
+      requireConfirmation: true,
+      contextRequirements: { requiresAuth: true },
+    },
+    { intent: 'open_docs', label: 'Open the documentation', kind: 'link' },
+  ],
+};
+
+/** The lines under one heading, so a name can be checked where it BELONGS. */
+function section(report, heading) {
+  const lines = report.split('\n');
+  const from = lines.findIndex((l) => l.trim() === heading);
+  if (from === -1) return '';
+  const rest = lines.slice(from + 1);
+  const to = rest.findIndex((l) => /^#{2,3} /.test(l));
+  return (to === -1 ? rest : rest.slice(0, to)).join('\n');
+}
+
+function installWith(name, capability) {
+  const root = writeApp(scratch(name), {
+    'package.json': JSON.stringify({ devDependencies: { vite: '^5' } }),
+    'index.html': HTML,
+  });
+  const touched = applyInstall(root, planInstall(root), PAYLOAD, { capability });
+  return { root, touched, report: fs.readFileSync(path.join(root, 'FYODOS_ORB_INSTALL.md'), 'utf8') };
+}
+
+test('the report names the screens the orb can open, with their addresses', () => {
+  const { report } = installWith('report-screens', { summary: summarizeManifest(MANIFEST) });
+
+  const screens = section(report, '### Screens it can take a visitor to');
+  assert.match(screens, /\*\*Your account\*\* — `\/account`/);
+  assert.match(screens, /\*\*Home\*\* — `\/`/);
+});
+
+test('the report groups the actions so a human can read them', () => {
+  const { report } = installWith('report-actions', { summary: summarizeManifest(MANIFEST) });
+
+  const actions = section(report, '### Actions it can run');
+  assert.match(actions, /\*\*items\*\* \(2\)/);
+  assert.match(actions, /\*\*account\*\* \(1\)/);
+  // An action the app performs without app code is grouped by THAT, which is
+  // the useful fact about it, rather than by a family it never declared.
+  assert.match(actions, /\*\*links\*\* \(1\)/);
+  assert.match(actions, /\*\*Search items\*\*/);
+  assert.match(actions, /\*\*Open the documentation\*\*/);
+});
+
+test('the report says which actions ask first and which need a signed-in visitor', () => {
+  const { report } = installWith('report-gates', { summary: summarizeManifest(MANIFEST) });
+
+  // Marked ON the action, not repeated in lists of the same names underneath:
+  // on an API built for the person signed in that second list is nearly every
+  // action, and printing all of them twice more is how a report stops being
+  // read to the end.
+  const actions = section(report, '### Actions it can run');
+  assert.match(actions, /\*\*Delete an item\*\* — asks first/);
+  assert.match(actions, /\*\*Change your email\*\* — asks first, signed-in visitors only/);
+  assert.doesNotMatch(actions, /\*\*Search items\*\* — asks first/);
+  assert.doesNotMatch(actions, /\*\*Delete an item\*\*[^\n]*signed-in/);
+
+  const counts = section(report, '### Which of them stop, and which need somebody signed in');
+  assert.match(counts, /2 of 4 ask before they run/);
+  assert.match(counts, /1 need a signed-in visitor/);
+});
+
+test('both spellings of the same field are read, because both are served', () => {
+  // The client endpoint serves the manifest as the CLI published it; the prompt
+  // serializer renames the same fields on the way to the agent. A report that
+  // knew only one spelling would call a guarded action unguarded.
+  const summary = summarizeManifest({
+    routes: [],
+    actions: [
+      { intent: 'pay', label: 'Pay', requires_confirmation: true, requires_auth: true },
+    ],
+  });
+
+  assert.deepStrictEqual(summary.confirming, ['Pay']);
+  assert.deepStrictEqual(summary.signedIn, ['Pay']);
+});
+
+test('a project with nothing published is told so, not given an empty list', () => {
+  const { report } = installWith('report-empty', { summary: null });
+
+  const what = section(report, '## What your orb can do on this site');
+  assert.match(what, /no published manifest/);
+  assert.match(what, /dashboard/);
+  // Never a count of zero dressed up as a report of the orb's abilities.
+  assert.doesNotMatch(what, /0 screen/);
+});
+
+test('a backend that did not answer costs a paragraph, never the install', () => {
+  // The block is what makes the orb work, and it is already in the file. Losing
+  // the install over the REPORT would trade the working thing for the account
+  // of it.
+  const { root, report, touched } = installWith('report-unreachable', {
+    unavailable: 'we could not reach https://api.example.test',
+  });
+
+  assert.match(fs.readFileSync(path.join(root, 'index.html'), 'utf8'), /FYODOS:ORB:START/);
+  assert.deepStrictEqual(touched, ['index.html', 'FYODOS_ORB_INSTALL.md']);
+
+  const what = section(report, '## What your orb can do on this site');
+  assert.match(what, /Could not be read/);
+  assert.match(what, /we could not reach https:\/\/api\.example\.test/);
+  assert.match(what, /install itself is complete/);
+  assert.match(what, /dashboard/);
+});
+
+test('an empty manifest reports the gap in the words that close it', () => {
+  const { report } = installWith('report-gaps', {
+    summary: summarizeManifest({ appName: 'Test app', routes: [], actions: [] }),
+  });
+
+  const gaps = section(report, '### Not there yet');
+  assert.match(gaps, /No screens were published/);
+  assert.match(gaps, /No actions were published/);
+  assert.match(gaps, /analysis/);
+});
+
+test('the install describes no mount it did not create', () => {
+  // The old drop-in generated a React mount and a document about it. This
+  // command writes a script block; a file describing the other thing would send
+  // whoever reads it looking for code that is not there.
+  const { root, touched, report } = installWith('no-mount-doc', {
+    summary: summarizeManifest(MANIFEST),
+  });
+
+  assert.deepStrictEqual(touched, ['index.html', 'FYODOS_ORB_INSTALL.md']);
+  assert.strictEqual(fs.existsSync(path.join(root, 'src/fyodos')), false);
+  assert.doesNotMatch(report, /FYODOS_ORB_MOUNT|handlers\.generated|FiodosAgent/);
+});
+
+test('installing loads no headless browser', () => {
+  // jsdom is for the analysis path's real-effect probe. An install that pulled
+  // it in would pay a second of startup, and a deprecation warning from a
+  // dependency of it, for something it never uses.
+  const loaded = () => Object.keys(require.cache).some((p) => p.includes(`${path.sep}jsdom${path.sep}`));
+
+  require('../src/installOrb');
+  require('../src/index.js');
+
+  assert.strictEqual(loaded(), false);
+});
+
+// ── Asking the backend what the orb knows, without ever depending on it ─────
+
+async function withFetch(impl, work) {
+  const real = global.fetch;
+  global.fetch = impl;
+  try {
+    return await work();
+  } finally {
+    global.fetch = real;
+  }
+}
+
+test('the manifest is read with the key it was given, from the orb’s own endpoint', async () => {
+  const { fetchOrbCapability } = require('../src/index.js');
+  const calls = [];
+
+  const capability = await withFetch(
+    async (url, opts) => {
+      calls.push({ url, opts });
+      return { ok: true, status: 200, json: async () => ({ manifest: MANIFEST }) };
+    },
+    () => fetchOrbCapability({ apiKey: 'fyd_test', apiUrl: 'https://api.example.test' }),
+  );
+
+  assert.strictEqual(calls[0].url, 'https://api.example.test/v1/client/manifest');
+  assert.strictEqual(calls[0].opts.headers['x-api-key'], 'fyd_test');
+  assert.strictEqual(capability.summary.actionCount, 4);
+});
+
+test('a backend that cannot be reached comes back as a reason to print', async () => {
+  const { fetchOrbCapability } = require('../src/index.js');
+
+  const capability = await withFetch(
+    async () => {
+      throw new Error('ECONNREFUSED');
+    },
+    () => fetchOrbCapability({ apiKey: 'fyd_test', apiUrl: 'https://api.example.test' }),
+  );
+
+  assert.match(capability.unavailable, /api\.example\.test/);
+  assert.strictEqual('summary' in capability, false);
+});
+
+test('a project with no analysis is not confused with a backend that failed', async () => {
+  // Two different things to say: "you have not analysed yet" is the developer's
+  // next step; "we could not ask" is ours. One report line for both would send
+  // somebody to run an analysis they already ran.
+  const { fetchOrbCapability } = require('../src/index.js');
+
+  const published = await withFetch(
+    async () => ({ ok: true, status: 200, json: async () => ({ manifest: null }) }),
+    () => fetchOrbCapability({ apiKey: 'fyd_test', apiUrl: 'https://api.example.test' }),
+  );
+  const refused = await withFetch(
+    async () => ({ ok: false, status: 500, json: async () => ({}) }),
+    () => fetchOrbCapability({ apiKey: 'fyd_test', apiUrl: 'https://api.example.test' }),
+  );
+
+  assert.strictEqual(published.summary, null);
+  assert.match(refused.unavailable, /500/);
 });
 
 test('an app that already carries an orb is recognised as such', () => {
