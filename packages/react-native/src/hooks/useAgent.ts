@@ -30,6 +30,7 @@ import {
   buildBubbleExchangeWindow,
   BUBBLE_PAGE_EXCHANGES,
   classifyConfirmationReply,
+  confirmationQuestionFromTemplate,
   clearPersistedConversation,
   conversationIdentityKey,
   conversationRetentionOptions,
@@ -807,9 +808,14 @@ export function useAgent({
                   spokenAudio = null;
                 }
               } else {
-                // Canonical question from the manifest; LLM's only as fallback.
+                // Canonical question from the manifest, filled with this
+                // turn's values; the LLM's only as fallback. A template with a
+                // placeholder left in it is skipped — see web-core's twin.
                 const confirmationMessage =
-                  manifestAction?.confirmationMessageTemplate ??
+                  confirmationQuestionFromTemplate(
+                    manifestAction?.confirmationMessageTemplate,
+                    action.parameters,
+                  ) ??
                   action.confirmationMessage ??
                   messages.confirmationFallbackQuestion;
                 // Voice resolution mode is dashboard/manifest-governed:
