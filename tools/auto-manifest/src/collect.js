@@ -53,7 +53,73 @@ const PROFILES = {
     exts: ['.liquid', '.json'],
     skipDirs: ['.git', 'node_modules', 'assets', 'dist', 'build'],
   },
+  // Training is not analysis: the failing call may have been served by the
+  // customer's API (Python, Go, …), not only by the page the orb sits on.
+  // Same skip list as web, plus the folders that are never the handler
+  // (venvs, examples, packed builds). No product-folder names — a shoe shop
+  // and this monorepo both work if you point train at the repo root.
+  train: {
+    exts: [
+      '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.vue', '.svelte',
+      '.py', '.go', '.rb', '.php', '.java', '.kt', '.rs', '.cs',
+    ],
+    skipDirs: [
+      'node_modules', 'assets', '.git', 'dist', 'build', '.expo', 'android', 'ios', 'coverage',
+      '.next', 'web-build',
+      'mobile', 'native', 'flutter', 'react-native', 'expo',
+      '.venv', 'venv', '__pycache__', '.mypy_cache', '.pytest_cache', 'vendor', 'target',
+      'examples', 'tarballs', 'tests',
+    ],
+  },
 };
+
+/**
+ * Every source file under `appRoot` for a profile — no budget, no tiering.
+ * `collectFiles` builds its prompt on top of this; `fiodos train` reads it
+ * whole and picks by relevance to ONE failing call, because a budget applied
+ * before relevance is known drops exactly the file the diagnosis needed (a
+ * monorepo's API layer lost the budget race to its screens, 11/09/2026).
+ */
+function readSourceTree(appRoot, platform) {
+  const profile = PROFILES[platform] || PROFILES.mobile;
+  const codeExt = new Set(profile.exts);
+  const skipDirs = new Set(profile.skipDirs);
+  const isNative = platform === 'flutter' || platform === 'ios' || platform === 'android';
+  const files = [];
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      if (entry.isDirectory()) {
+        if (!skipDirs.has(entry.name)) walk(path.join(dir, entry.name));
+        continue;
+      }
+      const full = path.join(dir, entry.name);
+      const rel = path.relative(appRoot, full);
+      if (!codeExt.has(path.extname(entry.name))) continue;
+      if (SKIP_FILES.test(rel)) continue;
+      if (isNative && SKIP_NATIVE_FILES.test(rel)) continue;
+      let content = fs.readFileSync(full, 'utf8');
+      if (platform === 'shopify' && /^locales\//.test(rel.replace(/\\/g, '/'))) {
+        // Theme-editor translations (merchant-facing settings strings), not
+        // storefront language evidence — pure noise for the analysis.
+        if (/\.schema\.json$/.test(rel)) continue;
+        // Non-default storefront locales: what matters is THAT the language is
+        // published (the filename carries the code) — that is the evidence the
+        // MULTILINGUAL rule needs to emit appLanguages/bubblePrompts. Sending
+        // each file whole (tens of KB × dozens of locales) blew the budget and
+        // the alphabetical cut dropped exactly the important ones (en/es
+        // arrived after bg/cs/da…), so the AI saw a "monolingual" store.
+        if (!/\.default\.json$/.test(rel)) {
+          content = '{"__fyodos_note": "published storefront locale (content elided; this language IS offered to shoppers — count it in appLanguages/bubblePrompts)"}';
+        }
+      }
+      files.push({ rel, content, tier: tierFor(rel, platform), chars: content.length });
+    }
+  };
+  walk(appRoot);
+  // Stable order: tier, then path (deterministic prompts → reproducible runs).
+  files.sort((a, b) => a.tier - b.tier || a.rel.localeCompare(b.rel));
+  return files;
+}
 
 const SKIP_FILES = /\.(d\.ts|test\.|spec\.)|babel\.config|metro\.config|tailwind\.config|postcss\.config|jest\.config|eslint/;
 const SKIP_NATIVE_FILES = /\.(g\.dart|freezed\.dart|gr\.dart|mocks\.dart)$|_test\.(dart|kt|swift)$|Test\.kt$|Tests\.swift$/;
@@ -172,45 +238,7 @@ function tierForApp(p) {
 }
 
 function collectFiles(appRoot, { maxInputTokens = 150_000, platform = 'mobile' } = {}) {
-  const profile = PROFILES[platform] || PROFILES.mobile;
-  const codeExt = new Set(profile.exts);
-  const skipDirs = new Set(profile.skipDirs);
-  const isNative = platform === 'flutter' || platform === 'ios' || platform === 'android';
-
-  const files = [];
-  const walk = (dir) => {
-    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
-      if (entry.isDirectory()) {
-        if (!skipDirs.has(entry.name)) walk(path.join(dir, entry.name));
-        continue;
-      }
-      const full = path.join(dir, entry.name);
-      const rel = path.relative(appRoot, full);
-      if (!codeExt.has(path.extname(entry.name))) continue;
-      if (SKIP_FILES.test(rel)) continue;
-      if (isNative && SKIP_NATIVE_FILES.test(rel)) continue;
-      let content = fs.readFileSync(full, 'utf8');
-      if (platform === 'shopify' && /^locales\//.test(rel.replace(/\\/g, '/'))) {
-        // Theme-editor translations (merchant-facing settings strings), not
-        // storefront language evidence — pure noise for the analysis.
-        if (/\.schema\.json$/.test(rel)) continue;
-        // Non-default storefront locales: what matters is THAT the language is
-        // published (the filename carries the code) — that is the evidence the
-        // MULTILINGUAL rule needs to emit appLanguages/bubblePrompts. Sending
-        // each file whole (tens of KB × dozens of locales) blew the budget and
-        // the alphabetical cut dropped exactly the important ones (en/es
-        // arrived after bg/cs/da…), so the AI saw a "monolingual" store.
-        if (!/\.default\.json$/.test(rel)) {
-          content = '{"__fyodos_note": "published storefront locale (content elided; this language IS offered to shoppers — count it in appLanguages/bubblePrompts)"}';
-        }
-      }
-      files.push({ rel, content, tier: tierFor(rel, platform), chars: content.length });
-    }
-  };
-  walk(appRoot);
-
-  // Stable order: tier, then path (deterministic prompts → reproducible runs).
-  files.sort((a, b) => a.tier - b.tier || a.rel.localeCompare(b.rel));
+  const files = readSourceTree(appRoot, platform);
 
   const budgetChars = maxInputTokens * CHARS_PER_TOKEN;
 
@@ -378,6 +406,7 @@ function isAuditRelevantFile(rel, platform) {
 
 module.exports = {
   collectFiles,
+  readSourceTree,
   chunkFilesForSweep,
   CHARS_PER_TOKEN,
   isCentralStateFile,

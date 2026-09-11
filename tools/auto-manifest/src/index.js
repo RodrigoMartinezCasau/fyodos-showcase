@@ -28,11 +28,14 @@
  *       This is how a web app gets the orb. What the orb can DO comes from the
  *       dashboard (analysis of a connected service), not from this command.
  *
- *   fiodos train [app-root] --api-key <fyodos-project-api-key> [--local] [--once] [--verbose]
+ *   fiodos train [repo-root] --api-key <fyodos-project-api-key> [--local] [--once] [--verbose]
  *       The terminal carrier of the training agent: stays open while someone
  *       talks to the orb, sends the code behind each failing call to the
  *       backend for a diagnosis and writes proposed edits into the working
- *       tree (never a commit). `--local` takes over from a project that trains
+ *       tree (never a commit). Run it from the ROOT of the app's repository —
+ *       the folder that holds the API as well as the page, in any language —
+ *       because the call that failed was answered by the API, and a diagnosis
+ *       that cannot see it can only rewrite the manifest. `--local` takes over from a project that trains
  *       through GitHub; `--once` handles what is waiting and exits. See
  *       src/train.js and docs/DESIGN_ENTRENAMIENTO_AGENTE_EXTERNO.md.
  *
@@ -2565,14 +2568,8 @@ async function runTrainSession(target) {
     return;
   }
 
-  const platformArg = (arg('--platform', '') || '').toLowerCase();
-  const platform = ['web', 'mobile', 'flutter', 'ios', 'android'].includes(platformArg)
-    ? platformArg
-    : (() => {
-        const detected = detectPlatform(appRoot, appRoot);
-        return detected === 'shopify' ? 'web' : detected || 'web';
-      })();
-
+  // No platform here: `train` reads the whole repository (page AND API, in any
+  // language) and picks by relevance to each failing call — see src/train.js.
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.once('SIGINT', stop);
@@ -2582,7 +2579,6 @@ async function runTrainSession(target) {
     appRoot,
     apiKey,
     apiUrl,
-    platform,
     local: process.argv.includes('--local'),
     once: process.argv.includes('--once'),
     verbose: process.argv.includes('--verbose'),

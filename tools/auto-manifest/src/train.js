@@ -26,13 +26,18 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { collectFiles } = require('./collect');
+const { readSourceTree } = require('./collect');
 
 const HEARTBEAT_MS = 30_000;
 const POLL_MS = 5_000;
 const MAX_FILES_PER_DIAGNOSIS = 8;
-const MAX_CHARS_PER_DIAGNOSIS = 120_000;
-const MAX_CHARS_PER_FILE = 60_000;
+// A file is sent WHOLE or not at all. The diagnosis answers with the full new
+// content of each file it changes, so a file sent cut in half would come back
+// as half a file and be written over the original — the API layer of a real
+// app (112k chars, measured 11/09/2026) was above the old 60k per-file cut.
+// The total (~80k tokens) leaves room for the evidence and the answer inside
+// every model the developer can pick, the 128k-window ones included.
+const MAX_CHARS_PER_DIAGNOSIS = 240_000;
 
 // ── Backend ──────────────────────────────────────────────────────────────────
 
@@ -127,6 +132,9 @@ const STOP_WORDS = new Set([
   'api', 'v1', 'v2', 'the', 'and', 'for', 'with', 'from', 'this', 'that', 'http', 'https', 'www',
   'get', 'set', 'put', 'post', 'patch', 'delete', 'true', 'false', 'null', 'error', 'string',
   'json', 'com', 'app', 'index', 'main', 'src', 'lib', 'utils', 'types', 'const', 'function',
+  // Words an API publishes in place of an id (`/projects/current`): they name
+  // the caller, not the route, and they are everywhere in any codebase.
+  'current', 'self',
 ]);
 
 function words(value) {
@@ -187,27 +195,57 @@ function scoreFile(file, terms) {
   return score;
 }
 
-/** The files a diagnosis should read for this record, best first, within caps. */
-function locateCode(appRoot, evidence, action, { platform = 'web', collect = collectFiles } = {}) {
-  const collected = collect(appRoot, { maxInputTokens: 400_000, platform });
-  const files = (collected && collected.included) || [];
+/**
+ * The files a diagnosis should read for this record, best first, within caps.
+ *
+ * Run from the ROOT of the app's repository: the call that failed was answered
+ * by the API (Python, Go, Node…), and the page the orb sits on is only half of
+ * the story. The whole tree is read (no analysis budget — that budget is
+ * applied before relevance is known and drops exactly the file a diagnosis
+ * needs), every file is scored against the failing call, and the best ones go
+ * whole. A file too large to go whole is named in `tooLarge` so the diagnosis
+ * knows it exists and can say the fix belongs there without rewriting it.
+ */
+function locateCode(appRoot, evidence, action, { read = readSourceTree } = {}) {
+  const files = read(appRoot, 'train') || [];
   const terms = termsFor(evidence, action);
   const ranked = files
     .map((f) => ({ file: f, score: scoreFile(f, terms) }))
     .filter((r) => r.score > 0)
     .sort((a, b) => b.score - a.score || a.file.rel.localeCompare(b.file.rel));
   const picked = [];
+  const tooLarge = [];
   let used = 0;
   for (const { file } of ranked) {
     if (picked.length >= MAX_FILES_PER_DIAGNOSIS) break;
-    const content = file.content.length > MAX_CHARS_PER_FILE
-      ? `${file.content.slice(0, MAX_CHARS_PER_FILE)}\n/* … truncated by fiodos train (${file.content.length} chars) … */`
-      : file.content;
-    if (used + content.length > MAX_CHARS_PER_DIAGNOSIS) continue;
-    picked.push({ path: file.rel.replace(/\\/g, '/'), content });
-    used += content.length;
+    const rel = file.rel.replace(/\\/g, '/');
+    if (file.content.length > MAX_CHARS_PER_DIAGNOSIS) {
+      if (tooLarge.length < 4) tooLarge.push({ path: rel, chars: file.content.length });
+      continue;
+    }
+    if (used + file.content.length > MAX_CHARS_PER_DIAGNOSIS) continue;
+    picked.push({ path: rel, content: file.content });
+    used += file.content.length;
   }
-  return { files: picked, considered: files.length, terms: [...terms.keys()] };
+  return { files: picked, tooLarge, considered: files.length, terms: [...terms.keys()] };
+}
+
+/** What the brief says about where the code came from and what could not go. */
+function locateNotes(located) {
+  if (!located.files.length && !located.tooLarge.length) {
+    return 'No matching code file was found in the working tree.';
+  }
+  const parts = [
+    `Files picked by fiodos train from ${located.considered} in the repository (each one complete); terms: ${located.terms.slice(0, 12).join(', ')}.`,
+  ];
+  if (located.tooLarge.length) {
+    parts.push(
+      'Also matching but too large to send, so NOT shown and NOT to be rewritten: ' +
+        located.tooLarge.map((f) => `${f.path} (${f.chars} chars)`).join(', ') +
+        '. If the fix belongs there, say so in `cause` and propose no code change for it.',
+    );
+  }
+  return parts.join(' ');
 }
 
 // ── Writing what the diagnosis proposes ──────────────────────────────────────
@@ -218,8 +256,11 @@ const NEVER_WRITE = /(^|\/)(node_modules|\.git|\.env[^/]*|dist|build)(\/|$)/;
  * Put the proposed files into the working tree — and nothing else: no commit,
  * no branch, no stash. The developer's git shows the diff and decides. A path
  * that leaves the app folder, or lands in dependencies or secrets, is refused.
+ * So is a rewrite of an EXISTING file the diagnosis was not shown whole
+ * (`shown`): the answer carries full file contents, and a full content written
+ * over a file the model never read is that file gone. New files may be created.
  */
-function applyCodeChanges(appRoot, codeChanges, { io = fs } = {}) {
+function applyCodeChanges(appRoot, codeChanges, { io = fs, shown = null } = {}) {
   const root = path.resolve(appRoot);
   const written = [];
   const refused = [];
@@ -229,6 +270,10 @@ function applyCodeChanges(appRoot, codeChanges, { io = fs } = {}) {
     const full = path.resolve(root, rel);
     if (!full.startsWith(root + path.sep) || NEVER_WRITE.test(rel)) {
       refused.push({ path: change.path, reason: 'outside the app or in a folder the agent never writes' });
+      continue;
+    }
+    if (shown && !shown.has(rel) && io.existsSync(full)) {
+      refused.push({ path: change.path, reason: 'exists but was not shown whole to the diagnosis — writing it would lose code' });
       continue;
     }
     io.mkdirSync(path.dirname(full), { recursive: true });
@@ -295,7 +340,7 @@ function describeOutcome(outcome, { verbose = false } = {}) {
  * action is locked). Never throws for a single record's failure: the run is
  * marked failed in the backend and the session goes on.
  */
-async function handleEvidence(client, appRoot, evidence, { local, log, platform, verbose = false, waiting = 0 }) {
+async function handleEvidence(client, appRoot, evidence, { local, log, verbose = false, waiting = 0 }) {
   let claimed;
   try {
     claimed = await client.claim(evidence.id, local);
@@ -315,16 +360,16 @@ async function handleEvidence(client, appRoot, evidence, { local, log, platform,
   }
 
   log('  Fixing…');
-  const located = locateCode(appRoot, claimed.evidence || evidence, action, { platform });
+  const located = locateCode(appRoot, claimed.evidence || evidence, action);
   try {
     const outcome = await client.diagnose(runId, {
       evidenceId: evidence.id,
       codeFiles: located.files,
-      notes: located.files.length
-        ? `Files picked by fiodos train from ${located.considered} in the working tree; terms: ${located.terms.slice(0, 12).join(', ')}.`
-        : 'No matching code file was found in the working tree.',
+      notes: locateNotes(located),
     });
-    const applied = applyCodeChanges(appRoot, outcome.codeChanges);
+    const applied = applyCodeChanges(appRoot, outcome.codeChanges, {
+      shown: new Set(located.files.map((f) => f.path)),
+    });
     const result = { ...outcome, written: applied.written, refused: applied.refused };
     for (const line of describeOutcome(result, { verbose })) log(`  ${line}`);
     for (const r of applied.refused) log(`  refused ${r.path}: ${r.reason}`);
@@ -357,7 +402,6 @@ async function runTrain({
   local = false,
   once = false,
   verbose = false,
-  platform = 'web',
   fetchImpl,
   log = (line) => console.error(line),
   sleep = (ms) => new Promise((r) => setTimeout(r, ms)),
@@ -432,7 +476,7 @@ async function runTrain({
         if (aborted()) break;
         const ev = items[i];
         const outcome = await handleEvidence(client, root, ev, {
-          local, log, platform, verbose, waiting: items.length - i - 1,
+          local, log, verbose, waiting: items.length - i - 1,
         });
         if (outcome) handled.push({ evidenceId: ev.id, intent: ev.intent, ...outcome });
       }
@@ -458,6 +502,7 @@ module.exports = {
   describeOutcome,
   handleEvidence,
   locateCode,
+  locateNotes,
   runTrain,
   termsFor,
   HEARTBEAT_MS,

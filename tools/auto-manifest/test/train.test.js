@@ -15,7 +15,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { applyCodeChanges, locateCode, runTrain, termsFor } = require('../src/train');
+const { applyCodeChanges, locateCode, locateNotes, runTrain, termsFor } = require('../src/train');
 
 function tmpApp() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fiodos-train-'));
@@ -64,10 +64,72 @@ test('the code sent for a diagnosis is the code the failing call points at', () 
   assert.ok(terms.has('colour') || terms.has('update'), 'the intent');
   assert.ok(terms.has('accentcolor') || terms.has('accent'), 'the parameter');
 
-  const located = locateCode(root, EVIDENCE, ACTION, { platform: 'web' });
+  const located = locateCode(root, EVIDENCE, ACTION);
   assert.equal(located.files[0].path, 'src/api/appearance.ts');
   assert.ok(located.files.length < located.considered, 'not the whole tree');
   assert.ok(!located.files.some((f) => f.path.endsWith('Footer.tsx')), 'unrelated UI is left out');
+});
+
+test('a diagnosis from the repo root can see the API, even when it is Python', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fiodos-train-mono-'));
+  fs.mkdirSync(path.join(root, 'dashboard', 'src'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'backend', 'routes'), { recursive: true });
+  fs.mkdirSync(path.join(root, 'examples', 'other'), { recursive: true });
+  fs.writeFileSync(path.join(root, 'dashboard', 'src', 'Home.tsx'), 'export const Home = () => <main>home</main>;\n');
+  fs.writeFileSync(
+    path.join(root, 'backend', 'routes', 'app_api.py'),
+    [
+      '@router.patch("/v1/projects/{projectId}/appearance")',
+      'def update_appearance(accentColor: str):',
+      '    if not accentColor.startswith("#"):',
+      '        raise HTTPException(400, "invalid_value")',
+      '',
+    ].join('\n'),
+  );
+  fs.writeFileSync(path.join(root, 'examples', 'other', 'appearance.py'), 'def update_appearance():\n    pass\n');
+
+  const located = locateCode(root, EVIDENCE, ACTION);
+  assert.ok(
+    located.files.some((f) => f.path === 'backend/routes/app_api.py'),
+    `API was not among ${located.files.map((f) => f.path).join(', ') || '(none)'}`,
+  );
+  assert.ok(
+    !located.files.some((f) => f.path.startsWith('examples/')),
+    'example apps are not the customer API',
+  );
+});
+
+test('a file is sent whole or not at all, and a file the model never read is never overwritten', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fiodos-train-whole-'));
+  fs.mkdirSync(path.join(root, 'api'), { recursive: true });
+  // The relevant file, far above the per-diagnosis cap: the old code cut it at
+  // 60k chars and the model answered with "the full new content" of half a file.
+  const huge = `# appearance route\n${'x = 1  # appearance accentColor\n'.repeat(12_000)}`;
+  assert.ok(huge.length > 240_000);
+  fs.writeFileSync(path.join(root, 'api', 'appearance.py'), huge);
+  fs.writeFileSync(path.join(root, 'api', 'colours.py'), 'def accent_color(appearance):\n    return appearance\n');
+
+  const located = locateCode(root, EVIDENCE, ACTION);
+  assert.ok(!located.files.some((f) => f.path === 'api/appearance.py'), 'the huge file did not go cut');
+  assert.ok(!located.files.some((f) => f.content.includes('truncated')), 'nothing goes truncated');
+  assert.deepEqual(located.tooLarge.map((f) => f.path), ['api/appearance.py']);
+  assert.ok(located.files.some((f) => f.path === 'api/colours.py'), 'the smaller relevant file still goes');
+  assert.match(locateNotes(located), /too large to send.*api\/appearance\.py/);
+
+  // The model proposes to rewrite the file it never read: refused, the file is intact.
+  const result = applyCodeChanges(
+    root,
+    [
+      { path: 'api/appearance.py', content: '# half a file\n' },
+      { path: 'api/colours.py', content: '# seen whole, may change\n' },
+      { path: 'api/new_route.py', content: '# a new file may be created\n' },
+    ],
+    { shown: new Set(located.files.map((f) => f.path)) },
+  );
+  assert.deepEqual(result.written.map((w) => w.path).sort(), ['api/colours.py', 'api/new_route.py']);
+  assert.equal(result.refused.length, 1);
+  assert.match(result.refused[0].reason, /not shown whole/);
+  assert.equal(fs.readFileSync(path.join(root, 'api', 'appearance.py'), 'utf8'), huge);
 });
 
 test('proposed edits land in the working tree, never outside it, never as a commit', () => {
