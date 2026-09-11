@@ -3,9 +3,11 @@
  *
  * What these tests defend: the session presents itself and says goodbye; the
  * code sent for a diagnosis is the code the failing call points at (not the
- * whole tree); proposed edits land in the working tree and nowhere dangerous,
- * and never as a commit; a project training through GitHub is not taken over
- * by accident (D18); the run is marked failed when the terminal cannot finish.
+ * whole tree), read from the repository root in any language, each file whole
+ * or not at all; the repository is READ and never written — even when a model
+ * answers with code, nothing lands in the working tree (owner's decision,
+ * 11/09/2026); a project training through GitHub is not taken over by accident
+ * (D18); the run is marked failed when the terminal cannot finish.
  */
 'use strict';
 
@@ -15,7 +17,22 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const { applyCodeChanges, locateCode, locateNotes, runTrain, termsFor } = require('../src/train');
+const train = require('../src/train');
+const { locateCode, locateNotes, runTrain, termsFor } = train;
+
+/** Every file under `root` with its content — to prove a run changed none of them. */
+function snapshot(root) {
+  const out = {};
+  const walk = (dir) => {
+    for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+      const full = path.join(dir, entry.name);
+      if (entry.isDirectory()) walk(full);
+      else out[path.relative(root, full)] = fs.readFileSync(full, 'utf8');
+    }
+  };
+  walk(root);
+  return out;
+}
 
 function tmpApp() {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fiodos-train-'));
@@ -99,11 +116,12 @@ test('a diagnosis from the repo root can see the API, even when it is Python', (
   );
 });
 
-test('a file is sent whole or not at all, and a file the model never read is never overwritten', () => {
+test('a file is sent whole or not at all', () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'fiodos-train-whole-'));
   fs.mkdirSync(path.join(root, 'api'), { recursive: true });
   // The relevant file, far above the per-diagnosis cap: the old code cut it at
-  // 60k chars and the model answered with "the full new content" of half a file.
+  // 60k chars, and half a route file teaches the model half of what the
+  // endpoint accepts — the manifest it writes is then a guess.
   const huge = `# appearance route\n${'x = 1  # appearance accentColor\n'.repeat(12_000)}`;
   assert.ok(huge.length > 240_000);
   fs.writeFileSync(path.join(root, 'api', 'appearance.py'), huge);
@@ -115,42 +133,45 @@ test('a file is sent whole or not at all, and a file the model never read is nev
   assert.deepEqual(located.tooLarge.map((f) => f.path), ['api/appearance.py']);
   assert.ok(located.files.some((f) => f.path === 'api/colours.py'), 'the smaller relevant file still goes');
   assert.match(locateNotes(located), /too large to send.*api\/appearance\.py/);
-
-  // The model proposes to rewrite the file it never read: refused, the file is intact.
-  const result = applyCodeChanges(
-    root,
-    [
-      { path: 'api/appearance.py', content: '# half a file\n' },
-      { path: 'api/colours.py', content: '# seen whole, may change\n' },
-      { path: 'api/new_route.py', content: '# a new file may be created\n' },
-    ],
-    { shown: new Set(located.files.map((f) => f.path)) },
-  );
-  assert.deepEqual(result.written.map((w) => w.path).sort(), ['api/colours.py', 'api/new_route.py']);
-  assert.equal(result.refused.length, 1);
-  assert.match(result.refused[0].reason, /not shown whole/);
-  assert.equal(fs.readFileSync(path.join(root, 'api', 'appearance.py'), 'utf8'), huge);
 });
 
-test('proposed edits land in the working tree, never outside it, never as a commit', () => {
+test('the terminal has no way to write code: the module exports none, and a run leaves the tree byte for byte', async () => {
+  // Not a rule the model is asked to follow — a channel that does not exist.
+  assert.equal(train.applyCodeChanges, undefined);
+  assert.ok(!/writeFileSync|mkdirSync/.test(fs.readFileSync(path.join(__dirname, '..', 'src', 'train.js'), 'utf8')));
+
+  // A backend (or a model behind it) that answers with code anyway: nothing lands.
   const root = tmpApp();
   fs.mkdirSync(path.join(root, '.git'));
-  const result = applyCodeChanges(root, [
-    { path: 'src/api/appearance.ts', content: '// fixed\n', summary: 'accept colour names' },
-    { path: '../escape.ts', content: 'nope' },
-    { path: 'node_modules/x/index.js', content: 'nope' },
-    { path: '.env', content: 'SECRET=1' },
-  ]);
-  assert.deepEqual(result.written.map((w) => w.path), ['src/api/appearance.ts']);
-  assert.equal(result.refused.length, 3);
-  assert.equal(fs.readFileSync(path.join(root, 'src', 'api', 'appearance.ts'), 'utf8'), '// fixed\n');
-  assert.ok(!fs.existsSync(path.join(path.dirname(root), 'escape.ts')));
-  // No commit: the .git folder is exactly what it was (empty).
-  assert.deepEqual(fs.readdirSync(path.join(root, '.git')), []);
+  const before = snapshot(root);
+  const backend = fakeBackend({
+    evidence: [EVIDENCE],
+    diagnosis: {
+      status: 'unresolved',
+      manifestPatched: false,
+      codeChanges: [{ path: 'src/api/appearance.ts', content: '// rewritten by a model\n', summary: 'nope' }],
+    },
+  });
+  const result = await runTrain({
+    appRoot: root,
+    apiKey: 'fyd_ok',
+    apiUrl: 'https://api.test',
+    once: true,
+    fetchImpl: backend.fetchImpl,
+    log: () => {},
+    sleep: async () => {},
+  });
+  assert.equal(result.ok, true);
+  assert.deepEqual(snapshot(root), before, 'no file of the repository changed');
+  assert.deepEqual(fs.readdirSync(path.join(root, '.git')), [], 'and no commit');
 });
 
 /** A backend that remembers what the terminal did to it. */
-function fakeBackend({ settings = { enabled: false, carrier: 'terminal', maxAttempts: null }, evidence = [] } = {}) {
+function fakeBackend({
+  settings = { enabled: false, carrier: 'terminal', maxAttempts: null },
+  evidence = [],
+  diagnosis = {},
+} = {}) {
   const calls = [];
   let served = false;
   const fetchImpl = async (url, init = {}) => {
@@ -184,15 +205,15 @@ function fakeBackend({ settings = { enabled: false, carrier: 'terminal', maxAtte
       return json(200, {
         runId: 'run_1',
         class: 'B',
-        cause: 'The API only accepts #rrggbb; the orb sends colour names.',
-        manifestPatched: false,
+        cause: 'The manifest sent `colour`; the route reads `accentColor`.',
+        manifestPatched: true,
         manifestReverted: false,
-        verify: null,
-        codeChanges: [{ path: 'src/api/appearance.ts', content: '// accepts names\n', summary: 'accept colour names' }],
-        explanation: 'Accept CSS colour names.',
+        verify: { ok: true },
+        explanation: 'The template now names the field the code declares.',
         locked: false,
         attempts: 1,
-        status: 'proposed',
+        status: 'patched',
+        ...diagnosis,
       });
     }
     if (/\/runs\/run_1\/fail$/.test(u.pathname)) return json(200, { ok: true });
@@ -201,8 +222,9 @@ function fakeBackend({ settings = { enabled: false, carrier: 'terminal', maxAtte
   return { fetchImpl, calls };
 }
 
-test('a session presents itself, diagnoses what is waiting, writes the edit and says goodbye', async () => {
+test('a session presents itself, diagnoses what is waiting, reports the manifest fix and says goodbye', async () => {
   const root = tmpApp();
+  const before = snapshot(root);
   const backend = fakeBackend({ evidence: [EVIDENCE] });
   const log = [];
   const result = await runTrain({
@@ -216,9 +238,8 @@ test('a session presents itself, diagnoses what is waiting, writes the edit and 
   });
   assert.equal(result.ok, true, JSON.stringify(result));
   assert.equal(result.handled.length, 1);
-  assert.equal(result.handled[0].status, 'proposed');
-  assert.deepEqual(result.handled[0].written.map((w) => w.path), ['src/api/appearance.ts']);
-  assert.equal(fs.readFileSync(path.join(root, 'src', 'api', 'appearance.ts'), 'utf8'), '// accepts names\n');
+  assert.equal(result.handled[0].status, 'patched');
+  assert.deepEqual(snapshot(root), before, 'the repository is read, never written');
 
   const paths = backend.calls.map((c) => `${c.method} ${c.path}`);
   assert.equal(paths[0], 'GET /v1/developer/training/status');
@@ -231,14 +252,15 @@ test('a session presents itself, diagnoses what is waiting, writes the edit and 
   // The diagnosis was sent ONLY the located files, not the tree.
   const diagnose = backend.calls.find((c) => /diagnose$/.test(c.path));
   assert.ok(diagnose.body.codeFiles.length >= 1 && diagnose.body.codeFiles.length < 4);
-  assert.ok(log.some((l) => /nothing was committed/i.test(l)));
   // Straight to the point: the failure, "Fixing…", what was fixed and what to
-  // do to see it. The model's explanation only with --verbose.
+  // do to see it (reload: the manifest is served on load). The model's
+  // explanation only with --verbose. Never "fixed in code".
   assert.ok(log.some((l) => /^Failure found: “make the orb green” → update_colour$/.test(l)), log.join('\n'));
   assert.ok(log.some((l) => /Fixing…/.test(l)));
-  assert.ok(log.some((l) => /Fixed in code: src\/api\/appearance\.ts/.test(l)));
-  assert.ok(log.some((l) => /commit and deploy to see it/.test(l)));
-  assert.ok(!log.some((l) => /Accept CSS colour names/.test(l)), 'explanation is verbose-only');
+  assert.ok(log.some((l) => /Fixed in the manifest/.test(l)));
+  assert.ok(log.some((l) => /Reload the page/.test(l)));
+  assert.ok(!log.some((l) => /in code|commit|deploy/i.test(l)), log.join('\n'));
+  assert.ok(!log.some((l) => /names the field the code declares/.test(l)), 'explanation is verbose-only');
 });
 
 test('failures are fixed one at a time, oldest first, with the queue counted; a repeat is one line and no diagnosis', async () => {

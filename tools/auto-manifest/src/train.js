@@ -7,9 +7,15 @@
  * came back; this command presents itself (so the backend knows the project is
  * training — a single complaint is enough evidence with an engineer present,
  * D20), fetches the records that earned a diagnosis, LOCATES the code that
- * answered the failing call, sends it to the backend for the diagnosis, and
- * writes the code changes the diagnosis proposes into the working tree — as
- * plain edits, never a commit. The developer reviews them in their own git.
+ * answered the failing call and sends it to the backend for the diagnosis.
+ *
+ * The code is READ, never written (owner's decision, 11/09/2026). The agent
+ * connects what people say to what the app's code already does — the right
+ * route, method, fields and phrases go into the MANIFEST, which the backend
+ * serves at the orb's next page load. What the code cannot do is reported as
+ * a missing capability for the developer to build; an agent allowed to write
+ * code would, asked to "add a TV to the cart" on a site that sells no TVs,
+ * build a place to sell TVs. This command touches no file of the repository.
  *
  * What it is not: the brain. Diagnosis, the manifest patch and its replay
  * check (D19), the attempts cap (D5) and the accounting all live in the
@@ -31,12 +37,11 @@ const { readSourceTree } = require('./collect');
 const HEARTBEAT_MS = 30_000;
 const POLL_MS = 5_000;
 const MAX_FILES_PER_DIAGNOSIS = 8;
-// A file is sent WHOLE or not at all. The diagnosis answers with the full new
-// content of each file it changes, so a file sent cut in half would come back
-// as half a file and be written over the original — the API layer of a real
-// app (112k chars, measured 11/09/2026) was above the old 60k per-file cut.
-// The total (~80k tokens) leaves room for the evidence and the answer inside
-// every model the developer can pick, the 128k-window ones included.
+// A file is sent WHOLE or not at all: half a route file teaches the model half
+// of what the endpoint accepts, and the manifest it writes is then a guess.
+// The API layer of a real app (112k chars, measured 11/09/2026) was above the
+// old 60k per-file cut. The total (~80k tokens) leaves room for the evidence
+// and the answer inside every model the developer can pick, 128k windows too.
 const MAX_CHARS_PER_DIAGNOSIS = 240_000;
 
 // ── Backend ──────────────────────────────────────────────────────────────────
@@ -240,47 +245,12 @@ function locateNotes(located) {
   ];
   if (located.tooLarge.length) {
     parts.push(
-      'Also matching but too large to send, so NOT shown and NOT to be rewritten: ' +
+      'Also matching but too large to send, so NOT shown: ' +
         located.tooLarge.map((f) => `${f.path} (${f.chars} chars)`).join(', ') +
-        '. If the fix belongs there, say so in `cause` and propose no code change for it.',
+        '. Do not point the manifest at a route or field you have not seen declared; if the answer lives there, say so in `cause`.',
     );
   }
   return parts.join(' ');
-}
-
-// ── Writing what the diagnosis proposes ──────────────────────────────────────
-
-const NEVER_WRITE = /(^|\/)(node_modules|\.git|\.env[^/]*|dist|build)(\/|$)/;
-
-/**
- * Put the proposed files into the working tree — and nothing else: no commit,
- * no branch, no stash. The developer's git shows the diff and decides. A path
- * that leaves the app folder, or lands in dependencies or secrets, is refused.
- * So is a rewrite of an EXISTING file the diagnosis was not shown whole
- * (`shown`): the answer carries full file contents, and a full content written
- * over a file the model never read is that file gone. New files may be created.
- */
-function applyCodeChanges(appRoot, codeChanges, { io = fs, shown = null } = {}) {
-  const root = path.resolve(appRoot);
-  const written = [];
-  const refused = [];
-  for (const change of Array.isArray(codeChanges) ? codeChanges : []) {
-    if (!change || typeof change.path !== 'string' || typeof change.content !== 'string') continue;
-    const rel = change.path.replace(/\\/g, '/').replace(/^\/+/, '');
-    const full = path.resolve(root, rel);
-    if (!full.startsWith(root + path.sep) || NEVER_WRITE.test(rel)) {
-      refused.push({ path: change.path, reason: 'outside the app or in a folder the agent never writes' });
-      continue;
-    }
-    if (shown && !shown.has(rel) && io.existsSync(full)) {
-      refused.push({ path: change.path, reason: 'exists but was not shown whole to the diagnosis — writing it would lose code' });
-      continue;
-    }
-    io.mkdirSync(path.dirname(full), { recursive: true });
-    io.writeFileSync(full, change.content, 'utf8');
-    written.push({ path: rel, summary: change.summary || '' });
-  }
-  return { written, refused };
 }
 
 // ── The session ──────────────────────────────────────────────────────────────
@@ -288,14 +258,13 @@ function applyCodeChanges(appRoot, codeChanges, { io = fs, shown = null } = {}) 
 /**
  * What the terminal says about one concluded run. Straight to the point: the
  * engineer is watching people talk to the orb, not reading an essay. One line
- * for the verdict, one for what was written and what they must do to see it
- * (reload the page with the orb for a manifest fix; review, commit and deploy
- * for a code fix). The model's explanation only with `verbose`.
+ * for the verdict, one for what to do to see it (reload the page with the
+ * orb: the manifest is served on load). The model's explanation only with
+ * `verbose`. Nothing here is ever "fixed in code": the agent does not write
+ * code, so what the app cannot do is named for the developer to build.
  */
 function describeOutcome(outcome, { verbose = false } = {}) {
   const lines = [];
-  const written = Array.isArray(outcome.written) ? outcome.written : [];
-  const proposed = Array.isArray(outcome.codeChanges) ? outcome.codeChanges.length : 0;
   const cause = outcome.cause ? ` — ${outcome.cause}` : '';
 
   if (outcome.repeatOf) {
@@ -315,17 +284,10 @@ function describeOutcome(outcome, { verbose = false } = {}) {
     lines.push('→ Reload the page where the orb is to see it (the manifest is served on load; nothing to publish).');
   } else if (outcome.manifestReverted) {
     lines.push(`Manifest fix tried and reverted: the replay did not pick the right action${cause}`);
-  }
-  if (written.length) {
-    lines.push(`Fixed in code: ${written.map((w) => w.path).join(', ')}`);
-    lines.push('→ Review the diff in your git, commit and deploy to see it; nothing was committed.');
-  } else if (proposed) {
-    lines.push(`${proposed} code change(s) proposed but none written`);
-  }
-  if (!outcome.manifestPatched && !written.length && !proposed && !outcome.manifestReverted) {
+  } else {
     lines.push(
       outcome.missingCapability
-        ? `No fix from here: your app has no operation for this — add one to your API: ${outcome.missingCapability}${cause}`
+        ? `No fix from here: your app has no operation for this — it is yours to add to your API: ${outcome.missingCapability}${cause}`
         : `No fix from here${cause}`,
     );
   }
@@ -356,24 +318,21 @@ async function handleEvidence(client, appRoot, evidence, { local, log, verbose =
   // Already judged on an identical record: the backend closed the run itself.
   if (claimed.settled) {
     for (const line of describeOutcome(claimed.settled, { verbose })) log(`  ${line}`);
-    return { ...claimed.settled, written: [], refused: [] };
+    return claimed.settled;
   }
 
   log('  Fixing…');
   const located = locateCode(appRoot, claimed.evidence || evidence, action);
   try {
+    // The backend writes the manifest (or nothing). Nothing comes back for
+    // this command to write: the repository is read, never touched.
     const outcome = await client.diagnose(runId, {
       evidenceId: evidence.id,
       codeFiles: located.files,
       notes: locateNotes(located),
     });
-    const applied = applyCodeChanges(appRoot, outcome.codeChanges, {
-      shown: new Set(located.files.map((f) => f.path)),
-    });
-    const result = { ...outcome, written: applied.written, refused: applied.refused };
-    for (const line of describeOutcome(result, { verbose })) log(`  ${line}`);
-    for (const r of applied.refused) log(`  refused ${r.path}: ${r.reason}`);
-    return result;
+    for (const line of describeOutcome(outcome, { verbose })) log(`  ${line}`);
+    return outcome;
   } catch (e) {
     if (!(e instanceof TrainApiError) || e.code !== 'diagnosis_failed') {
       try {
@@ -498,7 +457,6 @@ async function runTrain({
 module.exports = {
   TrainClient,
   TrainApiError,
-  applyCodeChanges,
   describeOutcome,
   handleEvidence,
   locateCode,

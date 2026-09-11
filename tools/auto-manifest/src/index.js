@@ -30,12 +30,13 @@
  *
  *   fiodos train [repo-root] --api-key <fyodos-project-api-key> [--local] [--once] [--verbose]
  *       The terminal carrier of the training agent: stays open while someone
- *       talks to the orb, sends the code behind each failing call to the
- *       backend for a diagnosis and writes proposed edits into the working
- *       tree (never a commit). Run it from the ROOT of the app's repository —
- *       the folder that holds the API as well as the page, in any language —
- *       because the call that failed was answered by the API, and a diagnosis
- *       that cannot see it can only rewrite the manifest. `--local` takes over from a project that trains
+ *       talks to the orb and sends the code behind each failing call to the
+ *       backend for a diagnosis. The code is READ, never written: the fix is
+ *       the MANIFEST (served to the orb at its next load), and what the code
+ *       cannot do is named for the developer to build. Run it from the ROOT
+ *       of the app's repository — the folder that holds the API as well as the
+ *       page, in any language — because the call that failed was answered by
+ *       the API. `--local` takes over from a project that trains
  *       through GitHub; `--once` handles what is waiting and exits. See
  *       src/train.js and docs/DESIGN_ENTRENAMIENTO_AGENTE_EXTERNO.md.
  *
@@ -2543,7 +2544,8 @@ async function fetchOrbCapability({ apiKey, apiUrl }) {
  *
  * Presents the terminal to the backend as a training session, then loops:
  * fetch the records the orb left, locate the code they point at, ask the
- * backend for the diagnosis, write proposed code edits (no commit). Ctrl-C
+ * backend for the diagnosis (which fixes the manifest or names what the app
+ * cannot do — this command writes nothing into the repository). Ctrl-C
  * ends the session — the backend hears the goodbye and stops treating a
  * single complaint as enough evidence (D20).
  */
