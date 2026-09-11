@@ -170,6 +170,73 @@ test('a session presents itself, diagnoses what is waiting, writes the edit and 
   const diagnose = backend.calls.find((c) => /diagnose$/.test(c.path));
   assert.ok(diagnose.body.codeFiles.length >= 1 && diagnose.body.codeFiles.length < 4);
   assert.ok(log.some((l) => /nothing was committed/i.test(l)));
+  // Straight to the point: the failure, "Fixing…", what was fixed and what to
+  // do to see it. The model's explanation only with --verbose.
+  assert.ok(log.some((l) => /^Failure found: “make the orb green” → update_colour$/.test(l)), log.join('\n'));
+  assert.ok(log.some((l) => /Fixing…/.test(l)));
+  assert.ok(log.some((l) => /Fixed in code: src\/api\/appearance\.ts/.test(l)));
+  assert.ok(log.some((l) => /commit and deploy to see it/.test(l)));
+  assert.ok(!log.some((l) => /Accept CSS colour names/.test(l)), 'explanation is verbose-only');
+});
+
+test('failures are fixed one at a time, oldest first, with the queue counted; a repeat is one line and no diagnosis', async () => {
+  const root = tmpApp();
+  const newest = { ...EVIDENCE, id: 'tre_2', message: 'has fallado' };
+  const backend = fakeBackend({ evidence: [newest, EVIDENCE] }); // the backend lists newest first
+  const inner = backend.fetchImpl;
+  backend.fetchImpl = async (url, init) => {
+    if (/\/evidence\/tre_2\/claim$/.test(new URL(url).pathname)) {
+      return {
+        ok: true, status: 200,
+        json: async () => ({
+          runId: 'run_2', evidence: newest, action: ACTION, neighbours: [], worked: [],
+          settled: { runId: 'run_2', class: 'D', cause: 'The API refused correctly.', status: 'nothing_wrong', repeatOf: 'run_1', repeatKind: 'failure' },
+        }),
+      };
+    }
+    return inner(url, init);
+  };
+  const log = [];
+  const result = await runTrain({
+    appRoot: root, apiKey: 'fyd_ok', apiUrl: 'https://api.test', once: true,
+    fetchImpl: backend.fetchImpl, log: (l) => log.push(l), sleep: async () => {},
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(result.handled.map((h) => h.evidenceId), ['tre_1', 'tre_2'], 'oldest first');
+  assert.ok(log.some((l) => /^Failure found: “make the orb green” → update_colour · 1 more waiting$/.test(l)), log.join('\n'));
+  assert.ok(log.some((l) => /^Failure found: “has fallado” → update_colour$/.test(l)));
+  assert.ok(log.some((l) => /Same failure already judged: nothing to fix — The API refused correctly\./.test(l)));
+  // The settled record never went to the diagnosis.
+  assert.ok(!backend.calls.some((c) => /run_2\/diagnose$/.test(c.path)));
+  // Only ONE "Fixing…" — the repeat did not pretend to work.
+  assert.equal(log.filter((l) => /Fixing…/.test(l)).length, 1);
+});
+
+test('a poll that fails is retried in silence; the terminal speaks only when it keeps failing', async () => {
+  const root = tmpApp();
+  const backend = fakeBackend();
+  let polls = 0;
+  const inner = backend.fetchImpl;
+  backend.fetchImpl = async (url, init) => {
+    const u = new URL(url);
+    if (u.pathname === '/v1/developer/training/evidence') {
+      polls += 1;
+      if (polls <= 3) return { ok: false, status: 502, json: async () => null };
+    }
+    return inner(url, init);
+  };
+  const log = [];
+  const controller = new AbortController();
+  const result = await runTrain({
+    appRoot: root, apiKey: 'fyd_ok', apiUrl: 'https://api.test',
+    fetchImpl: backend.fetchImpl, log: (l) => log.push(l), signal: controller.signal,
+    sleep: async () => { if (polls >= 4) controller.abort(); },
+  });
+  assert.equal(result.ok, true);
+  const complaints = log.filter((l) => /Could not read the records/.test(l));
+  assert.equal(complaints.length, 1, log.join('\n'));
+  assert.match(complaints[0], /3 times in a row .*502.*still trying/);
+  assert.ok(log.some((l) => /reachable again/.test(l)));
 });
 
 test('a project that trains through GitHub is not taken over without --local', async () => {

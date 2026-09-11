@@ -30,8 +30,8 @@ const { collectFiles } = require('./collect');
 
 const HEARTBEAT_MS = 30_000;
 const POLL_MS = 5_000;
-const MAX_FILES_PER_DIAGNOSIS = 12;
-const MAX_CHARS_PER_DIAGNOSIS = 200_000;
+const MAX_FILES_PER_DIAGNOSIS = 8;
+const MAX_CHARS_PER_DIAGNOSIS = 120_000;
 const MAX_CHARS_PER_FILE = 60_000;
 
 // ── Backend ──────────────────────────────────────────────────────────────────
@@ -240,17 +240,52 @@ function applyCodeChanges(appRoot, codeChanges, { io = fs } = {}) {
 
 // ── The session ──────────────────────────────────────────────────────────────
 
-function describeOutcome(outcome) {
+/**
+ * What the terminal says about one concluded run. Straight to the point: the
+ * engineer is watching people talk to the orb, not reading an essay. One line
+ * for the verdict, one for what was written and what they must do to see it
+ * (reload the page with the orb for a manifest fix; review, commit and deploy
+ * for a code fix). The model's explanation only with `verbose`.
+ */
+function describeOutcome(outcome, { verbose = false } = {}) {
   const lines = [];
-  const klass = outcome.class ? `class ${outcome.class}` : 'no class';
-  lines.push(`${klass}${outcome.cause ? ` — ${outcome.cause}` : ''}`);
-  if (outcome.manifestPatched) lines.push('manifest corrected and checked by replay; the orb serves it at its next load');
-  else if (outcome.manifestReverted) lines.push('manifest patch reverted: the replay did not pick the right action');
-  if (Array.isArray(outcome.codeChanges) && outcome.codeChanges.length) {
-    lines.push(`${outcome.codeChanges.length} code change(s) proposed`);
+  const written = Array.isArray(outcome.written) ? outcome.written : [];
+  const proposed = Array.isArray(outcome.codeChanges) ? outcome.codeChanges.length : 0;
+  const cause = outcome.cause ? ` — ${outcome.cause}` : '';
+
+  if (outcome.repeatOf) {
+    lines.push(
+      outcome.class === 'D'
+        ? `Same failure already judged: nothing to fix${cause}`
+        : `Same sentence already judged, no fix from here${cause}`,
+    );
+    return lines;
   }
-  if (outcome.explanation) lines.push(outcome.explanation);
-  if (outcome.locked) lines.push(`given up on this action after ${outcome.attempts} attempt(s) — retry from the dashboard`);
+  if (outcome.class === 'D') {
+    lines.push(`Nothing to fix: the call was refused correctly${cause}`);
+    return lines;
+  }
+  if (outcome.manifestPatched) {
+    lines.push(`Fixed in the manifest${cause}`);
+    lines.push('→ Reload the page where the orb is to see it (the manifest is served on load; nothing to publish).');
+  } else if (outcome.manifestReverted) {
+    lines.push(`Manifest fix tried and reverted: the replay did not pick the right action${cause}`);
+  }
+  if (written.length) {
+    lines.push(`Fixed in code: ${written.map((w) => w.path).join(', ')}`);
+    lines.push('→ Review the diff in your git, commit and deploy to see it; nothing was committed.');
+  } else if (proposed) {
+    lines.push(`${proposed} code change(s) proposed but none written`);
+  }
+  if (!outcome.manifestPatched && !written.length && !proposed && !outcome.manifestReverted) {
+    lines.push(
+      outcome.missingCapability
+        ? `No fix from here: your app has no operation for this — add one to your API: ${outcome.missingCapability}${cause}`
+        : `No fix from here${cause}`,
+    );
+  }
+  if (outcome.locked) lines.push(`Given up on this action after ${outcome.attempts} attempt(s) — retry from the dashboard.`);
+  if (verbose && outcome.explanation) lines.push(outcome.explanation);
   return lines;
 }
 
@@ -260,7 +295,7 @@ function describeOutcome(outcome) {
  * action is locked). Never throws for a single record's failure: the run is
  * marked failed in the backend and the session goes on.
  */
-async function handleEvidence(client, appRoot, evidence, { local, log, platform }) {
+async function handleEvidence(client, appRoot, evidence, { local, log, platform, verbose = false, waiting = 0 }) {
   let claimed;
   try {
     claimed = await client.claim(evidence.id, local);
@@ -270,7 +305,16 @@ async function handleEvidence(client, appRoot, evidence, { local, log, platform 
   }
   const { runId, action } = claimed;
   const phrase = evidence.message ? `“${evidence.message}”` : evidence.intent;
-  log(`Diagnosing ${phrase} (${evidence.intent}, class ${evidence.class || '?'})`);
+  const queue = waiting > 0 ? ` · ${waiting} more waiting` : '';
+  log(`Failure found: ${phrase} → ${evidence.intent}${queue}`);
+
+  // Already judged on an identical record: the backend closed the run itself.
+  if (claimed.settled) {
+    for (const line of describeOutcome(claimed.settled, { verbose })) log(`  ${line}`);
+    return { ...claimed.settled, written: [], refused: [] };
+  }
+
+  log('  Fixing…');
   const located = locateCode(appRoot, claimed.evidence || evidence, action, { platform });
   try {
     const outcome = await client.diagnose(runId, {
@@ -281,11 +325,10 @@ async function handleEvidence(client, appRoot, evidence, { local, log, platform 
         : 'No matching code file was found in the working tree.',
     });
     const applied = applyCodeChanges(appRoot, outcome.codeChanges);
-    for (const line of describeOutcome(outcome)) log(`  ${line}`);
-    for (const w of applied.written) log(`  wrote ${w.path}${w.summary ? ` — ${w.summary}` : ''}`);
+    const result = { ...outcome, written: applied.written, refused: applied.refused };
+    for (const line of describeOutcome(result, { verbose })) log(`  ${line}`);
     for (const r of applied.refused) log(`  refused ${r.path}: ${r.reason}`);
-    if (applied.written.length) log('  Review the diff in your git; nothing was committed.');
-    return { ...outcome, written: applied.written, refused: applied.refused };
+    return result;
   } catch (e) {
     if (!(e instanceof TrainApiError) || e.code !== 'diagnosis_failed') {
       try {
@@ -299,6 +342,10 @@ async function handleEvidence(client, appRoot, evidence, { local, log, platform 
   }
 }
 
+//: Polls that may fail before the terminal says so: the edge in front of the
+//: API answers an occasional 502 that the next poll does not see.
+const QUIET_POLL_FAILURES = 3;
+
 /**
  * The command. Stays open until `signal` aborts (Ctrl-C) or, with `once`,
  * until the records waiting right now are handled.
@@ -309,6 +356,7 @@ async function runTrain({
   apiUrl,
   local = false,
   once = false,
+  verbose = false,
   platform = 'web',
   fetchImpl,
   log = (line) => console.error(line),
@@ -356,6 +404,7 @@ async function runTrain({
 
   const handled = [];
   const aborted = () => Boolean(signal && signal.aborted);
+  let pollFailures = 0;
   try {
     // eslint-disable-next-line no-constant-condition
     while (true) {
@@ -363,18 +412,28 @@ async function runTrain({
       let list;
       try {
         list = await client.listEvidence(local);
+        if (pollFailures >= QUIET_POLL_FAILURES) log('Fiodos is reachable again.');
+        pollFailures = 0;
       } catch (e) {
         if (e instanceof TrainApiError && e.code === 'carrier_is_github') {
           log('The project switched to GitHub while this session was open; ending here.');
           break;
         }
-        log(`Could not read the records: ${(e && e.message) || e}`);
+        pollFailures += 1;
+        if (pollFailures === QUIET_POLL_FAILURES) {
+          log(`Could not read the records ${pollFailures} times in a row (${(e && e.message) || e}); still trying.`);
+        }
         list = { evidence: [] };
       }
-      const items = Array.isArray(list.evidence) ? list.evidence : [];
-      for (const ev of items) {
+      // Oldest first: the failures are fixed in the order they happened, one
+      // at a time — the next one starts only when this one has concluded.
+      const items = (Array.isArray(list.evidence) ? list.evidence : []).slice().reverse();
+      for (let i = 0; i < items.length; i += 1) {
         if (aborted()) break;
-        const outcome = await handleEvidence(client, root, ev, { local, log, platform });
+        const ev = items[i];
+        const outcome = await handleEvidence(client, root, ev, {
+          local, log, platform, verbose, waiting: items.length - i - 1,
+        });
         if (outcome) handled.push({ evidenceId: ev.id, intent: ev.intent, ...outcome });
       }
       if (once) break;

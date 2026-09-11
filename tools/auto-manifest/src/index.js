@@ -28,7 +28,7 @@
  *       This is how a web app gets the orb. What the orb can DO comes from the
  *       dashboard (analysis of a connected service), not from this command.
  *
- *   fiodos train [app-root] --api-key <fyodos-project-api-key> [--local] [--once]
+ *   fiodos train [app-root] --api-key <fyodos-project-api-key> [--local] [--once] [--verbose]
  *       The terminal carrier of the training agent: stays open while someone
  *       talks to the orb, sends the code behind each failing call to the
  *       backend for a diagnosis and writes proposed edits into the working
@@ -2585,6 +2585,7 @@ async function runTrainSession(target) {
     platform,
     local: process.argv.includes('--local'),
     once: process.argv.includes('--once'),
+    verbose: process.argv.includes('--verbose'),
     log: logUser,
     signal: controller.signal,
     // Wake the poll loop immediately on Ctrl-C instead of finishing the nap.
