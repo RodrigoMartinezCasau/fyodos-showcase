@@ -28,6 +28,14 @@
  *       This is how a web app gets the orb. What the orb can DO comes from the
  *       dashboard (analysis of a connected service), not from this command.
  *
+ *   fiodos train [app-root] --api-key <fyodos-project-api-key> [--local] [--once]
+ *       The terminal carrier of the training agent: stays open while someone
+ *       talks to the orb, sends the code behind each failing call to the
+ *       backend for a diagnosis and writes proposed edits into the working
+ *       tree (never a commit). `--local` takes over from a project that trains
+ *       through GitHub; `--once` handles what is waiting and exits. See
+ *       src/train.js and docs/DESIGN_ENTRENAMIENTO_AGENTE_EXTERNO.md.
+ *
  *   node src/index.js <target-app-root> --out <output-dir> \
  *       [--model claude-opus-4-8] [--max-input-tokens 150000] [--no-llm] \
  *       [--publish [--api-key <fyodos-project-api-key>] [--api-url <backend-url>]] \
@@ -458,6 +466,19 @@ async function main() {
     const pos = positionalArgs();
     if (pos[0] === 'install') {
       await runInstallOrb(pos[1] || '.');
+      return;
+    }
+  }
+
+  // ── Training mode: `fiodos train [dir] --api-key fyd_… [--local] [--once]` ─
+  // The terminal carrier of the training agent (docs/DESIGN_ENTRENAMIENTO_
+  // AGENTE_EXTERNO.md). Stays open while someone talks to the orb; the backend
+  // diagnoses, this command locates the code and writes proposed edits into
+  // the working tree without committing. See src/train.js.
+  {
+    const pos = positionalArgs();
+    if (pos[0] === 'train') {
+      await runTrainSession(pos[1] || '.');
       return;
     }
   }
@@ -2514,6 +2535,77 @@ async function fetchOrbCapability({ apiKey, apiUrl }) {
  * dashboard already knows what the orb can do. The only thing it needs from
  * the backend is the block itself, so what lands is always the current one.
  */
+/**
+ * Training mode (`fiodos train [dir] --api-key fyd_… [--local] [--once]`).
+ *
+ * Presents the terminal to the backend as a training session, then loops:
+ * fetch the records the orb left, locate the code they point at, ask the
+ * backend for the diagnosis, write proposed code edits (no commit). Ctrl-C
+ * ends the session — the backend hears the goodbye and stops treating a
+ * single complaint as enough evidence (D20).
+ */
+async function runTrainSession(target) {
+  const { runTrain } = require('./train');
+
+  const appRoot = path.resolve(target);
+  if (!fs.existsSync(appRoot)) {
+    logUser(`No such folder: ${appRoot}`);
+    process.exitCode = 1;
+    return;
+  }
+  const { apiKey, apiUrl } = resolveApiTarget();
+  if (!apiKey) {
+    logUser('Missing project key — copy the command from your Fiodos dashboard.');
+    process.exitCode = 1;
+    return;
+  }
+  if (/^fyd_pat_/.test(apiKey)) {
+    logUser('That is a personal account token. `train` signs with the PROJECT key (fyd_…) — copy the command from the Training agent card.');
+    process.exitCode = 1;
+    return;
+  }
+
+  const platformArg = (arg('--platform', '') || '').toLowerCase();
+  const platform = ['web', 'mobile', 'flutter', 'ios', 'android'].includes(platformArg)
+    ? platformArg
+    : (() => {
+        const detected = detectPlatform(appRoot, appRoot);
+        return detected === 'shopify' ? 'web' : detected || 'web';
+      })();
+
+  const controller = new AbortController();
+  const stop = () => controller.abort();
+  process.once('SIGINT', stop);
+  process.once('SIGTERM', stop);
+
+  const result = await runTrain({
+    appRoot,
+    apiKey,
+    apiUrl,
+    platform,
+    local: process.argv.includes('--local'),
+    once: process.argv.includes('--once'),
+    log: logUser,
+    signal: controller.signal,
+    // Wake the poll loop immediately on Ctrl-C instead of finishing the nap.
+    sleep: (ms) =>
+      new Promise((resolve) => {
+        if (controller.signal.aborted) return resolve();
+        const id = setTimeout(resolve, ms);
+        controller.signal.addEventListener('abort', () => {
+          clearTimeout(id);
+          resolve();
+        }, { once: true });
+      }),
+  });
+  process.off('SIGINT', stop);
+  process.off('SIGTERM', stop);
+  if (!result.ok) {
+    logUser(result.reason);
+    process.exitCode = 1;
+  }
+}
+
 async function runInstallOrb(target) {
   const {
     planInstall,
