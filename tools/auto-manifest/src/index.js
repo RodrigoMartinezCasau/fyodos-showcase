@@ -36,7 +36,10 @@
  *       cannot do is named for the developer to build. Run it from the ROOT
  *       of the app's repository — the folder that holds the API as well as the
  *       page, in any language — because the call that failed was answered by
- *       the API. `--local` takes over from a project that trains
+ *       the API, and because the diagnosis INVESTIGATES: it sees the index of
+ *       the repository and asks for the files or words it needs (the switch
+ *       in the page that does what one API file does not show), up to three
+ *       rounds. `--local` takes over from a project that trains
  *       through GitHub; `--once` handles what is waiting and exits. See
  *       src/train.js and docs/DESIGN_ENTRENAMIENTO_AGENTE_EXTERNO.md.
  *
@@ -476,9 +479,10 @@ async function main() {
 
   // ── Training mode: `fiodos train [dir] --api-key fyd_… [--local] [--once]` ─
   // The terminal carrier of the training agent (docs/DESIGN_ENTRENAMIENTO_
-  // AGENTE_EXTERNO.md). Stays open while someone talks to the orb; the backend
-  // diagnoses, this command locates the code and writes proposed edits into
-  // the working tree without committing. See src/train.js.
+  // AGENTE_EXTERNO.md). Stays open while someone talks to the orb; this
+  // command locates the code (and answers the model's requests for more of
+  // it, round by round), the backend diagnoses and writes the MANIFEST. The
+  // repository is read, never written. See src/train.js.
   {
     const pos = positionalArgs();
     if (pos[0] === 'train') {

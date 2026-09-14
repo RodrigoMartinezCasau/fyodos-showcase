@@ -171,9 +171,13 @@ function fakeBackend({
   settings = { enabled: false, carrier: 'terminal', maxAttempts: null },
   evidence = [],
   diagnosis = {},
+  // What the model asks for on the first round, when it asks (the backend
+  // answers `needs_code` and the terminal owes a second round).
+  askFirst = null,
 } = {}) {
   const calls = [];
   let served = false;
+  let diagnoseCalls = 0;
   const fetchImpl = async (url, init = {}) => {
     const u = new URL(url);
     const method = init.method || 'GET';
@@ -200,7 +204,11 @@ function fakeBackend({
       return json(200, { runId: 'run_1', evidence: evidence[0], action: ACTION, neighbours: [], worked: [] });
     }
     if (/\/runs\/run_1\/diagnose$/.test(u.pathname)) {
+      diagnoseCalls += 1;
       const sent = body.codeFiles.map((f) => f.path);
+      if (askFirst && diagnoseCalls === 1) {
+        return json(200, { status: 'needs_code', runId: 'run_1', round: 2, lookFor: askFirst, why: 'the page sends it from somewhere' });
+      }
       if (!sent.includes('src/api/appearance.ts')) return json(502, { detail: { error: 'diagnosis_failed', message: 'no code' } });
       return json(200, {
         runId: 'run_1',
@@ -261,6 +269,60 @@ test('a session presents itself, diagnoses what is waiting, reports the manifest
   assert.ok(log.some((l) => /Reload the page/.test(l)));
   assert.ok(!log.some((l) => /in code|commit|deploy/i.test(l)), log.join('\n'));
   assert.ok(!log.some((l) => /names the field the code declares/.test(l)), 'explanation is verbose-only');
+});
+
+test('when the model asks for more code, the terminal answers from the tree it read: named files whole, terms searched, the rest named as missing', async () => {
+  const root = tmpApp();
+  const before = snapshot(root);
+  const backend = fakeBackend({
+    evidence: [EVIDENCE],
+    askFirst: { files: ['Footer.tsx', 'src/nowhere.ts'], terms: ['header', 'zzz-nothing-says-this'] },
+    diagnosis: {
+      status: 'unresolved',
+      manifestPatched: false,
+      rounds: 2,
+      foundInCode: { file: 'src/ui/Footer.tsx', symbol: 'Footer', what: 'the switch that does it' },
+      missingCapability: 'accept it in PATCH /appearance',
+    },
+  });
+  const log = [];
+  const result = await runTrain({
+    appRoot: root,
+    apiKey: 'fyd_ok',
+    apiUrl: 'https://api.test',
+    once: true,
+    fetchImpl: backend.fetchImpl,
+    log: (l) => log.push(l),
+    sleep: async () => {},
+  });
+  assert.equal(result.ok, true, JSON.stringify(result));
+  assert.deepEqual(snapshot(root), before, 'two rounds of reading, nothing written');
+
+  const rounds = backend.calls.filter((c) => /diagnose$/.test(c.path)).map((c) => c.body);
+  assert.equal(rounds.length, 2);
+  assert.equal(rounds[0].round, 1);
+  assert.ok(rounds[0].repoIndex.includes('src/ui/Footer.tsx'), 'the index names every code path from round one');
+  assert.ok(!rounds[0].codeFiles.some((f) => f.path === 'src/ui/Footer.tsx'), 'but the page is not sent unasked');
+
+  const second = rounds[1];
+  assert.equal(second.round, 2);
+  const sent = second.codeFiles.map((f) => f.path);
+  assert.ok(sent.includes('src/ui/Footer.tsx'), 'a tail written from memory resolves to the one file that ends with it');
+  assert.equal(second.codeFiles.find((f) => f.path === 'src/ui/Footer.tsx').content, fs.readFileSync(path.join(root, 'src/ui/Footer.tsx'), 'utf8'), 'whole');
+  assert.ok(sent.includes('src/ui/Header.tsx'), 'the term found the file that mentions it');
+  assert.ok(sent.includes('src/api/appearance.ts'), 'what was on the table stays while it fits');
+  assert.equal(second.priorRounds.length, 1);
+  assert.deepEqual(second.priorRounds[0].asked, { files: ['Footer.tsx', 'src/nowhere.ts'], terms: ['header', 'zzz-nothing-says-this'] });
+  assert.ok(second.priorRounds[0].didNotCome.some((n) => n.path === 'src/nowhere.ts'));
+  assert.ok(second.priorRounds[0].didNotCome.some((n) => n.term === 'zzz-nothing-says-this'));
+  assert.ok(/Did NOT come: .*src\/nowhere\.ts/.test(second.notes), second.notes);
+
+  assert.ok(log.some((l) => /Reading more code: the page sends it from somewhere/.test(l)), log.join('\n'));
+  assert.ok(log.some((l) => /Exists in code, not reachable by the orb/.test(l)), log.join('\n'));
+  assert.ok(log.some((l) => /Found in code: src\/ui\/Footer\.tsx → Footer — the switch that does it/.test(l)));
+  assert.ok(log.some((l) => /Yours to expose in the API the orb calls: accept it in PATCH \/appearance/.test(l)));
+  assert.ok(log.some((l) => /read the code in 2 rounds/.test(l)));
+  assert.ok(!log.some((l) => /has no operation for this|nothing in the code does this/.test(l)), 'never "does not exist" about a thing it found');
 });
 
 test('failures are fixed one at a time, oldest first, with the queue counted; a repeat is one line and no diagnosis', async () => {

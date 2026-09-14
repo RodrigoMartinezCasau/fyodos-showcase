@@ -116,11 +116,14 @@ class TrainClient {
     });
   }
 
-  diagnose(runId, { evidenceId, codeFiles, notes }) {
+  diagnose(runId, { evidenceId, codeFiles, notes, round = 1, priorRounds = [], repoIndex = [] }) {
     return this._call('POST', `/v1/developer/training/runs/${encodeURIComponent(runId)}/diagnose`, {
       evidenceId,
       codeFiles,
       notes: notes || '',
+      round,
+      priorRounds,
+      repoIndex,
     });
   }
 
@@ -232,7 +235,125 @@ function locateCode(appRoot, evidence, action, { read = readSourceTree } = {}) {
     picked.push({ path: rel, content: file.content });
     used += file.content.length;
   }
-  return { files: picked, tooLarge, considered: files.length, terms: [...terms.keys()] };
+  const tree = new Map(files.map((f) => [f.rel.replace(/\\/g, '/'), f.content]));
+  return {
+    files: picked,
+    tooLarge,
+    considered: files.length,
+    terms: [...terms.keys()],
+    // The whole tree stays in memory for the rounds that follow: when the
+    // model asks for a file by name, it is answered from here, not re-read.
+    tree,
+    index: [...tree.keys()].sort(),
+  };
+}
+
+// How many files ONE search term may add to a round: enough to see a symbol's
+// definition and its callers, not enough for a common word to flood it.
+const MAX_FILES_PER_TERM = 4;
+const MAX_FILES_PER_ROUND = 12;
+
+function countHits(content, term) {
+  const hay = content.toLowerCase();
+  const needle = term.toLowerCase();
+  if (!needle) return 0;
+  let count = 0;
+  let idx = hay.indexOf(needle);
+  while (idx !== -1 && count < 50) {
+    count += 1;
+    idx = hay.indexOf(needle, idx + needle.length);
+  }
+  return count;
+}
+
+/**
+ * The next round's files, from what the model asked for (`lookFor`): the
+ * paths it named (whole, if they exist and fit), then the files a term points
+ * at (the ones not shown yet first), then what was already on the table while
+ * it fits. Port of `training/investigate.py` — what could not come is NAMED
+ * so the model never assumes it is reading a file it is not.
+ */
+function resolveLookFor(tree, lookFor, alreadySent) {
+  const sent = new Set((alreadySent || []).map((p) => String(p).replace(/\\/g, '/')));
+  const picked = [];
+  const pickedPaths = new Set();
+  const found = [];
+  const notFound = [];
+  let used = 0;
+
+  const take = (p) => {
+    if (pickedPaths.has(p)) return true;
+    const content = tree.get(p);
+    if (content === undefined) {
+      notFound.push({ path: p, reason: 'no such file in the repository' });
+      return false;
+    }
+    if (content.length > MAX_CHARS_PER_DIAGNOSIS) {
+      notFound.push({ path: p, reason: `too large to send whole (${content.length} chars)` });
+      return false;
+    }
+    if (used + content.length > MAX_CHARS_PER_DIAGNOSIS || picked.length >= MAX_FILES_PER_ROUND) {
+      notFound.push({ path: p, reason: "the round's budget is full; ask for it alone next round" });
+      return false;
+    }
+    picked.push({ path: p, content });
+    pickedPaths.add(p);
+    used += content.length;
+    found.push(p);
+    return true;
+  };
+
+  for (const raw of (lookFor && lookFor.files) || []) {
+    let p = String(raw || '').replace(/\\/g, '/').replace(/^(\.\/)+/, '').replace(/^\/+/, '');
+    if (!p) continue;
+    if (!tree.has(p)) {
+      // A path written from memory: accept the unique file that ends with it.
+      const tail = [...tree.keys()].filter((k) => k === p || k.endsWith(`/${p}`));
+      if (tail.length === 1) p = tail[0];
+    }
+    take(p);
+  }
+
+  for (const raw of (lookFor && lookFor.terms) || []) {
+    const term = String(raw || '').trim();
+    if (term.length < 2) continue;
+    const scored = [...tree.entries()]
+      .filter(([p]) => !pickedPaths.has(p))
+      .map(([p, content]) => ({ p, hits: countHits(content, term) }))
+      .filter((r) => r.hits > 0)
+      .sort((a, b) => b.hits - a.hits || a.p.localeCompare(b.p));
+    const unseen = scored.filter((r) => !sent.has(r.p));
+    let added = 0;
+    for (const { p } of unseen.length ? unseen : scored) {
+      if (added >= MAX_FILES_PER_TERM) break;
+      if (take(p)) added += 1;
+    }
+    if (added === 0) notFound.push({ term, reason: 'no file mentions it (or every one that does was already shown)' });
+  }
+
+  for (const raw of alreadySent || []) {
+    const p = String(raw).replace(/\\/g, '/');
+    const content = tree.get(p);
+    if (content === undefined || pickedPaths.has(p)) continue;
+    if (used + content.length > MAX_CHARS_PER_DIAGNOSIS || picked.length >= MAX_FILES_PER_ROUND) break;
+    picked.push({ path: p, content });
+    pickedPaths.add(p);
+    used += content.length;
+  }
+  return { files: picked, found, notFound };
+}
+
+function roundNotes(roundNo, resolved) {
+  const parts = [`Round ${roundNo}: files you asked for, from the working tree, each one complete.`];
+  if (resolved.found.length) parts.push(`Came: ${resolved.found.join(', ')}.`);
+  if (resolved.notFound.length) {
+    parts.push(
+      'Did NOT come: ' +
+        resolved.notFound.map((i) => `${i.path || i.term} (${i.reason})`).join('; ') +
+        '. Do not assume what those declare.',
+    );
+  }
+  return parts.join(' ');
 }
 
 /** What the brief says about where the code came from and what could not go. */
@@ -279,18 +400,27 @@ function describeOutcome(outcome, { verbose = false } = {}) {
     lines.push(`Nothing to fix: the call was refused correctly${cause}`);
     return lines;
   }
+  const found = outcome.foundInCode && outcome.foundInCode.file ? outcome.foundInCode : null;
   if (outcome.manifestPatched) {
-    lines.push(`Fixed in the manifest${cause}`);
+    const target = outcome.patchedIntent && outcome.patchedIntent !== outcome.intent ? ` (${outcome.patchedIntent})` : '';
+    lines.push(`Fixed in the manifest${target}${cause}`);
+    if (found) lines.push(`  Found in code: ${found.file}${found.symbol ? ` → ${found.symbol}` : ''}`);
     lines.push('→ Reload the page where the orb is to see it (the manifest is served on load; nothing to publish).');
   } else if (outcome.manifestReverted) {
     lines.push(`Manifest fix tried and reverted: the replay did not pick the right action${cause}`);
+  } else if (found && outcome.missingCapability) {
+    // The capability exists — the code does it — but the API the orb calls
+    // does not expose or accept it. That is the developer's to open, and
+    // this says exactly where it lives.
+    lines.push(`Exists in code, not reachable by the orb${cause}`);
+    lines.push(`  Found in code: ${found.file}${found.symbol ? ` → ${found.symbol}` : ''}${found.what ? ` — ${found.what}` : ''}`);
+    lines.push(`  → Yours to expose in the API the orb calls: ${outcome.missingCapability}`);
+  } else if (outcome.missingCapability) {
+    lines.push(`No fix from here: nothing in the code does this — it is yours to add to your API: ${outcome.missingCapability}${cause}`);
   } else {
-    lines.push(
-      outcome.missingCapability
-        ? `No fix from here: your app has no operation for this — it is yours to add to your API: ${outcome.missingCapability}${cause}`
-        : `No fix from here${cause}`,
-    );
+    lines.push(`No fix from here${cause}`);
   }
+  if (outcome.rounds > 1) lines.push(`  (read the code in ${outcome.rounds} rounds)`);
   if (outcome.locked) lines.push(`Given up on this action after ${outcome.attempts} attempt(s) — retry from the dashboard.`);
   if (verbose && outcome.explanation) lines.push(outcome.explanation);
   return lines;
@@ -313,7 +443,7 @@ async function handleEvidence(client, appRoot, evidence, { local, log, verbose =
   const { runId, action } = claimed;
   const phrase = evidence.message ? `“${evidence.message}”` : evidence.intent;
   const queue = waiting > 0 ? ` · ${waiting} more waiting` : '';
-  log(`Failure found: ${phrase} → ${evidence.intent}${queue}`);
+  log(`Failure found: ${phrase} → ${evidence.intent || 'the orb ran nothing'}${queue}`);
 
   // Already judged on an identical record: the backend closed the run itself.
   if (claimed.settled) {
@@ -325,14 +455,41 @@ async function handleEvidence(client, appRoot, evidence, { local, log, verbose =
   const located = locateCode(appRoot, claimed.evidence || evidence, action);
   try {
     // The backend writes the manifest (or nothing). Nothing comes back for
-    // this command to write: the repository is read, never touched.
-    const outcome = await client.diagnose(runId, {
-      evidenceId: evidence.id,
-      codeFiles: located.files,
-      notes: locateNotes(located),
-    });
-    for (const line of describeOutcome(outcome, { verbose })) log(`  ${line}`);
-    return outcome;
+    // this command to write: the repository is read, never touched. While
+    // the model asks for more code (`needs_code`), the asked-for files are
+    // taken from the tree already read and sent as the next round.
+    let codeFiles = located.files;
+    let notes = locateNotes(located);
+    let round = 1;
+    const priorRounds = [];
+    for (;;) {
+      const outcome = await client.diagnose(runId, {
+        evidenceId: evidence.id,
+        codeFiles,
+        notes,
+        round,
+        priorRounds,
+        repoIndex: located.index,
+      });
+      if (outcome.status !== 'needs_code') {
+        for (const line of describeOutcome(outcome, { verbose })) log(`  ${line}`);
+        return outcome;
+      }
+      const lookFor = outcome.lookFor || {};
+      const asked = [...(lookFor.files || []), ...(lookFor.terms || []).map((t) => `"${t}"`)];
+      log(`  Reading more code${outcome.why ? `: ${outcome.why}` : ''}${asked.length ? ` (${asked.slice(0, 6).join(', ')})` : ''}`);
+      const resolved = resolveLookFor(located.tree, lookFor, codeFiles.map((f) => f.path));
+      priorRounds.push({
+        round,
+        asked: lookFor,
+        why: outcome.why || '',
+        came: resolved.found,
+        didNotCome: resolved.notFound,
+      });
+      round = outcome.round || round + 1;
+      codeFiles = resolved.files;
+      notes = roundNotes(round, resolved);
+    }
   } catch (e) {
     if (!(e instanceof TrainApiError) || e.code !== 'diagnosis_failed') {
       try {
@@ -461,6 +618,8 @@ module.exports = {
   handleEvidence,
   locateCode,
   locateNotes,
+  resolveLookFor,
+  roundNotes,
   runTrain,
   termsFor,
   HEARTBEAT_MS,
